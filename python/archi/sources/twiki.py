@@ -229,6 +229,7 @@ from okg.deployment import ContentHashProbe
 from okg.deployment import file_preflight
 
 from archi.sources._sdk_adapter import ReaderAdapter
+from archi.sources._twiki_physics import PhysicsFilterReport, filter_records
 from archi.auth.cache import (
     cache_or_forced_live_change_probe,
     resolve_repo_path,
@@ -333,6 +334,7 @@ class TwikiEOSSource:
         preserve_tables: bool = False,
         preserve_images: bool = False,
         skip_patterns: tuple[str, ...] | list[str] = DEFAULT_SKIP_PATTERNS,
+        physics_filter: bool = False,
         records: list[TwikiRecord] | None = None,
         base: str | None = None,
     ) -> None:
@@ -369,6 +371,10 @@ class TwikiEOSSource:
         self.preserve_tables = preserve_tables
         self.preserve_images = preserve_images
         self.skip_patterns = tuple(skip_patterns)
+        # Physics scoping is opt-in: a deployment that says nothing gets
+        # the whole snapshot, exactly as before this option existed.
+        self.physics_filter = bool(physics_filter)
+        self.last_physics_report: PhysicsFilterReport | None = None
         self._records = records
         self.base = base
         self.change_probe = ContentHashProbe(
@@ -381,6 +387,7 @@ class TwikiEOSSource:
                 "seed_topics": list(self.seed_topics or ()),
                 "max_depth": self.max_depth,
                 "skip_patterns": list(self.skip_patterns),
+                "physics_filter": self.physics_filter,
                 "sites_path": self.sites_path,
                 "releases_path": self.releases_path,
                 "jira_records_path": self.jira_records_path,
@@ -483,7 +490,7 @@ class TwikiEOSSource:
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
         missing_seeds: tuple[str, ...] = ()
         if self._records is not None:
-            records = self._records
+            records = self._physics_scoped(self._records)
         else:
             # No preflight() call here: its only run-relevant work for a
             # present snapshot is the tree walk, which run() performs
@@ -508,6 +515,7 @@ class TwikiEOSSource:
                     ),
                 )
             records, missing_seeds = self._records_from_root(root)
+            records = self._physics_scoped(records)
         content_hash = _records_hash(records)
         revision = {
             "run_id": run_id,
@@ -597,6 +605,22 @@ class TwikiEOSSource:
             return records, ()
         walk = self._seed_walk(root)
         return list(walk.records), walk.missing_seeds
+
+    def _physics_scoped(self, records: list[TwikiRecord]) -> list[TwikiRecord]:
+        """Narrow the records to physics when the deployment asked for it.
+
+        Off by default and a no-op then — not even a copy of the list.
+        On, it composes with ``seed_topics`` (the walk decides which
+        topics are read, this decides which of them are physics) and
+        with fixture records, so a test corpus is scoped the same way a
+        snapshot is. The counts land on ``last_physics_report`` for the
+        operator; this module does no logging.
+        """
+        if not self.physics_filter:
+            return records
+        kept, report = filter_records(records)
+        self.last_physics_report = report
+        return kept
 
     def _seed_walk(self, root: Path) -> _EOSSeedWalk:
         """Seeded subtree walk through the snapshot (wisdqm behavior):
