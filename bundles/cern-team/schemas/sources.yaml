@@ -147,3 +147,57 @@ classes:
 # archi/schemas/sources.yaml -> <deployment>/schemas/sources.yaml and
 # archi/schemas/bridges/sources.yaml ->
 # <deployment>/schemas/bridges/sources.yaml.
+
+  CDSRecord:
+    description: >-
+      One record from the CERN Document Server, harvested over OAI-PMH:
+      a CMS Physics Analysis Summary, a CMS Note, or a paper. The
+      substrate's literature.Paper was considered and not reused -- it
+      is shaped for a frozen abstract corpus with a required doc_id and
+      sentence_count and per-sentence children, and fitting CDS records
+      to it would mean inventing values for fields that mean something
+      else.
+    class_uri: archi:CDSRecord
+    attributes:
+      recid:
+        required: true
+        description: Numeric CDS record id, from the OAI identifier.
+      title:
+      abstract:
+        description: dc:description — the record's abstract.
+      authors:
+        description: dc:creator values, joined with "; ".
+      subjects:
+        description: dc:subject values, joined with "; ".
+      date:
+      url:
+        description: The cds.cern.ch record URL.
+      oai_id:
+        description: Full OAI identifier, e.g. oai:cds.cern.ch:1149915.
+      sets:
+        description: OAI sets the record belongs to, joined with "; ".
+      report_number:
+        description: e.g. CMS-PAS-SUS-08-005.
+      report_kind:
+        description: PAS, NOTE, AN, IN, DP, PAPER or CR.
+      pag_code:
+        description: Three-letter PAG token from the report number.
+      analysis_code:
+        description: >-
+          PAG-YY-NNN as an analysis note is named, e.g. SUS-08-005. This
+          is the join key between a published summary and the internal
+          note behind it. Empty when the report number carries no PAG
+          token, so a consumer joining on it cannot match the wrong
+          thing.
+      other_report_numbers:
+        description: >-
+          Remaining report numbers when a record carries several, so the
+          extra identifiers are visible rather than silently dropped.
+      text:
+        description: Report number, title and abstract joined, for search.
+      label:
+    annotations:
+      archetype: artifact
+      transient: "false"
+      okg_alias_fields: report_number
+      okg_searchable_text_fields: title,abstract,report_number,text
