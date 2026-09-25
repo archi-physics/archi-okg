@@ -52,6 +52,11 @@ twiki_eos:
     # Optional seeded subtree instead of the whole snapshot:
     # seed_topics: [CMS/CompOpsHome]
     # max_depth: 2
+    # Optional physics scoping (off here, and off by default): narrows a
+    # CMS snapshot to physics topics -- PAG/POG/workbook roots, their
+    # parent-topic closure, and documentation page types -- and drops the
+    # computing-operations roots this bundle is otherwise built around.
+    # physics_filter: true
   sync:
     triggers: [manual, reconcile]
     default_event_mode: scope_complete
