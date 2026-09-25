@@ -306,6 +306,25 @@ _CMSSW_RE = re.compile(r"\bCMSSW_\d+_\d+_\d+(?:_[A-Za-z0-9_]+)?\b")
 # Generalized from the original's hardcoded CMS project-key alternation;
 # reference edges stay bounded by the known-key intersection below.
 _ISSUE_KEY_RE = re.compile(r"\b[A-Z][A-Z0-9_]*-\d+\b")
+# Dataset paths as DBS names them: /PrimaryDataset/ProcessingVersion/TIER.
+# The tier alternation is the whole defence against false positives.
+# Prose is full of slashes -- file paths, URLs, "signal/background",
+# fractions -- and a three-segment pattern with a free-form third
+# segment turns every one of them into a candidate. The known-target
+# intersection below would discard them, but only after the scan has
+# built a large candidate set on every chunk of every document.
+_DATASET_RE = re.compile(
+    r"(?<![\w/])"
+    r"/[A-Za-z0-9][A-Za-z0-9._-]*"          # primary dataset
+    r"/[A-Za-z0-9][A-Za-z0-9._-]*"          # processed / campaign
+    r"/(?:AOD|AODSIM|MINIAOD|MINIAODSIM|NANOAOD|NANOAODSIM|RAW|RECO|"
+    r"GEN|GEN-SIM|GEN-SIM-RECO|GEN-SIM-DIGI-RAW|USER|ALCARECO|DQMIO)"
+    r"(?![\w/])"
+)
+# Conditions global tags, e.g. 106X_dataRun2_v32 or 124X_mcRun3_2022_v4.
+# Anchored on the <cycle>X_ prefix, which is what makes a tag a tag
+# rather than an arbitrary underscore-joined token.
+_GLOBAL_TAG_RE = re.compile(r"\b\d{2,3}X_[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*\b")
 _HOST_RE = re.compile(
     r"(?<![\w.@-])"
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
@@ -357,6 +376,8 @@ class DocumentationSource:
         releases_map_path: str | None = None,
         jira_records_path: str | None = None,
         services_path: str | None = None,
+        datasets_path: str | None = None,
+        global_tags_path: str | None = None,
         repo_base_url: str = DEFAULT_REPO_BASE_URL,
         chunker_name: str = DEFAULT_CHUNKER_NAME,
         base: str | None = None,
@@ -369,6 +390,8 @@ class DocumentationSource:
         self.releases_map_path = releases_map_path
         self.jira_records_path = jira_records_path
         self.services_path = services_path
+        self.datasets_path = datasets_path
+        self.global_tags_path = global_tags_path
         self.repo_base_url = repo_base_url.rstrip("/")
         self.chunker_name = chunker_name
         self.base = base
@@ -462,6 +485,8 @@ class DocumentationSource:
             releases_map_path=self.releases_map_path,
             jira_records_path=self.jira_records_path,
             services_path=self.services_path,
+            datasets_path=self.datasets_path,
+            global_tags_path=self.global_tags_path,
             base=self.base,
         )
 
@@ -511,6 +536,8 @@ class SSOCookieDocsSource(DocumentationSource):
         releases_map_path: str | None = None,
         jira_records_path: str | None = None,
         services_path: str | None = None,
+        datasets_path: str | None = None,
+        global_tags_path: str | None = None,
         repo_base_url: str = DEFAULT_REPO_BASE_URL,
         chunker_name: str = DEFAULT_CHUNKER_NAME,
         base: str | None = None,
@@ -527,6 +554,8 @@ class SSOCookieDocsSource(DocumentationSource):
         self.releases_map_path = releases_map_path
         self.jira_records_path = jira_records_path
         self.services_path = services_path
+        self.datasets_path = datasets_path
+        self.global_tags_path = global_tags_path
         self.repo_base_url = repo_base_url.rstrip("/")
         self.chunker_name = chunker_name
         self.base = base
@@ -1006,6 +1035,22 @@ def _reference_edges(
             revision,
             match_type="jira_issue",
         )
+    for dataset in sorted(set(_DATASET_RE.findall(text)) & targets["dataset"]):
+        yield _reference_edge(
+            chunk_id,
+            f"dataset:{dataset}",
+            source_record_id,
+            revision,
+            match_type="dbs_dataset",
+        )
+    for tag in sorted(set(_GLOBAL_TAG_RE.findall(text)) & targets["global_tag"]):
+        yield _reference_edge(
+            chunk_id,
+            f"global_tag:{tag}",
+            source_record_id,
+            revision,
+            match_type="conditions_global_tag",
+        )
     service_lookup = targets["service"]
     matched_services: set[str] = set()
     for host in _HOST_RE.findall(text):
@@ -1052,6 +1097,8 @@ def _reference_targets(
     releases_map_path: str | None = None,
     jira_records_path: str | None = None,
     services_path: str | None = None,
+    datasets_path: str | None = None,
+    global_tags_path: str | None = None,
     base: str | None = None,
 ) -> dict[str, Any]:
     """Known reference targets.
@@ -1070,6 +1117,8 @@ def _reference_targets(
         ),
         "jira": _known_jira(jira_records_path, base=base),
         "service": _known_services(services_path, base=base),
+        "dataset": _known_datasets(datasets_path, base=base),
+        "global_tag": _known_global_tags(global_tags_path, base=base),
     }
 
 
@@ -1099,6 +1148,48 @@ def _known_sites(path: str | None, *, base: str | None = None) -> set[str]:
     payload = _configured_json(path, base=base)
     if isinstance(payload, dict):
         return {str(k) for k in payload}
+    return set()
+
+
+def _known_datasets(path: str | None, *, base: str | None = None) -> set[str]:
+    """Dataset names the graph has, from a DBS records cache.
+
+    Accepts the two shapes a cache is written in: a list of records
+    carrying ``dataset``/``name``, or a mapping keyed by dataset name.
+    Unconfigured means no dataset edges, which is the state of any
+    deployment that does not install DBS.
+    """
+    payload = _configured_json(path, base=base)
+    if isinstance(payload, dict):
+        return {str(key) for key in payload}
+    if isinstance(payload, list):
+        names: set[str] = set()
+        for item in payload:
+            if isinstance(item, dict):
+                name = item.get("dataset") or item.get("name")
+                if name:
+                    names.add(str(name))
+            elif isinstance(item, str):
+                names.add(item)
+        return names
+    return set()
+
+
+def _known_global_tags(path: str | None, *, base: str | None = None) -> set[str]:
+    """Conditions global tags the graph has, from a CondDB cache."""
+    payload = _configured_json(path, base=base)
+    if isinstance(payload, dict):
+        return {str(key) for key in payload}
+    if isinstance(payload, list):
+        tags: set[str] = set()
+        for item in payload:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("global_tag") or item.get("tag_name")
+                if name:
+                    tags.add(str(name))
+            elif isinstance(item, str):
+                tags.add(item)
+        return tags
     return set()
 
 

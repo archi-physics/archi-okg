@@ -327,6 +327,8 @@ class TwikiEOSSource:
         releases_path: str | None = None,
         jira_records_path: str | None = None,
         services_path: str | None = None,
+        datasets_path: str | None = None,
+        global_tags_path: str | None = None,
         view_base_url: str = DEFAULT_EOS_VIEW_BASE_URL,
         chunker_name: str = DEFAULT_EOS_CHUNKER_NAME,
         heading_style: str = "drop",
@@ -364,6 +366,8 @@ class TwikiEOSSource:
         self.releases_path = releases_path
         self.jira_records_path = jira_records_path
         self.services_path = services_path
+        self.datasets_path = datasets_path
+        self.global_tags_path = global_tags_path
         self.view_base_url = view_base_url.rstrip("/")
         self.chunker_name = chunker_name
         self.heading_style = heading_style
@@ -392,6 +396,8 @@ class TwikiEOSSource:
                 "releases_path": self.releases_path,
                 "jira_records_path": self.jira_records_path,
                 "services_path": self.services_path,
+                "datasets_path": self.datasets_path,
+                "global_tags_path": self.global_tags_path,
             },
             emit_targets=TwikiEOSSource,
         )
@@ -528,6 +534,8 @@ class TwikiEOSSource:
             releases_path=self.releases_path,
             jira_records_path=self.jira_records_path,
             services_path=self.services_path,
+            datasets_path=self.datasets_path,
+            global_tags_path=self.global_tags_path,
             base=self.base,
         )
 
