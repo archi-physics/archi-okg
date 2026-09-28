@@ -653,3 +653,35 @@ def test_adjacent_addresses_in_table_markup_are_both_removed(tmp_path):
     assert "tablealice" not in emitted
     (node,) = _nodes(facts, "jira_issue")
     assert node.attrs["description"] == "||owner||backup||\n|"
+
+
+def test_git_account_kept_and_next_address_still_removed(tmp_path):
+    # Operator decision (2026-09-28), changing #5's behavior for JIRA too:
+    # the literal git@ account of a git host is kept, so clone
+    # instructions survive; an address right after it is still removed,
+    # and ssh user@host logins still go.
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-305",
+        "summary": "Clone git@gitlab.cern.ch:cms/y.git",
+        "description": "\n".join([
+            "git clone git@github.com:x/y.git by gitnextaddr@cern.ch",
+            "then ssh sshloginaddr@lxplus.cern.ch",
+        ]),
+        "recent_comments": [],
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps([f.attrs for f in facts], sort_keys=True)
+    assert "gitnextaddr" not in emitted
+    assert "sshloginaddr" not in emitted
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["summary"] == "Clone git@gitlab.cern.ch:cms/y.git"
+    assert node.attrs["description"] == (
+        "git clone git@github.com:x/y.git by \nthen ssh "
+    )
+    chunk_text = "\n".join(
+        c.attrs["text"] for c in _nodes(facts, "document_chunk")
+    )
+    assert "git clone git@github.com:x/y.git by \n" in chunk_text
+    assert "Clone git@gitlab.cern.ch:cms/y.git" in chunk_text
