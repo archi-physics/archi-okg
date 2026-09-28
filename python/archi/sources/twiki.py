@@ -56,9 +56,11 @@ Email addresses are removed from every emitted text field (page title,
 author, parent topic, version, date, body, chunk text) by
 :func:`archi.enrichment.anonymizer.redact_email_addresses`, the same
 email-only pass the JIRA source uses, plus
-``redact_obfuscated_email_addresses`` for spelled-out forms
-(``jdoe[AT]cern.ch``, ``john.doe at cern.ch``); names are kept (operator decision
-for the cms-kb public chat, 2026-09-28). Chunks whose text held an
+``redact_obfuscated_email_addresses`` for bracketed spelled-out forms
+(``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``); names are kept (operator
+decision for the cms-kb public chat, 2026-09-28). Free-prose forms
+(``john.doe at cern.ch``) and the ``git@`` account of a git host
+(``git@github.com:org/x.git``) are kept. Chunks whose text held an
 address get new chunk ids on the next ingest.
 
 Deliberate parity deviations from the cms parser (its ``=code=``
@@ -1267,8 +1269,10 @@ def _without_email_addresses(record: TwikiRecord) -> TwikiRecord:
     Uses :func:`archi.enrichment.anonymizer.redact_email_addresses`, the
     email-only pass the JIRA source uses, then
     :func:`~archi.enrichment.anonymizer.redact_obfuscated_email_addresses`
-    for the spelled-out forms TWiki topics use (``jdoe[AT]cern.ch``,
-    ``john.doe at cern.ch``, ``NOSPAM``). Names (``Main.JohnDoe``, the
+    for the bracketed spelled-out forms TWiki topics use
+    (``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``), glued ``_at_`` forms
+    and ``NOSPAM``; free-prose ``john.doe at cern.ch`` and the ``git@``
+    account stay (operator rule, 2026-09-28). Names (``Main.JohnDoe``, the
     ``%META`` author) are kept. Neither decodes anything, so a field
     without an address comes back byte-identical and its chunk ids do
     not move.

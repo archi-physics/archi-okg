@@ -408,7 +408,6 @@ def test_redact_email_addresses_keeps_version_pins(text):
     [
         # Address-shaped but not mail: removed (fail closed).
         ("logo image@2x.png end", "logo  end"),
-        ("clone git@github.com:org/x", "clone :org/x"),
         ("see https://user@host.org/x", "see https:///x"),
         # A trailing numeric label is left; the address before it goes.
         ("v bob@cern.ch.123", "v .123"),
@@ -416,6 +415,71 @@ def test_redact_email_addresses_keeps_version_pins(text):
 )
 def test_redact_email_addresses_address_shaped_tokens(text, expected):
     assert redact_email_addresses(text) == expected
+
+
+# The literal git@ account of a git host is kept (operator decision,
+# 2026-09-28): copy-paste clone instructions must survive.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git clone git@github.com:org/x.git",
+        "git clone git@gitlab.cern.ch:group/y.git",
+        "git@gitlab.cern.ch:7999/group/y.git",
+        "git remote add origin ssh://git@gitlab.cern.ch:7999/cms/z.git",
+        "url = `git@github.com:cms-sw/cmssw.git`",
+        "url='git@github.com:x/y.git' and |git@github.com:a/b|",
+    ],
+)
+def test_redact_email_addresses_keeps_the_git_account(text):
+    assert redact_email_addresses(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A kept git@ token neither hides nor absorbs a real address after
+        # it, on the same line or directly adjacent.
+        (
+            "git@github.com:x/y.git by jdoe@cern.ch",
+            "git@github.com:x/y.git by ",
+        ),
+        (
+            "git@github.com:x/y.git,jdoe@cern.ch",
+            "git@github.com:x/y.git,",
+        ),
+        (
+            "jdoe@cern.ch pushed to git@gitlab.cern.ch:g/y.git",
+            " pushed to git@gitlab.cern.ch:g/y.git",
+        ),
+        # Only the literal "git" account with a literal "@" is kept.
+        ("mail john.git@cern.ch now", "mail  now"),
+        ("mail my-git@cern.ch now", "mail  now"),
+        ("mail GIT@cern.ch now", "mail  now"),
+        ("mail git&#64;cern.ch now", "mail  now"),
+        ("mail git%40cern.ch now", "mail  now"),
+        # ssh user@host logins are still removed (fail closed).
+        ("ssh jdoe@lxplus.cern.ch", "ssh "),
+        ("ssh -Y jdoe@lxplus.cern.ch -L 8080:host", "ssh -Y  -L 8080:host"),
+        ("scp f jdoe@lxplus.cern.ch:~/x", "scp f :~/x"),
+    ],
+)
+def test_redact_email_addresses_git_account_and_logins(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def test_redact_email_addresses_git_account_is_linear():
+    import time
+
+    crowded = [
+        "git@" * 10000,
+        "git@a.b " * 5000,
+        "git@a.b" * 5000,
+        " git@x.org:y jdoe@cern.ch" * 2000,
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_email_addresses(text)
+    assert time.perf_counter() - started < 1.0
 
 
 def _reference_redact(text):
@@ -456,15 +520,15 @@ def test_redact_email_addresses_matches_reference_on_random_text():
         ("mail jdoe{at}fnal.gov now", "mail  now"),
         ("mail j-doe(at)cern(dot)ch now", "mail  now"),
         ("end jdoe[AT]cern.ch. Next", "end . Next"),
-        # Word separators before a mail domain.
-        ("mail john.doe at cern.ch now", "mail  now"),
-        ("mail john.doe AT CERN.CH now", "mail  now"),
+        # Bracketed dots, any case, with any kind of "at" before them
+        # (operator rule, 2026-09-28: bracketed and parenthesised forms go).
+        ("mail JDOE [At] CERN [DOT] CH now", "mail  now"),
+        ("mail jdoe[at]cern dot ch now", "mail  now"),
+        ("mail jdoe at cern(dot)ch now", "mail  now"),
+        ("mail jdoe AT cern [DOT] ch now", "mail  now"),
+        # Glued word separators (not covered by the rule; kept removed).
         ("mail john.doe_at_cern.ch now", "mail  now"),
         ("mail john-doe-at-cern.ch now", "mail  now"),
-        ("mail jdoe AT cern DOT ch now", "mail  now"),
-        ("mail jdoe at fnal.gov now", "mail  now"),
-        ("mail jdoe AT gmail.com now", "mail  now"),
-        ("mail jdoe at cern.ch.", "mail ."),
         ("mail john.doe_at_physics.ucsd.edu now", "mail  now"),
         ("mail jdoe-at-fnal.gov now", "mail  now"),
         ("mail jdoe.x_NOSPAM_AT_cern.ch now", "mail  now"),
@@ -511,23 +575,42 @@ def test_redact_obfuscated_email_addresses_leaves_other_text_identical(text):
 @pytest.mark.parametrize(
     "text",
     [
-        # Known gaps (recorded in the PACT): a spaced word separator before
-        # a domain other than cern.ch / fnal.gov / gmail.com, and a glued
-        # one before a domain that is not .edu or .gov.
-        "jdoe at physics.ucsd.edu",
+        # Known gap (recorded in the PACT): a glued separator before a
+        # domain that is not cern.ch / fnal.gov / gmail.com, .edu or .gov.
         "jdoe_at_infn.it",
-        "jdoe AT host.cern.ch",
     ],
 )
 def test_redact_obfuscated_email_addresses_known_gaps(text):
     assert redact_obfuscated_email_addresses(text) == text
 
 
+# Operator rule (2026-09-28): free-prose "at ... dot" forms stay byte for
+# byte, even when they spell out an address.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mail john.doe at cern.ch now",
+        "mail john.doe AT CERN.CH now",
+        "mail jdoe AT cern DOT ch now",
+        "mail jdoe at cern dot ch now",
+        "mail jdoe at fnal.gov now",
+        "mail jdoe AT gmail.com now",
+        "mail jdoe at cern.ch.",
+        "jdoe at physics.ucsd.edu",
+        "jdoe AT host.cern.ch",
+        "based at cern.ch.",
+        "Main.JohnDoe at cern.ch",
+    ],
+)
+def test_redact_obfuscated_email_addresses_keeps_free_prose_forms(text):
+    assert redact_obfuscated_email_addresses(text) == text
+    assert redact_email_addresses(text) == text
+
+
 def test_redact_obfuscated_email_addresses_accepted_over_removal():
-    # One word before " at cern.ch" goes even when it is prose.
-    assert redact_obfuscated_email_addresses("based at cern.ch.") == "."
-    # A wiki-name directly before " at cern.ch" is taken as the local part.
-    assert redact_obfuscated_email_addresses("Main.JohnDoe at cern.ch") == ""
+    # Code-like text after a bracketed "(at)" goes with it.
+    assert redact_obfuscated_email_addresses("f(at)obj.attr") == ""
+    assert redact_obfuscated_email_addresses("f(at)x dot product") == ""
 
 
 def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
@@ -551,6 +634,13 @@ def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
         "x_NOSPAM_AT_" + "a_dot_" * 5000,
         "x_at_" + "a." * 20000 + "1",
         "x_at_" * 10000 + "a.edu",
+        # The bracketed-dot and spelled-dot rules added for the
+        # operator's rule.
+        "x at " + "a(dot)" * 5000 + "1",
+        "x at " + "a." * 20000 + "(dot)1",
+        "x at a(dot)" + "a dot " * 5000 + "1",
+        "x[at]" + "a dot " * 5000 + "1",
+        "a at " * 10000 + "b(dot)",
     ]
     started = time.perf_counter()
     for text in crowded:

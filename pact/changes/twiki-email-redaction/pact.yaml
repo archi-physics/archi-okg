@@ -10,8 +10,8 @@ why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (Twik
 
 
   This change removes addresses at emission with redact_email_addresses, the email-only pass
-  PR #5 added for the JIRA source, unchanged. It does not call Anonymizer.anonymize, which
-  also deletes names, greetings and sign-offs.
+  PR #5 added for the JIRA source. It does not call Anonymizer.anonymize, which also deletes
+  names, greetings and sign-offs.
 
 
   TWiki topics also spell addresses out, which redact_email_addresses does not cover because
@@ -19,7 +19,23 @@ why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (Twik
   jdoe AT cern DOT ch, and NOSPAM insertions. Over 1,261 candidate topics on the snapshot
   the @ pass left in 37 bracketed, 123 spaced word-separator, 6 glued word-separator and 8
   NOSPAM addresses. This change adds redact_obfuscated_email_addresses next to it in archi.enrichment.anonymizer
-  and calls it from the TWiki sources only; the JIRA source is unchanged.
+  and calls it from the TWiki sources only.
+
+
+  Operator rule for the spelled-out forms and git@ (Jason, 2026-09-28, "8a/a"): (1) remove
+  the bracketed and parenthesised forms ([AT], (at), (dot), [DOT], any case); (2) leave the
+  free-prose "at ... dot" forms alone (john.doe at cern.ch, jdoe AT cern DOT ch, "based at
+  cern.ch"); (3) in the shared redact_email_addresses, keep the literal git@ account form
+  (git clone git@github.com:org/x.git, git@gitlab.cern.ch:...) intact; (4) keep removing
+  ssh user@host logins (ssh jdoe@lxplus.cern.ch loses jdoe@lxplus.cern.ch). Two forms the
+  rule does not cover are decided conservatively and flagged for the operator: glued separators
+  (john.doe_at_cern.ch) and NOSPAM tokens stay removed.
+
+
+  JIRA BEHAVIOR CHANGE (rule item 3): redact_email_addresses is shared with the JIRA source
+  (PR #5, PACT jira-email-redaction), so a git@ token in JIRA text is now kept too, where
+  #5 turned git clone git@github.com:org/x into git clone :org/x. Nothing else in the JIRA
+  output changes. Lane B confirmed comp-ops does not rely on git@ being stripped.
 
 
   The change probes of both TWiki sources fingerprinted only the source class, not the module-level
@@ -33,11 +49,15 @@ why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (Twik
   new chunk ids (the chunk id hashes the chunk text), and a page whose author, parent topic
   or version held an address gets new attrs. Chunks and pages without an address keep their
   ids and text byte for byte. The probe change above also means the next ingest of every TWiki
-  deployment re-emits all topics once, whatever its snapshot.'
+  deployment re-emits all topics once, whatever its snapshot. For JIRA, a chunk or attr whose
+  text held a git@ token gets its git@ token back, so its text and chunk id change on the next
+  JIRA ingest (the anonymizer module is not in the JIRA change probe, so that happens when
+  the JIRA source re-emits for another reason).'
 affected_code:
 - python/archi/sources/twiki.py
 - python/archi/enrichment/anonymizer.py
 - python/tests/sources/test_twiki.py
+- python/tests/sources/test_jira.py
 - python/tests/enrichment/test_anonymizer.py
 requirements:
 - id: req.twiki-email-redaction.main
@@ -56,26 +76,44 @@ requirements:
     Two passes, both removing only the matched token and decoding nothing, so text without
     a match is returned byte-identical and its chunk id does not change:
 
-    - redact_email_addresses (from #5, unchanged): @, fullwidth @, %40, &#64; and the other
-    forms its PACT jira-email-redaction lists.
+    - redact_email_addresses (from #5): @, fullwidth @, %40, &#64; and the other forms its
+    PACT jira-email-redaction lists, with one change (operator rule item 3, shared with JIRA):
+    a token whose separator is a literal @ and whose local part is exactly git, or ends in
+    git after a character that cannot be in a name (quote, backtick, |, =, {), is kept
+    whole: git@github.com:org/x.git, ssh://git@gitlab.cern.ch:7999/x.git, `git@host:x`. The
+    kept token neither hides nor absorbs an address after it (git@github.com:x/y.git by
+    jdoe@cern.ch loses only jdoe@cern.ch). john.git@, my-git@, GIT@, git&#64; and git%40
+    are still removed. ssh user@host logins are still removed (rule item 4).
 
     - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
-    any case, before a dotted domain (. or (dot)) whose last label is two or more letters;
-    word separators " at ", " AT ", _at_, -at-, _AT_ and _NOSPAM_AT_ only before exactly cern.ch,
-    fnal.gov or gmail.com (. or DOT/dot/(dot) as the dot); the glued ones (_at_, -at-, _AT_,
-    _NOSPAM_AT_) also before a plain-dotted .edu or .gov domain; and a token carrying NOSPAM
+    any case, before a dotted domain (., a bracketed (dot) / [DOT], or a spaced dot) whose
+    last label is two or more letters; a spaced " at " (any case) before a domain with at
+    least one bracketed (dot) / [DOT] (jdoe at cern(dot)ch); glued separators _at_, -at-,
+    _AT_ and _NOSPAM_AT_ before exactly cern.ch, fnal.gov or gmail.com (., (dot), _dot_ or
+    a spaced DOT as the dot) or a plain-dotted .edu or .gov domain; and a token carrying NOSPAM
     that, with NOSPAM taken out, ends like a mail domain (.ch .edu .gov .org .com, DOTch ...,
-    cernch). Every form needs nothing domain- or path-like after it (no letter, digit, - or
-    _, and no . / : @ ( followed by one). Every repetition is bounded or unambiguous, so matching
-    is linear.
+    cernch), with a preceding name AT / name_at_ part. Every form needs nothing domain- or
+    path-like after it (no letter, digit, - or _, and no . / : @ ( followed by one). Every
+    repetition is bounded or unambiguous, so matching is linear.
 
 
-    Kept: names (Main.JohnDoe, John Doe, the %META author WikiName, the label of a mailto
+    Kept (operator rule item 2): free-prose "at ... dot" forms with only . or a spaced dot/DOT
+    as the dot, byte for byte, even when they spell an address: john.doe at cern.ch, jdoe
+    AT cern DOT ch, jdoe at fnal.gov, "based at cern.ch", Main.JohnDoe at cern.ch.
+
+
+    Also kept: names (Main.JohnDoe, John Doe, the %META author WikiName, the label of a mailto
     link), prose and file names that use "at" as a word ("run at 13.6 TeV", "x_2016_at_13TeV.root"),
     hosts and paths after a word separator ("served at cmsweb.cern.ch", "at xrootd.t2.ucsd.edu",
     "at cern.ch/cms", "at srm.unl.edu:8443"), a bracketed separator before a number or path
-    ("Run2 [at] 13.6TeV"), version pins (numpy@1.26.4), and NOSPAM alone or inside a name
-    (NoSpamFilter, TWiki.NOSPAMPlugin).
+    ("Run2 [at] 13.6TeV"), version pins (numpy@1.26.4), NOSPAM alone or inside a name
+    (NoSpamFilter, TWiki.NOSPAMPlugin), and git@ tokens as above.
+
+
+    Flagged for the operator (not covered by the rule; decided conservatively, i.e. removed):
+    the glued john.doe_at_cern.ch form, and NOSPAM tokens, including one after a spaced "name
+    AT" (jdoe AT NOSPAMcern.ch loses the whole token). A NOSPAM inserted into a real @ address
+    (jdoeNOSPAM@cern.ch, jdoe@NOSPAMcern.ch) is removed by the @ pass.
 
 
     Re-emission: both sources'' change probes fingerprint the source class, the twiki module
@@ -90,33 +128,37 @@ requirements:
 
     Accepted over-removal (fail closed), measured on the snapshot:
 
-    - user@host tokens that are logins, not mail, go as in #5: in a 200-page sample of address-bearing
-    topics, 91 of 586 removals were ssh user@lxplus..., git@github.com:org/x or similar, so
-    "git clone git@github.com:cms-sw/x.git" becomes "git clone :cms-sw/x.git".
+    - user@host tokens that are logins, not mail, go as in #5 (operator rule item 4): ssh
+    jdoe@lxplus.cern.ch becomes "ssh ", scp f jdoe@lxplus.cern.ch:~/x becomes "scp f :~/x".
+    Only the git@ account is exempt.
 
-    - One word before " at cern.ch" goes even when it is prose or a name ("based at cern.ch",
-    "Main.JohnDoe at cern.ch"). On the snapshot, of 123 spaced word-separator removals, 101
-    had a dotted or hyphenated name-shaped local part, 21 a single word, and 1 a common prose
-    word ("and").
-
-    - Code shaped like f(at)obj.attr goes.
+    - Code shaped like f(at)obj.attr or f(at)x dot product goes.
 
     - Table pipes and the TWiki ! escape directly before an address go with it (|x@cern.ch|).
 
 
-    Known gaps: spaced word separators before any other domain (jdoe at ucsd.edu, jdoe AT
-    host.cern.ch: one seen on the snapshot), glued ones before a domain other than .edu/.gov
-    (jdoe_at_infn.it), doubled spaces or a line break around " at " (the EOS parser collapses
-    whitespace; the crawl parser keeps line breaks), the entity form &lt;at&gt;, spaced dots
-    (cern . ch), fullwidth brackets, and the gaps PACT jira-email-redaction lists for the
-    @ pass (including a spaced " &#64; ").
+    Known gaps:
+
+    - Free-prose spelled-out addresses stay by operator decision (rule item 2), so john.doe
+    at cern.ch and jdoe AT cern DOT ch reach the chat. On the snapshot this is the largest
+    remaining group (see the real-data receipt).
+
+    - The git@ exemption keeps a real mailbox literally named git@ (git@cern.ch) and a git@
+    token that is followed by a dotted local-part run with no separator
+    (git@github.com.jdoe@cern.ch keeps jdoe; the #5 behavior also left @cern.ch there).
+
+    - Glued separators before a domain other than cern.ch, fnal.gov, gmail.com, .edu or .gov
+    (jdoe_at_infn.it), a bracketed form with doubled spaces or a line break inside it, the
+    entity form &lt;at&gt;, spaced dots (cern . ch), fullwidth brackets, and the gaps PACT
+    jira-email-redaction lists for the @ pass (including a spaced " &#64; ").
 
 
     Acceptance:
 
     - acc.twiki-email-redaction.fields: a snapshot topic with a distinct address in the author,
     version, parent topic, body plain, mailto link, %40, &#64;, +tag, HTML href and table
-    forms and six spelled-out forms emits no fact that contains any of them, keeps Main.JohnDoe,
+    forms and four bracketed, glued or NOSPAM forms emits no fact that contains any of them,
+    keeps its two free-prose forms byte for byte, keeps Main.JohnDoe,
     John Doe, Jane Roe and Alice Smith, and redacts the title and body of fixture records
     and the crawl source; an address across a chunk boundary leaves no fragment; the same
     tests fail on main. [evidence: executed_test]
@@ -125,9 +167,17 @@ requirements:
     "at" words but no address is emitted with exactly the parser''s text and the chunk id
     computed from it. [evidence: executed_test]
 
-    - acc.twiki-email-redaction.forms: redact_obfuscated_email_addresses removes each spelled-out
-    form, leaves prose, hosts, paths, file names and NOSPAM alone or in a name byte-identical,
-    and runs in linear time on long runs including dot-word chains. [evidence: executed_test]
+    - acc.twiki-email-redaction.forms: redact_obfuscated_email_addresses removes each bracketed,
+    glued and NOSPAM form, leaves free-prose "at ... dot" forms, hosts, paths, file names and
+    NOSPAM alone or in a name byte-identical, and runs in linear time on long runs including
+    dot-word chains. [evidence: executed_test]
+
+    - acc.twiki-email-redaction.rule: for each operator rule item there is a test that fails
+    at cb610275 or guards the kept behavior: bracketed forms removed (unit and TWiki source);
+    free-prose forms byte-identical (unit, and a TWiki topic holding only prose forms and git@
+    URLs keeps the parser''s exact text and chunk id); git@ kept, with an address after it
+    still removed (unit, TWiki source, and JIRA source); ssh user@host removed (unit, TWiki
+    source, and JIRA source). [evidence: executed_test]
 
     - acc.twiki-email-redaction.reemit: both sources'' change probes fingerprint the twiki
     and anonymizer modules. [evidence: executed_test]'
@@ -136,7 +186,9 @@ tasks:
   requirement: req.twiki-email-redaction.main
   verification: 'Redact the TWiki records in _facts_for_twiki_records before any fact is built,
     add redact_obfuscated_email_addresses to archi/enrichment/anonymizer.py, fingerprint both
-    modules in the change probes, and cover each field and form.
+    modules in the change probes, and cover each field and form. Apply the operator rule of
+    2026-09-28: keep free-prose forms, keep the git@ account in the shared @ pass (JIRA included),
+    keep removing bracketed forms and ssh user@host.
 
 
     Proof: the new tests fail against main and pass with the change, the full archi suite

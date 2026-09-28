@@ -1073,9 +1073,7 @@ EMAIL_TOPIC_LOCAL_PARTS = (
     "tableaddr",
     "bracketaddr",
     "parenaddr",
-    "word.addr",
     "glued.addr",
-    "spaced",
     "nospam.addr",
 )
 
@@ -1125,8 +1123,11 @@ def test_eos_email_addresses_removed_from_every_emitted_field(tmp_path):
     assert "Mail Alice Smith" in text
     assert "Bare link mailto:, url , entity , tagged ." in text
     assert "| Contact |  |" in text
-    assert text.endswith("Spelled: , , , , , .")
-    assert "cern" not in text.split("Spelled:")[1].casefold()
+    # Bracketed, glued and NOSPAM forms go; the two free-prose forms stay
+    # (operator rule, 2026-09-28).
+    assert text.endswith(
+        "Spelled: , , word.addr at cern.ch, , spaced AT cern DOT ch, ."
+    )
     assert run.health.status == "ok"
 
 
@@ -1233,3 +1234,53 @@ def test_crawl_email_addresses_removed_and_names_kept(monkeypatch):
     (chunk,) = _nodes(facts, "document_chunk")
     assert "Owner Main.JaneRoe ()." in chunk.attrs["text"]
     assert "| Jane Roe |  |" in chunk.attrs["text"]
+
+
+# --- operator rule for spelled-out forms and git@ (Jason, 2026-09-28) -------
+
+
+def _single_chunk_text(tmp_path, name, raw):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / f"{name}.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    (chunk,) = _nodes(facts, "document_chunk")
+    return chunk
+
+
+def test_eos_prose_forms_and_git_account_are_emitted_byte_identical(tmp_path):
+    # Free-prose "at ... dot" forms and the git@ account are not removed,
+    # so a topic holding only those keeps the parser's exact text and the
+    # chunk id computed from it.
+    raw = (
+        '%META:TOPICINFO{author="JohnDoe" date="1700000000" version="2"}%\n'
+        "---++ Setup\n"
+        "Write to john.doe at cern.ch or jdoe AT cern DOT ch; the group is "
+        "based at cern.ch.\n"
+        "<verbatim>\ngit clone git@github.com:cms-sw/cmssw.git\n"
+        "git remote add up git@gitlab.cern.ch:cms/y.git\n</verbatim>\n"
+    )
+    chunk = _single_chunk_text(tmp_path, "SetupTopic", raw)
+    expected_text = "SetupTopic " + strip_twiki(raw)
+    assert "john.doe at cern.ch" in expected_text
+    assert "git clone git@github.com:cms-sw/cmssw.git" in expected_text
+    assert chunk.attrs["text"] == expected_text
+    seed = f"twiki:CMS:SetupTopic\\0{0}\\0{expected_text}"
+    expected_id = "chunk:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    assert chunk.node_id == expected_id
+
+
+def test_eos_bracketed_forms_and_ssh_logins_removed_git_kept(tmp_path):
+    raw = (
+        "---++ Access\n"
+        "Mail bracketone[AT]cern.ch or brackettwo(at)cern(dot)ch or "
+        "bracketthree at cern[DOT]ch.\n"
+        "Log in with ssh sshuser@lxplus.cern.ch then run "
+        "git clone git@github.com:x/y.git by gitnext@cern.ch today.\n"
+    )
+    chunk = _single_chunk_text(tmp_path, "AccessTopic", raw)
+    text = chunk.attrs["text"]
+    for part in ("bracketone", "brackettwo", "bracketthree", "sshuser", "gitnext"):
+        assert part not in text
+    assert "Mail  or  or ." in text
+    assert "ssh  then run git clone git@github.com:x/y.git by  today." in text

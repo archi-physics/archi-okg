@@ -292,6 +292,24 @@ def _domain_end(text: str, start: int) -> int | None:
     return None
 
 
+def _is_git_account(text: str, sep: int, local: int) -> bool:
+    """Whether ``text[local:sep]`` ends in the literal ``git`` account of ``git@``.
+
+    The separator must be a literal ``@`` and the local part must be exactly
+    ``git``, or end in ``git`` after a character that cannot be part of a
+    name (a quote, backtick, ``|``, ``=``, ``{`` ...). So ``git@github.com``,
+    ``ssh://git@host``, ```git@host``` and ``url=git@host`` qualify, while
+    ``john.git@cern.ch``, ``my-git@cern.ch`` and ``git%40host`` do not.
+    """
+    if text[sep] != "@" or sep - 3 < local or text[sep - 3:sep] != "git":
+        return False
+    before = sep - 4
+    if before < local:
+        return True
+    char = text[before]
+    return not (_is_word(char) or char in ".-+" or char in _INVISIBLE)
+
+
 def redact_email_addresses(text: str) -> str:
     """Remove whole email addresses, including tagged and encoded forms.
 
@@ -305,7 +323,14 @@ def redact_email_addresses(text: str) -> str:
     Nothing is decoded: text that holds no address-shaped token (see the
     comment above for the exact shape) comes back byte-identical. Tokens
     that are address-shaped but not mail addresses, such as
-    ``image@2x.png`` or ``git@github.com``, are removed too (fail closed).
+    ``image@2x.png`` or the ``jdoe@lxplus.cern.ch`` of ``ssh
+    jdoe@lxplus.cern.ch``, are removed too (fail closed).
+
+    One exception (operator decision, 2026-09-28): the literal ``git@``
+    account of a git host is kept whole, so ``git clone
+    git@github.com:org/x.git`` and ``git@gitlab.cern.ch:group/y.git`` stay
+    intact (see :func:`_is_git_account` for the exact form). A kept ``git@``
+    token neither hides nor absorbs an address after it.
     """
     pieces: list[str] = []
     kept = 0  # text[kept:] is not yet copied to pieces
@@ -322,6 +347,10 @@ def redact_email_addresses(text: str) -> str:
         if end is None or local == sep:
             bound = domain_start
             continue
+        if _is_git_account(text, sep, local):
+            # Kept in place; no later local part may start inside it.
+            bound = end
+            continue
         pieces.append(text[kept:local])
         kept = bound = end
     if not pieces:
@@ -331,63 +360,82 @@ def redact_email_addresses(text: str) -> str:
 
 
 # Spelled-out ("anti-spam") address forms, which have no ``@`` at all and
-# so are outside redact_email_addresses. Measured on the cms-kb TWiki
+# so are outside redact_email_addresses. Operator rule (Jason,
+# 2026-09-28): remove the bracketed and parenthesised forms, and leave the
+# free-prose "at ... dot" forms alone. Measured on the cms-kb TWiki
 # snapshot (2026-09-28, 1,261 candidate topics of 43,888): bracketed
-# ``jdoe[AT]cern.ch`` / ``jdoe(at)cern(dot)ch`` (39), word separators
-# ``john.doe at cern.ch`` / ``AT`` / ``john.doe_at_cern.ch`` (about 120
-# with a bare ``cern.ch`` domain), and ``NOSPAM`` insertions (11).
+# ``jdoe[AT]cern.ch`` / ``jdoe(at)cern(dot)ch`` (37), glued
+# ``john.doe_at_cern.ch`` (6) and ``NOSPAM`` insertions (8) are removed;
+# spaced ``john.doe at cern.ch`` / ``jdoe AT cern DOT ch`` (123) are kept.
 #
 # - Bracketed ``(at)`` ``[at]`` ``{at}`` ``<at>`` (any case, optional
-#   spaces): any domain with a dot (``.`` or a bracketed ``(dot)``) whose
-#   last label is two or more letters, with nothing domain- or path-like
-#   after it (so ``Run2 [at] 13.6TeV`` stays).
-# - Word separators ``" at "``, ``" AT "``, ``_at_``, ``-at-``, ``_AT_``
-#   and ``_NOSPAM_AT_`` are ordinary words too ("run at 13.6 TeV",
-#   "served at cmsweb.cern.ch", "at xrootd.t2.ucsd.edu", file names like
-#   ``x_2016_at_13TeV.root``; 885 such matches in the same candidates),
-#   so they count only before one of three mail domains, exactly
-#   ``cern.ch``, ``fnal.gov`` or ``gmail.com`` (``.`` or ``DOT`` /
-#   ``dot`` / ``(dot)`` as the dot), with nothing domain- or path-like
-#   after it. Any host (``cmsweb.cern.ch``, ``cern.ch/cms``, a ``.edu``
-#   host) stays, and so does an address at any other domain. The glued
-#   forms (``_at_``, ``-at-``, ``_AT_``, ``_NOSPAM_AT_``) also count before
-#   a plain-dotted ``.edu`` or ``.gov`` domain.
+#   spaces): any domain with a dot (``.``, a bracketed ``(dot)`` /
+#   ``[DOT]``, or a spaced ``dot``) whose last label is two or more
+#   letters, with nothing domain- or path-like after it (so ``Run2 [at]
+#   13.6TeV`` stays).
+# - A spaced ``" at "`` (any case) before a domain with at least one
+#   bracketed ``(dot)`` / ``[DOT]``: ``jdoe at cern(dot)ch``.
+# - Free-prose word separators ``" at "`` / ``" AT "`` with only ``.`` or
+#   a spaced ``" dot "`` / ``" DOT "`` as the dot are never removed:
+#   ``john.doe at cern.ch``, ``jdoe AT cern DOT ch`` and "based at
+#   cern.ch" stay byte for byte.
+# - Glued separators ``_at_``, ``-at-``, ``_AT_`` and ``_NOSPAM_AT_`` (not
+#   covered by the operator rule; removed, and flagged for review) count
+#   only before exactly ``cern.ch``, ``fnal.gov`` or ``gmail.com`` (``.``,
+#   ``(dot)``, ``_dot_`` or a spaced ``DOT`` as the dot) or a plain-dotted
+#   ``.edu`` or ``.gov`` domain, with nothing domain- or path-like after it.
+#   ``x_2016_at_13TeV.root`` and ``x-at-2.3`` stay.
 # - A token that carries ``NOSPAM`` (any case) and, with it taken out,
 #   ends like a mail domain (``.ch``, ``.edu``, ``.gov``, ``.org``,
 #   ``.com``, ``DOTch`` ... or ``cernch``) is removed whole, with a
-#   preceding ``name AT`` / ``name_at_`` part. ``NOSPAM`` alone, or in a
-#   name such as ``NoSpamFilter``, stays.
+#   preceding ``name AT`` / ``name_at_`` part: the ``NOSPAM`` marker says
+#   the token is an address. ``NOSPAM`` alone, or in a name such as
+#   ``NoSpamFilter``, stays.
 #
 # Every repetition is bounded or unambiguous, so matching is linear.
 # Like redact_email_addresses this decodes nothing and only removes the
 # matched token, so text with no match comes back byte-identical.
-# Accepted over-removal: one word before " at cern.ch" goes even when it
-# is prose or a name ("based at cern.ch", "Main.JohnDoe at cern.ch" both
-# leave ""); ``f(at)obj.attr``-shaped code goes.
+# Accepted over-removal: ``f(at)obj.attr``-shaped code goes.
 _OBF_LOCAL = r"(?<![\w.+-])[\w.+-]{1,64}"
 _OBF_BRACKET_DOT = r"\s?[(\[{<]\s?dot\s?[)\]}>]\s?"
 _OBF_END = r"(?![\w-]|[./:@(][\w-])"
+# After a bracketed ``[at]`` any dot counts, bracketed or spelled out
+# (``jdoe[at]cern dot ch``): the brackets already mark the token.
+_OBF_ANY_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| dot )"
 _OBF_STRONG_RE = re.compile(
     _OBF_LOCAL
     + r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
-    + r"[\w-]+(?:(?:\.|" + _OBF_BRACKET_DOT + r")[\w-]+)*"
-    + r"(?:\.|" + _OBF_BRACKET_DOT + r")[^\W\d_]{2,}"
+    + r"[\w-]+(?:" + _OBF_ANY_DOT + r"[\w-]+)*"
+    + _OBF_ANY_DOT + r"[^\W\d_]{2,}"
     + _OBF_END,
     re.IGNORECASE,
 )
-_OBF_WORD_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| (?:DOT|dot) |_(?:DOT|dot)_)"
-_OBF_WEAK_RE = re.compile(
+# A spaced " at " is prose unless the domain after it has a bracketed
+# ``(dot)`` / ``[DOT]``: ``jdoe at cern(dot)ch`` goes, ``jdoe at cern.ch``
+# and ``jdoe AT cern DOT ch`` stay.
+_OBF_SPACED_BRACKET_DOT_RE = re.compile(
     _OBF_LOCAL
-    + r"(?: at | AT |_at_|-at-|_AT_|_NOSPAM_AT_)"
+    + r" at "
+    + r"[\w-]+(?:\.[\w-]+)*" + _OBF_BRACKET_DOT
+    + r"(?:[\w-]+" + _OBF_ANY_DOT + r")*"
+    + r"[^\W\d_]{2,}"
+    + _OBF_END,
+    re.IGNORECASE,
+)
+_OBF_GLUED_SEP = r"(?:_at_|-at-|_AT_|_NOSPAM_AT_)"
+_OBF_WORD_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| (?:DOT|dot) |_(?:DOT|dot)_)"
+_OBF_GLUED_MAIL_RE = re.compile(
+    _OBF_LOCAL
+    + _OBF_GLUED_SEP
     + r"(?i:cern" + _OBF_WORD_DOT + r"ch|fnal" + _OBF_WORD_DOT + r"gov"
     + r"|gmail" + _OBF_WORD_DOT + r"com)"
     + _OBF_END
 )
-# Glued separators are rarer in prose, so they also count before any
-# plain-dotted domain ending in .edu or .gov (john.doe_at_physics.ucsd.edu).
+# Glued separators also count before any plain-dotted domain ending in
+# .edu or .gov (john.doe_at_physics.ucsd.edu).
 _OBF_GLUED_RE = re.compile(
     _OBF_LOCAL
-    + r"(?:_at_|-at-|_AT_|_NOSPAM_AT_)"
+    + _OBF_GLUED_SEP
     + r"[\w-]{1,63}(?:\.[\w-]{1,63}){0,5}\.(?i:edu|gov)"
     + _OBF_END
 )
@@ -410,14 +458,16 @@ def _nospam_token(match: re.Match) -> str:
 
 def redact_obfuscated_email_addresses(text: str) -> str:
     """Remove spelled-out addresses: ``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``,
-    ``john.doe at cern.ch``, ``john.doe_at_cern.ch``, ``jdoe AT cern DOT ch``
-    and ``NOSPAM`` forms. See the comment above for the exact rules.
+    ``john.doe_at_cern.ch`` and ``NOSPAM`` forms. Free-prose forms such as
+    ``john.doe at cern.ch`` and ``jdoe AT cern DOT ch`` are kept. See the
+    comment above for the exact rules.
 
     Run it after :func:`redact_email_addresses`; it only removes matched
     tokens, so text without one is returned byte-identical.
     """
     out = _OBF_STRONG_RE.sub("", text)
-    out = _OBF_WEAK_RE.sub("", out)
+    out = _OBF_SPACED_BRACKET_DOT_RE.sub("", out)
+    out = _OBF_GLUED_MAIL_RE.sub("", out)
     out = _OBF_GLUED_RE.sub("", out)
     return _OBF_NOSPAM_RE.sub(_nospam_token, out)
 
