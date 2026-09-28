@@ -722,33 +722,27 @@ def test_compops_template_names_an_adapter_that_runs(tmp_path, source_id):
     assert adapter.preflight().status == "ok"
     run, facts = _run(adapter)
     assert run.completed_scope is True
-    assert [f for f in facts if isinstance(f, NodeFact) and f.subtype == subtype]
+    primary = [f for f in facts if isinstance(f, NodeFact) and f.subtype == subtype]
+    assert primary
+    # The declared identity fields are the keys the reader actually emits for
+    # its primary records, so the declaration describes the real record key.
+    for fact in primary:
+        assert set(fact.source_record_id) == set(entry["record_identity_fields"]), (
+            f"{source_id}: {fact.node_id} is keyed by {sorted(fact.source_record_id)}"
+            f" but the template declares {entry['record_identity_fields']}"
+        )
 
 
-#: Templates whose profile tuple the substrate still refuses, and the clause
-#: it rejects. NOT about the adapter, and not fixed here: `okg install` of a
-#: pasted template fails with `deployment.source_registry.profile_invalid`
-#: before any run. Seven declare `record_identity_kind: remote_id` under a
-#: profile that allows only `scoped_locator` (discovery_crawl) or `domain_key`
-#: (reference_catalog); WMStats declares `content_hash` revisions under
-#: mutable_api, which allows only `updated_at` or `version_token`. Fixing
-#: either means deciding what key or revision each reader emits (compare the
-#: Indico fix above), which changes reader output, so it is tracked
-#: separately. Remove an entry when it is fixed; the test fails if you forget.
-COMPOPS_TEMPLATE_KNOWN_REFUSALS = {
-    "cric": "record_identity_kind='remote_id'",
-    "cric_core": "record_identity_kind='remote_id'",
-    "dqm": "record_identity_kind='remote_id'",
-    "gocdb_downtimes": "record_identity_kind='remote_id'",
-    "conddb_global_tags": "record_identity_kind='remote_id'",
-    "dbs_datasets": "record_identity_kind='remote_id'",
-    "github_repos": "record_identity_kind='remote_id'",
-    "wmstats_workflows": "source_revision_kind='content_hash'",
-}
+def test_compops_template_profile_tuples_are_all_accepted():
+    """Call the substrate's own validator on each template, as install does.
 
-
-def test_compops_template_profile_tuples_match_the_known_refusals():
-    """Call the substrate's own validator on each template, as install does."""
+    Each template once declared a combination `okg install` refused with
+    `deployment.source_registry.profile_invalid`: `record_identity_kind:
+    remote_id` under discovery_crawl or reference_catalog, and `content_hash`
+    revisions under mutable_api for WMStats. The fix is in the declaration
+    only: the readers' emitted record keys and node ids are unchanged, and
+    match what the okg-deployments cms registry declared for the same code.
+    """
     from okg.substrate.sources.profiles import validate_profile_tuple
 
     refused = {}
@@ -763,14 +757,46 @@ def test_compops_template_profile_tuples_match_the_known_refusals():
                 publication_mode=entry.get("publication_mode"),
             )
         except ValueError as exc:
-            reasons = [
-                line.strip()[2:]
-                for line in str(exc).splitlines()
-                if line.strip().startswith("- ")
-            ]
-            assert len(reasons) == 1, f"{source_id}: {exc}"
-            refused[source_id] = reasons[0].split(" not in ", 1)[0]
-    assert refused == COMPOPS_TEMPLATE_KNOWN_REFUSALS
+            refused[source_id] = str(exc)
+    assert not refused, (
+        "these templates would fail `okg install` with "
+        "deployment.source_registry.profile_invalid:\n\n"
+        + "\n\n".join(f"{name}: {why}" for name, why in sorted(refused.items()))
+    )
+
+
+@pytest.mark.parametrize("source_id", sorted(_COMPOPS_READERS))
+def test_compops_template_passes_strict_registry_admission(source_id):
+    """Admit the pasted template the way a registry load does, then bind it.
+
+    Uses okg's own admission and `source_adapter_init_params` on the strict
+    contract, as the bundle test above does. This is what caught the GitHub
+    template's bare `params:` (null), which strict admission refuses with
+    `source_params_not_mapping`.
+    """
+    import dataclasses
+
+    from okg.substrate.ingest.adapter_factory import source_adapter_init_params
+    from okg.substrate.sources.registry import (
+        STRICT_ADMISSION_CONTRACT,
+        admit_source_registry_document,
+    )
+
+    module_name, _subtype = _COMPOPS_READERS[source_id]
+    entry = _docstring_template(module_name, source_id)
+    admission = admit_source_registry_document(
+        {"sources": {source_id: entry}}, registry_path=Path("registry.yaml")
+    )
+    strict = dataclasses.replace(
+        admission.entries[source_id], admission_contract=STRICT_ADMISSION_CONTRACT
+    )
+    params = source_adapter_init_params(
+        strict,
+        dsn="postgresql://localhost/unused",
+        deployment="unused",
+        adapter_class=getattr(importlib.import_module(module_name), entry["class"]),
+    )
+    assert set(entry["params"]) <= set(params)
 
 
 def test_a_bare_compops_reader_lacks_the_field_the_runner_reads(tmp_path):

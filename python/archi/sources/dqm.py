@@ -39,7 +39,7 @@ from a substrate module. ::
             - data_certification recorded_during run
             - data_certification references dataset
       source_class: discovery_crawl
-      record_identity_kind: remote_id
+      record_identity_kind: scoped_locator
       record_identity_fields: [certification_id]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope

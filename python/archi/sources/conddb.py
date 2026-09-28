@@ -42,7 +42,7 @@ Registry-entry template — same three prerequisites as
             - global_tag supersedes global_tag
             - global_tag depends_on cmssw_release
       source_class: reference_catalog
-      record_identity_kind: remote_id
+      record_identity_kind: domain_key
       record_identity_fields: [global_tag]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope

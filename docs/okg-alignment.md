@@ -27,12 +27,18 @@ repositories each gain a registry adapter (`CRICAdapter`, `CRICCoreAdapter`,
 `DBSDatasetAdapter`, `WMStatsWorkflowAdapter`, `GitHubRepoAdapter`), and the
 registry template in each reader's docstring now names it. Before, the template
 named the bare reader, and okg's runner failed every run because the reader's
-result has no `next_cursor`. Tested against okg `5b2fd076c`. **Still blocked:**
-all eight templates declare a profile combination okg refuses at install
-(`record_identity_kind: remote_id` for seven, `content_hash` revisions under
-`mutable_api` for WMStats), so a pasted template still fails `okg install`.
-A test pins that list. HyperNews, SITECONF, the four MONIT readers and
-`CERNPreflightSource` have no adapter yet.
+result has no `next_cursor`. Tested against okg `5b2fd076c`.
+
+**Their templates now pass okg's install checks (2026-09-27).** The eight
+templates had declared profile combinations okg refuses; they now declare
+`scoped_locator` (CRIC, CRIC core, DQM, GOCDB), `domain_key` (CondDB, DBS,
+GitHub repositories) and `updated_at` revisions (WMStats), which is what the
+okg-deployments cms registry declared for the same reader code. No reader
+code changed, so no node is re-keyed. The GitHub template's empty `params:`
+became `{}`, which strict admission requires. Tests run each template through
+okg's profile check and strict registry admission, on both okg `5b2fd076c`
+and okg `dev` @ `fdf5638bf`. HyperNews, SITECONF, the four MONIT readers and
+`CERNPreflightSource` still have no adapter.
 
 **CI reads `mitdbg/okg` directly; pin bumped `5b2fd076c` → `ac078aabd`
 (2026-09-27, OKG#1906).** Every CI run since 2026-09-24 failed at the okg install

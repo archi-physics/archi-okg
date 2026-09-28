@@ -38,15 +38,16 @@ module (code_repos family), as in the cms deployment. ::
           edges:
             - software_repository references repo
       source_class: reference_catalog
-      record_identity_kind: remote_id
+      record_identity_kind: domain_key
       record_identity_fields: [repo]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope
       publication_mode: published_generation
       required_for_baseline: false
-      params:
-        # cms defaults (DEFAULT_REPOS); override per instance
-        # repos: [dmwm/WMCore, cms-sw/cmssw, ...]
+      # params: cms defaults (DEFAULT_REPOS); override per instance with
+      # repos: [dmwm/WMCore, cms-sw/cmssw, ...]. An empty mapping, not a
+      # bare `params:` (null), which strict admission refuses.
+      params: {}
       sync:
         triggers: [manual, reconcile]
         default_event_mode: scope_complete
