@@ -1998,3 +1998,66 @@ def test_a_lone_escape_on_a_text_page_is_kept_with_its_text(tmp_path, sources, v
     build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
     page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Lone.txt"].decode("utf-8")
     assert page.startswith(f"---+ Page\n{value}\n")
+
+
+# --- seventh review: short escapes, string sequences, the word rule, paths ------
+
+SHORT_AND_STRING_ESCAPES = [
+    "jdoe\x1b\\@example.org",
+    "jdoe@example\x1b\\.org",
+    "jdoe\x1bPq\x1b\\@example.org",
+    "jdoe\x1b>@example.org",
+]
+#: Forms no sequence grammar reads: ESC ( followed by a non-ASCII letter, and
+#: a format character inside [at] before a host with no dot. The word rule
+#: refuses them: a word with a hidden character and an @ or [at].
+WORD_RULE_ONLY = ["jdoe\x1b(é@example.org", "jdoe[‎at]laptop"]
+
+
+@pytest.mark.parametrize("value", SHORT_AND_STRING_ESCAPES + WORD_RULE_ONLY)
+def test_a_short_or_string_escape_in_an_address_in_json_refuses(tmp_path, sources, value):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"Logged by {value} today."
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize("value", SHORT_AND_STRING_ESCAPES + WORD_RULE_ONLY)
+def test_a_short_or_string_escape_in_an_address_on_a_text_page_refuses(
+    tmp_path, sources, value
+):
+    (sources["twiki-eos"] / "Short.txt").write_bytes(
+        f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
+    )
+    with pytest.raises(
+        BuildRefused, match="Short.txt: an address is split by a control character"
+    ):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_a_hidden_character_in_an_address_in_a_file_path_refuses(tmp_path, sources):
+    (sources["twiki-eos"] / "jdoe‎@example.org.txt").write_bytes(
+        b"---+ Page\nPlain text.\n" + PADDING
+    )
+    with pytest.raises(BuildRefused, match="file path .*split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_a_hidden_character_in_a_word_without_a_separator_is_kept_or_stripped(
+    tmp_path, sources
+):
+    # Not new behaviour (it passes on 6adb358 too): the word rule looks only
+    # at words that also have an @ or a spelled-out separator.
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = (
+        "See \x1b[1mbold\x1b[0m, price\x1b 5, mail jdoe@example.org (at) noon."
+    )
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert stored[0]["description"] == "See bold, price\x1b 5, mail  (at) noon."
+    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 2

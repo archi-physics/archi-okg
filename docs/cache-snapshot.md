@@ -96,31 +96,53 @@ For every group the build:
    tab, form feed and carriage return do not count, and neither do the
    characters of ANSI colour sequences (`ESC[32m`).
 
-   Before anything is stripped or redacted, each text file and each JSON
-   string and key is checked for hidden characters in or next to an
-   address. Hidden characters are those control characters plus every
-   invisible format character (Unicode category Cf, such as U+200E, U+2068
-   or U+FEFF), except soft hyphen, zero-width space, zero-width non-joiner,
-   zero-width joiner and word joiner, which the redactor already reads as
-   part of an address. Both redactors match three copies of the value: one
-   with its hidden characters removed; one that also drops the second
-   character of each terminal sequence (the `[` of `ESC [`); and one that
-   also drops whole terminal sequences, as a terminal would show the text.
-   Terminal sequences here are `ESC [` and U+009B CSI sequences, `ESC` +
-   intermediate bytes + a final byte (`ESC ( B`) and OSC strings
-   (`ESC ] 0;title BEL`). If any match contains, or sits directly next to, a
-   hidden character or any character of a terminal sequence, the group is
-   refused. So `jdoe<DEL>x@example.org`, `j<DEL>doe.x(at)example(dot)org`,
-   `jdoe@example<ESC>.org`, `jdoe<U+009B>@example.org`,
-   `jdoe<U+200E>x@example.org` and `<U+2068>jdoe<U+2069>@example.org` are
-   refused. Two consequences are accepted: an address wrapped directly in
-   colour codes (`ESC[31mjdoe@example.org ESC[0m`) is refused rather than
-   cleaned, and so is a string where a control character only joins a word
-   to an address (`word<control>jdoe@example.org`). Tab, newline, vertical
-   tab, form feed, carriage return and the Unicode line and paragraph
-   separators (U+2028, U+2029) are not hidden characters: they show as
-   breaks, so `jdoe<CR>x@example.org` stores `jdoe<CR>` as two separate
-   words would.
+   Before anything is stripped or redacted, each text file, each JSON
+   string and key, and each archive path is checked for hidden characters
+   in or next to an address. Hidden characters are those control
+   characters plus every invisible format character (Unicode category Cf,
+   such as U+200E, U+2068 or U+FEFF), except soft hyphen, zero-width space,
+   zero-width non-joiner, zero-width joiner and word joiner, which the
+   redactor already reads as part of an address. The check has two rules,
+   and either one refuses the group:
+
+   - **Word rule.** The value is split into words at whitespace (space,
+     tab, newline, carriage return, vertical tab, form feed, no-break
+     space, U+2028, U+2029). A word that has a hidden character and, once
+     its hidden characters are removed, an `@` (or full-width or small
+     `@`) or a bracketed `at` or `dot` (`[at]`, `(at)`, `{at}`, `[dot]`,
+     `(dot)`, `{dot}`, any case) is refused. This rule needs no knowledge
+     of terminal sequences: `jdoe<ESC>(é@example.org` and
+     `jdoe[<U+200E>at]laptop` are refused by it.
+   - **Match rule.** Both redactors match three copies of the value: one
+     with its hidden characters removed; one that also drops the character
+     after each `ESC` that starts a terminal sequence (the `[` of `ESC [`);
+     and one that also drops every terminal sequence whole. Terminal
+     sequences here are, tried in this order: CSI (`ESC [` or U+009B,
+     parameters, a final byte); OSC strings (`ESC ]` or U+009D, ended by
+     BEL, `ESC \` or U+009C); DCS, SOS, PM and APC strings (`ESC P`,
+     `ESC X`, `ESC ^`, `ESC _` or their 8-bit forms, ended by `ESC \` or
+     U+009C); and any other `ESC` + optional intermediate bytes + a final
+     byte (`ESC ( B`, `ESC >`, `ESC \`). If any match contains, or sits
+     directly next to, a hidden character or any character of a terminal
+     sequence, the group is refused.
+
+   So `jdoe<DEL>x@example.org`, `j<DEL>doe.x(at)example(dot)org`,
+   `jdoe@example<ESC>.org`, `jdoe<ESC>\@example.org`,
+   `jdoe<U+009B>@example.org`, `jdoe<U+200E>x@example.org`,
+   `<U+2068>jdoe<U+2069>@example.org` and a file named
+   `jdoe<U+200E>@example.org.txt` are refused. Accepted consequences: an
+   address wrapped directly in colour codes (`ESC[31mjdoe@example.org
+   ESC[0m`) is refused rather than cleaned; so is a string where a control
+   character only joins a word to an address
+   (`word<control>jdoe@example.org`), and any word that mixes a hidden
+   character with an `@`, such as a coloured shell prompt
+   (`ESC[32mjdoe@laptop ESC[0m:~$`), even when it is not an address. A
+   hidden character in a word with no `@` or bracketed `at`/`dot` is left
+   to the match rule and otherwise kept (or stripped, for a CSI colour
+   code). Tab, newline, vertical tab, form feed, carriage return and the
+   Unicode line and paragraph separators (U+2028, U+2029) are not hidden
+   characters: they show as breaks, so `jdoe<CR>x@example.org` stores
+   `jdoe<CR>` as two separate words would.
 
    Only a value that passes this check has its ANSI CSI sequences
    (`ESC [` + parameters + a final byte) removed and is then redacted. A

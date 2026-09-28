@@ -417,6 +417,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         raise GroupRefused(group.name, f"no cache files found in {source}")
 
     for archive_path in final:
+        _refuse_hidden_address(group.name, f"file path {archive_path}", archive_path)
         if redact_email_addresses(archive_path) != archive_path:
             raise GroupRefused(
                 group.name, f"a file path contains an email address: {archive_path}"
@@ -646,14 +647,24 @@ CONTROL_MIN_COUNT = 16
 #: ANSI CSI escape sequences (terminal colours pasted from logs), removed
 #: from text after the hidden-address check and before redaction.
 _CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
-#: Terminal sequences a terminal would not print, for the hidden-address
-#: check only (they are not stripped): CSI in its 7-bit and 8-bit (U+009B)
-#: forms, ``ESC`` + intermediates + final byte (``ESC ( B`` from
-#: ``tput sgr0``), and OSC strings (``ESC ] 0;title BEL``).
+#: Terminal escape sequences, for the hidden-address check only (they are
+#: not stripped), tried in this order: CSI in its 7-bit and 8-bit (U+009B)
+#: forms; OSC strings (``ESC ] 0;title BEL``); DCS, SOS, PM and APC strings
+#: (``ESC P`` ... ``ESC \``, 7-bit or 8-bit); and any other ``ESC`` +
+#: optional intermediates + a final byte (``ESC ( B`` from ``tput sgr0``,
+#: ``ESC >``, ``ESC \``).
 _SEQUENCE_RE = re.compile(
     r"(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"
-    r"|\x1b[\x20-\x2f]+[\x30-\x7e]"
     r"|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
+    r"|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c)"
+    r"|\x1b[\x20-\x2f]*[\x30-\x7e]"
+)
+#: What separates words for the piece rule of the hidden-address check.
+_WORD_BREAK_RE = re.compile("[ \t\n\r\x0b\x0c\u00a0\u2028\u2029]+")
+#: An address separator in a word: ``@`` (also full-width and small), or a
+#: bracketed ``at`` or ``dot`` (``[at]``, ``(at)``, ``{at}``, ``[dot]``, ...).
+_SEPARATOR_RE = re.compile(
+    r"[@\uff20\ufe6b]|[\[({]\s*(?:at|dot)\s*[\])}]", re.IGNORECASE
 )
 
 
@@ -704,7 +715,12 @@ def _redaction_mask(text: str) -> bytearray:
 def _refuse_hidden_address(group: str, where: str, text: str) -> None:
     """Refuse ``text`` when an address has a hidden character in or next to it.
 
-    Runs on the input, before terminal sequences are stripped. Both
+    Runs on the input, before terminal sequences are stripped. First, without
+    any grammar: the text is split into words at whitespace (space, tab, LF,
+    CR, VT, FF, no-break space, U+2028, U+2029), and a word that has a
+    hidden character (:data:`_HIDDEN_RE`) and, with its hidden characters
+    removed, an ``@`` or a bracketed ``at`` or ``dot`` (:data:`_SEPARATOR_RE`)
+    refuses the group. Then both
     redactors (addresses, then spelled-out addresses, repeated) match three
     copies of the text:
 
@@ -712,7 +728,7 @@ def _refuse_hidden_address(group: str, where: str, text: str) -> None:
     - also without the second character (``[``, ``(``, ``]``) of each
       terminal sequence (:data:`_SEQUENCE_RE`), so ``jdoe ESC [ @example.org``
       reads ``jdoe@example.org``;
-    - also without whole terminal sequences, as a terminal would show it
+    - also without every match of :data:`_SEQUENCE_RE`
       (``jdoe ESC ( B x@example.org`` reads ``jdoex@example.org``).
 
     A matched stretch refuses the group when, in ``text``, it contains or
@@ -726,6 +742,13 @@ def _refuse_hidden_address(group: str, where: str, text: str) -> None:
         hidden[match.start()] = 1
     if not any(hidden):
         return
+    for word in _WORD_BREAK_RE.split(text):
+        if _HIDDEN_RE.search(word) and _SEPARATOR_RE.search(_HIDDEN_RE.sub("", word)):
+            raise GroupRefused(
+                group,
+                f"{where}: an address is split by a control character (a word "
+                "with a hidden character has an @ or a spelled-out separator)",
+            )
     suspect = bytearray(hidden)
     introducers = bytearray(hidden)
     for match in _SEQUENCE_RE.finditer(text):
