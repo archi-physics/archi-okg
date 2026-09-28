@@ -86,8 +86,10 @@ requirements:
     a local part could run from its end into any separator the @ pass recognises (@, fullwidth
     or small @, %40, %2540, &#64;, &commat; and their &amp; layers): the scan after the host
     crosses every local-part character (+ = ! # $ * ^ ` { | } ~ '' % & . - _, letters with
-    accents, invisible characters), &amp; and encoded-dot tokens, and a quoted string that
-    ends at a separator. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch,
+    accents, invisible characters), &amp; and encoded-dot tokens (read whole, so &amp;#46;
+    is one encoded dot), and a quoted string that ends at a separator. A git@ token inside
+    a quoted string whose closing quote is followed by a separator ("x git@host:y z"@cern.ch)
+    is not kept either. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch,
     git@gitlab.cern.ch.o''brien@cern.ch, ''git@github.com.jdoe''@cern.ch and git@github.com.jdoe"x"@cern.ch
     lose the whole span, as they would with no exemption, while :, /, a space or other text
     after the host stops the scan and keeps git@host:path. Invariant, checked by a differential

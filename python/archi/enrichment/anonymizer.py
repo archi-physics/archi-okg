@@ -51,6 +51,7 @@ Name replacement and text extraction for NER are kept verbatim.
 """
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 from html import unescape
@@ -318,8 +319,17 @@ def _runs_into_separator(text: str, start: int) -> bool:
             return True
         char = text[i]
         if char == "&":
-            token = _LOCAL_TOKEN_RE.match(text, i)
-            i = token.end() if token else i + 1
+            # The longest token, as _local_start's fullmatch sees it:
+            # ``&amp;#46;`` is one encoded dot, not ``&amp;`` then ``#46;``.
+            ends = [
+                token.end()
+                for token in (
+                    _DOT_TOKEN_RE.match(text, i),
+                    _LOCAL_TOKEN_RE.match(text, i),
+                )
+                if token
+            ]
+            i = max(ends) if ends else i + 1
         elif char == '"':
             # ``git@host.jdoe"@cern.ch`` and ``git@host.jdoe"x y"@cern.ch``:
             # the quote may close or open a quoted local part.
@@ -338,7 +348,23 @@ def _runs_into_separator(text: str, start: int) -> bool:
     return False
 
 
-def _is_git_account(text: str, sep: int, local: int, end: int) -> bool:
+def _in_quoted_local(quotes: Sequence[int], text: str, local: int, end: int) -> bool:
+    """Whether ``text[local:end]`` sits in a quoted string that ends at a separator.
+
+    ``quotes`` holds the position of every ``"`` in ``text``, in order.
+    ``"x git@host y"@cern.ch`` is a quoted local part that holds the token.
+    Line breaks are not checked, so a quote pair across lines also counts
+    (fail closed). A binary search keeps this O(log n) per token.
+    """
+    k = bisect.bisect_left(quotes, end)
+    if k == 0 or k == len(quotes) or quotes[k - 1] >= local:
+        return False
+    return _SEP_AT_RE.match(text, quotes[k] + 1) is not None
+
+
+def _is_git_account(
+    text: str, sep: int, local: int, end: int, quotes: Sequence[int]
+) -> bool:
     """Whether the token ``text[local:end]`` is the literal ``git@`` account.
 
     The separator at ``sep`` must be a literal ``@``; the local part must be
@@ -354,11 +380,15 @@ def _is_git_account(text: str, sep: int, local: int, end: int) -> bool:
     ``'git@host.jdoe'@cern.ch``, ``git@host.jdoe"x"@cern.ch``), its tail may
     be part of that address's local part, so it is not kept (fail closed).
     ``git@host:path``, ``git@host/path`` and ``git@host`` before a space
-    stop the scan and are kept.
+    stop the scan and are kept. Nor may the token sit inside a quoted local
+    part (``"x git@host:y z"@cern.ch``); ``quotes`` lists every ``"`` in
+    ``text``.
     """
     if text[sep] != "@" or sep - 3 < local or text[sep - 3:sep] != "git":
         return False
     if any(char not in _GIT_WRAPPERS for char in text[local:sep - 3]):
+        return False
+    if _in_quoted_local(quotes, text, local, end):
         return False
     return not _runs_into_separator(text, end)
 
@@ -388,6 +418,7 @@ def redact_email_addresses(text: str) -> str:
     pieces: list[str] = []
     kept = 0  # text[kept:] is not yet copied to pieces
     bound = 0  # no local part may start before this
+    quotes: list[int] | None = None  # every '"' position, built on first use
     for core in _SEP_CORE_RE.finditer(text):
         if core.start() < bound:
             continue
@@ -400,7 +431,9 @@ def redact_email_addresses(text: str) -> str:
         if end is None or local == sep:
             bound = domain_start
             continue
-        if _is_git_account(text, sep, local, end):
+        if quotes is None and text[sep] == "@":
+            quotes = [match.start() for match in re.finditer('"', text)]
+        if _is_git_account(text, sep, local, end, quotes or ()):
             # Kept in place; no later local part may start inside it.
             bound = end
             continue

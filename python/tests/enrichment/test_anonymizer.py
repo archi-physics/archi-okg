@@ -542,6 +542,27 @@ def test_redact_email_addresses_git_account_is_linear():
         # the "@" and the token goes the #5 way.)
         ("git@github.com.jdoe&#46;x@cern.ch", "@cern.ch"),
         ("git@github.com.jdoe%2ex@cern.ch", ""),
+        # Double-escaped encoded dots are one token, as the leftward scan
+        # reads them (review finding on b657568d).
+        ("see git@john.doe+&amp;#46;x@cern.ch now", "see  now"),
+        ("clone git@github.com&amp;#46;1@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;#46;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;#x2e;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;period;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;amp;#46;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&AMP;#X2E;x@cern.ch now", "clone  now"),
+        # A token inside a quoted local part goes as it would with no
+        # exemption (found by fuzzing b657568d). The rest of the quoted
+        # part stays either way: a local part never starts inside an
+        # earlier token (the #5 behavior for any address in quotes).
+        ('"x git@github.com:y z"@cern.ch', '"x :y z"@cern.ch'),
+        ('"git@github.com##]"@cern.ch', '"##]"@cern.ch'),
+        ('"git@h.cern.cha:com"&commat;cern.ch', '":com"&commat;cern.ch'),
+        ('say "hi git@github.com:x"@cern.ch', 'say "hi :x"@cern.ch'),
+        (
+            'url: "git@github.com:x/y.git" and jdoe@cern.ch',
+            'url: "git@github.com:x/y.git" and ',
+        ),
         # Uppercase.
         ("git@GITHUB.COM.JDOE+X@CERN.CH", ""),
         ("git@github.com.JDOE+x&#X40;CERN.CH", ""),
@@ -575,6 +596,7 @@ def test_redact_email_addresses_git_token_local_part_characters(char):
         "git@github.com.jdoe",
         "git@github.com.jdoe now",
         'say "git@github.com:x/y.git" here',
+        'say "hi" to git@github.com:x/y.git and "q" there',
     ],
 )
 def test_redact_email_addresses_git_token_positives_still_kept(text):
@@ -618,14 +640,19 @@ def _git_exemption_inputs():
     import random
 
     rng = random.Random(20260928)
-    prefixes = ["", "clone ", "'", "`", "|", "{", '"', "ssh://", "x "]
+    prefixes = [
+        "", "clone ", "'", "`", "|", "{", '"', "ssh://", "x ", '"x ', "x@",
+        '"a" ', "&#64;", '"\n',
+    ]
     hosts = ["github.com", "gitlab.cern.ch", "GITHUB.COM", "h.cern．ch"]
     tails = ["", ".jdoe", ".jdoe.1", ".jdoe-", ".jdoé", ".JDOE", ".o"]
     joiners = list("+=!#$*^`{|}~'\"") + [
         "", ".", "-", "_", "%", "&", ":", "/", " ", ";", ",", "\n",
         "&amp;", "&#46;", "%2e", "­", "​", "．", '"x y"', '"x"',
+        "&#x2e;", "&period;", "&amp;#46;", "&amp;#x2e;", "&amp;period;",
+        "&amp;amp;#46;", "&AMP;#X2E;", "&#0046", "⁠", "́",
     ]
-    locals_ = ["", "x", "ops", "1", "brien", '"q"']
+    locals_ = ["", "x", "ops", "1", "brien", '"q"', ' y"', ':y z"']
     seps = [
         "@", "＠", "﹫", "%40", "%2540", "&#64;", "&#064", "&#x40;",
         "&commat;", "&amp;#64;", "&amp;amp;#x0040;", "",
@@ -673,10 +700,10 @@ def test_redact_email_addresses_git_exemption_never_keeps_part_of_an_address(
     state = {"off": False, "kept": []}
     original = anonymizer._is_git_account
 
-    def patched(text, sep, local, end):
+    def patched(text, sep, local, end, *rest):
         if state["off"]:
             return False
-        keep = original(text, sep, local, end)
+        keep = original(text, sep, local, end, *rest)
         if keep:
             state["kept"].append((local, sep, end))
         return keep
@@ -702,12 +729,15 @@ def test_redact_email_addresses_git_exemption_never_keeps_part_of_an_address(
             assert re.fullmatch(r"[`'|{]*git", text[local:sep]), text
             # Take "git@" out: the wrappers and host must not be part of
             # any address-shaped span of what remains. Of the text before
-            # the token only an opening quote can join a local part
-            # (_local_start stopped at everything else), so the rest of
-            # the prefix is left out rather than glued to the host.
-            lead = '"' if local and text[local - 1] == '"' else ""
+            # the token only quotes can join a local part (_local_start
+            # stopped at everything else), so the prefix keeps its quotes
+            # and line breaks and every other character becomes a space,
+            # rather than gluing an earlier separator to the host.
+            lead = "".join(
+                char if char in '"\n' else " " for char in text[:local]
+            )
             probe = lead + text[local:sep - 3] + text[sep + 1:]
-            region = (len(lead), len(lead) + (sep - 3 - local) + (end - sep - 1))
+            region = (local, local + (sep - 3 - local) + (end - sep - 1))
             for start, stop in _address_spans(probe):
                 assert stop <= region[0] or start >= region[1], (
                     text, probe[start:stop]
@@ -735,6 +765,9 @@ def test_redact_email_addresses_git_scan_is_linear():
         ('git@a.b"' + "x" * 20 + " ") * 5000,
         ('git@a.b"x"') * 10000,
         "git@a.b\"" + "git@a.b " * 20000,
+        '"' + "git@a.b " * 10000 + '"@x.yz',
+        '"' + "git@a.b " * 10000,
+        ('"q" git@a.b ') * 10000 + '"@x.yz',
     ]
     started = time.perf_counter()
     for text in crowded:
