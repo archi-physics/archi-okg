@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -136,11 +137,17 @@ def write_sources(root: Path) -> dict[str, Path]:
     )
     _write_json(
         dirs["cric"] / "compute_units.json",
-        {"MIT-CE1": {"corepower": 11.0, "state": "ACTIVE"}},
+        {"MIT-CE1": {"corepower": 11.0, "potential_max": 20000.0, "state": "ACTIVE"}},
     )
     _write_json(
         dirs["cric"] / "responsibilities.json",
-        {"result": [["adalove", "MIT Bates", "Site Executive"]], "status": "ok"},
+        {
+            "desc": {"columns": ["username", "site_name", "role"]},
+            "result": [
+                ["adalove", "MIT Bates", "Site Executive"],
+                ["ghopper", None, "Site Admin"],  # a null site, as in real exports
+            ],
+        },
     )
     _write_json(
         dirs["cric-core"] / "services.json",
@@ -442,7 +449,7 @@ def test_fields_the_readers_never_read_are_dropped(built):
     cric = read_archive(out / "cric.tar.zst")
     assert "contact_email" not in json.loads(cric["data/cric/sites.json"])["T2_US_MIT"]
     assert json.loads(cric["data/cric/responsibilities.json"]) == {
-        "result": [["adalove", "MIT Bates", "Site Executive"]]
+        "result": [["adalove", "MIT Bates", "Site Executive"], ["ghopper", None, "Site Admin"]]
     }
 
 
@@ -570,11 +577,24 @@ def test_a_malformed_record_refuses_its_group_and_writes_nothing(tmp_path, sourc
 
 
 def test_an_address_only_jira_key_refuses_the_group(tmp_path, sources):
+    # Refused before redaction: an address is not an issue key.
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text()) + [{"key": "bob@cern.ch", "summary": "x"}]
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="no key / issue_key"):
+    with pytest.raises(BuildRefused, match="record 2 is malformed: key / issue_key does not match"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+def test_an_identity_that_is_only_an_address_is_refused_after_redaction(tmp_path, sources):
+    # Passes the first check (an id is present), then redaction empties it:
+    # the reader would skip that event, so the group is refused.
+    path = sources["indico"] / "records.json"
+    records = json.loads(path.read_text()) + [
+        {"id": "bob@cern.ch", "title": "x", "_contributions_text": ""}
+    ]
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="record 1 is malformed: record has no id / event_id"):
+        build(load_config(write_config(tmp_path, sources, only=["indico"])), tmp_path / "out")
 
 
 @pytest.mark.parametrize(
@@ -1006,3 +1026,151 @@ def test_the_counting_redactor_matches_the_plain_one():
         clean, removed = redact_email_addresses_with_count(text)
         assert clean == redact_email_addresses(text)
         assert removed == count
+
+
+# --- a valid-looking file that is really another export --------------------------
+
+SITES_COMPAT = {
+    "desc": {"columns": ["site_name", "tier_level", "tier", "country", "usage"]},
+    "result": [["T2_US_MIT", 2, "T2", "US", "production"]],
+}
+
+
+def test_a_sites_compat_export_as_responsibilities_refuses_cric(tmp_path, sources):
+    _write_json(sources["cric"] / "responsibilities.json", SITES_COMPAT)
+    with pytest.raises(BuildRefused) as info:
+        build(load_config(write_config(tmp_path, sources, only=["cric"])), tmp_path / "out")
+    [refusal] = info.value.refusals
+    assert refusal.group == "cric"
+    assert refusal.reason.startswith("responsibilities.json: columns are ['site_name'")
+    assert "sites-compat" in refusal.reason
+
+
+@pytest.mark.parametrize(
+    "rows, expected",
+    [
+        ([["T2_US_MIT", 2, "T2", "US", "production"]], "row 0 has 5 fields, expected 3"),
+        ([["adalove", "MIT Bates"]], "row 0 has 2 fields"),
+        ([{"username": "adalove"}], "row 0 has dict fields"),
+        ([["adalove", 7, "Site Admin"]], "site title must be a string or null"),
+        ([[None, "MIT Bates", "Site Admin"]], "username and role must be strings"),
+    ],
+)
+def test_responsibility_rows_of_the_wrong_shape_refuse_cric(tmp_path, sources, rows, expected):
+    # No header, so only the rows can show the file is wrong.
+    _write_json(sources["cric"] / "responsibilities.json", {"result": rows})
+    with pytest.raises(BuildRefused, match=expected):
+        build(load_config(write_config(tmp_path, sources, only=["cric"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "group, target, donor, expected",
+    [
+        ("cric", "sites.json", "storage_units.json", "none of the keys sitedb_title"),
+        ("cric", "compute_units.json", "sites.json", "none of the keys potential_max"),
+        ("cric", "facilities.json", "compute_units.json", "none of the keys cmssites"),
+        ("cric", "storage_units.json", "facilities.json", "none of the keys pledged-CMS"),
+        ("cric-core", "services.json", "rcsites.json", "none of the keys rcsite"),
+        ("cric-core", "rcsites.json", "federations.json", "none of the keys sites"),
+        ("cric-core", "federations.json", "services.json", "none of the keys accounting_name"),
+    ],
+)
+def test_a_cric_file_swapped_for_a_sibling_export_is_refused(
+    tmp_path, sources, group, target, donor, expected
+):
+    (sources[group] / target).write_bytes((sources[group] / donor).read_bytes())
+    with pytest.raises(BuildRefused, match=expected):
+        build(load_config(write_config(tmp_path, sources, only=[group])), tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "group, record, expected",
+    [
+        ("jira", {"key": "not an issue key", "summary": "x"}, "does not match"),
+        ("indico", {"id": "9", "title": "no derived text"}, "_contributions_text / _pdf_texts"),
+        ("conddb-global-tags", {"name": "GT", "description": "x"}, "release / scenario"),
+        ("dbs", {"dataset": "not-a-dataset-path"}, "does not match"),
+    ],
+)
+def test_a_record_from_another_export_is_refused(tmp_path, sources, group, record, expected):
+    path = sources[group] / "records.json"
+    path.write_text(json.dumps(json.loads(path.read_text()) + [record]))
+    if group == "jira":
+        _write_json(sources["jira"] / "meta.json", {"record_count": 3})
+    with pytest.raises(BuildRefused, match=expected):
+        build(load_config(write_config(tmp_path, sources, only=[group])), tmp_path / "out")
+
+
+def test_cmssw_records_with_non_release_labels_are_refused(tmp_path, sources):
+    (sources["cmssw-releases"] / "releases.map").unlink()
+    _write_json(sources["cmssw-releases"] / "records.json", [{"label": "ECALTBH4_0_2_2"}])
+    with pytest.raises(BuildRefused, match=r"label does not match CMSSW_"):
+        build(
+            load_config(write_config(tmp_path, sources, only=["cmssw-releases"])),
+            tmp_path / "out",
+        )
+
+
+# --- temporary copies -------------------------------------------------------------
+
+
+@pytest.fixture
+def system_tmp(tmp_path, monkeypatch):
+    """A stand-in for the system temp dir, to prove nothing lands there."""
+    sentinel = tmp_path / "system-tmp"
+    sentinel.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(sentinel))
+    return sentinel
+
+
+def test_reader_check_copies_go_to_tmp_dir_and_are_removed(tmp_path, sources, system_tmp):
+    work = tmp_path / "work-tmp"
+    work.mkdir()
+    seen = []
+    real = tempfile.TemporaryDirectory
+
+    def spy(*args, **kwargs):
+        handle = real(*args, **kwargs)
+        seen.append(Path(handle.name))
+        return handle
+
+    import archi.snapshot.builder as builder_module
+
+    original = builder_module.tempfile.TemporaryDirectory
+    builder_module.tempfile.TemporaryDirectory = spy
+    try:
+        build(load_config(write_config(tmp_path, sources)), tmp_path / "out", tmp_dir=work)
+    finally:
+        builder_module.tempfile.TemporaryDirectory = original
+    assert len(seen) == len(groups_module.GROUPS)
+    assert all(path.parent == work for path in seen)
+    assert list(work.iterdir()) == []
+    assert list(system_tmp.iterdir()) == []
+
+
+def test_tmp_dir_is_emptied_on_refusal(tmp_path, sources, system_tmp):
+    work = tmp_path / "work-tmp"
+    work.mkdir()
+    config = write_config(
+        tmp_path, sources, only=["jira", "dqm"], extra={"jira": {"drop_fields": ["description"]}}
+    )
+    with pytest.raises(BuildRefused, match="changed what the reader emits"):
+        build(load_config(config), tmp_path / "out", tmp_dir=work)
+    assert list(work.iterdir()) == []
+    assert list(system_tmp.iterdir()) == []
+    assert not (tmp_path / "out").exists()
+
+
+def test_tmp_dir_defaults_to_the_system_temp_dir(tmp_path, sources, system_tmp):
+    build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+    assert list(system_tmp.iterdir()) == []
+
+
+def test_cli_tmp_dir_must_exist(tmp_path, sources, capsys):
+    config = write_config(tmp_path, sources, only=["dqm"])
+    code = cli_main(
+        ["build", "--config", str(config), "--out", str(tmp_path / "o"),
+         "--tmp-dir", str(tmp_path / "no-such-dir")]
+    )
+    assert code == 2
+    assert "is not a directory" in capsys.readouterr().err

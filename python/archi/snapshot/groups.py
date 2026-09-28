@@ -24,6 +24,7 @@ Paths follow the reader defaults and ``docs/connector-caches.md``
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -40,7 +41,8 @@ class JsonFile:
     #: records, keyed by name) or ``object`` (one object, schema applied to it).
     shape: str
     schema: Schema = None
-    #: Returns a reason when a record is malformed, else ``None``.
+    #: Returns a reason when a record (for ``object`` files, the whole object)
+    #: is malformed or does not look like this export, else ``None``.
     identity: Optional[Callable[[Any], Optional[str]]] = None
     required: bool = True
 
@@ -112,6 +114,84 @@ def _require_text(*keys: str) -> Callable[[Any], Optional[str]]:
         return f"record has no {' / '.join(keys)} value"
 
     return check
+
+
+def _all(*checks: Callable[[Any], Optional[str]]) -> Callable[[Any], Optional[str]]:
+    def check(item: Any) -> Optional[str]:
+        for one in checks:
+            reason = one(item)
+            if reason:
+                return reason
+        return None
+
+    return check
+
+
+# Signatures: a key every record of the right export carries and the sibling
+# exports of the same container type do not, so a file swapped for another
+# export (same JSON shape, wrong content) is refused instead of misread. The
+# CRIC, CRIC-core, JIRA, Indico, CondDB and CMSSW signatures were checked
+# against the real Aug 31 and June 12-16 caches: every record has them
+# (2026-09-28, counts only). The DBS one (a /primary/processed/tier path) was
+# not checked against real data.
+
+
+def _has_key(*keys: str) -> Callable[[Any], Optional[str]]:
+    def check(item: Any) -> Optional[str]:
+        if isinstance(item, dict) and any(key in item for key in keys):
+            return None
+        return (
+            f"has none of the keys {' / '.join(keys)} that mark this export "
+            "(is it another export?)"
+        )
+
+    return check
+
+
+def _text_matches(pattern: str, *keys: str) -> Callable[[Any], Optional[str]]:
+    compiled = re.compile(pattern)
+
+    def check(item: Any) -> Optional[str]:
+        value = next((item.get(k) for k in keys if item.get(k)), "")
+        if compiled.fullmatch(str(value)):
+            return None
+        return f"{' / '.join(keys)} does not match {pattern} (is it another export?)"
+
+    return check
+
+
+RESPONSIBILITY_COLUMNS = ["username", "site_name", "role"]
+
+
+def _responsibilities_check(payload: Any) -> Optional[str]:
+    """CRIC's responsibilities export, not another ``{desc, result}`` export.
+
+    The reader takes fields 1-3 of each row as username, site title and role.
+    The ``sites-compat`` export has the same container but five other columns
+    per row; read as responsibilities it would mint wrong operator nodes.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("result"), list):
+        return "expected a 'result' list"
+    desc = payload.get("desc")
+    columns = desc.get("columns") if isinstance(desc, dict) else None
+    if columns is not None and columns != RESPONSIBILITY_COLUMNS:
+        return (
+            f"columns are {columns}, expected {RESPONSIBILITY_COLUMNS} "
+            "(is it another CRIC export, such as sites-compat?)"
+        )
+    for index, row in enumerate(payload["result"]):
+        if not isinstance(row, list) or len(row) != len(RESPONSIBILITY_COLUMNS):
+            size = len(row) if isinstance(row, list) else type(row).__name__
+            return (
+                f"row {index} has {size} fields, expected 3 "
+                "(username, site title, role)"
+            )
+        username, site, role = row
+        if not isinstance(username, str) or not isinstance(role, str):
+            return f"row {index}: username and role must be strings"
+        if site is not None and not isinstance(site, str):
+            return f"row {index}: site title must be a string or null"
+    return None
 
 
 def _gocdb_identity(item: Any) -> Optional[str]:
@@ -404,8 +484,8 @@ DBS_SCHEMA = _keys(
 )
 
 
-def _cric_mapping(name: str) -> JsonFile:
-    return JsonFile(name, "mapping", CRIC_SCHEMA, _require_dict)
+def _cric_mapping(name: str, signature: str) -> JsonFile:
+    return JsonFile(name, "mapping", CRIC_SCHEMA, _all(_require_dict, _has_key(signature)))
 
 
 GROUPS: dict[str, GroupSpec] = {
@@ -416,12 +496,17 @@ GROUPS: dict[str, GroupSpec] = {
             "data/cric",
             _cric,
             json_files=(
-                _cric_mapping("sites.json"),
-                _cric_mapping("storage_units.json"),
-                _cric_mapping("compute_units.json"),
-                _cric_mapping("facilities.json"),
+                _cric_mapping("sites.json", "sitedb_title"),
+                _cric_mapping("storage_units.json", "pledged-CMS"),
+                _cric_mapping("compute_units.json", "potential_max"),
+                _cric_mapping("facilities.json", "cmssites"),
                 # The reader refuses a payload without a ``result`` list.
-                JsonFile("responsibilities.json", "object", _keys("result")),
+                JsonFile(
+                    "responsibilities.json",
+                    "object",
+                    _keys("result"),
+                    _responsibilities_check,
+                ),
             ),
         ),
         GroupSpec(
@@ -429,9 +514,9 @@ GROUPS: dict[str, GroupSpec] = {
             "data/cric-core",
             _cric_core,
             json_files=(
-                _cric_mapping("services.json"),
-                _cric_mapping("rcsites.json"),
-                _cric_mapping("federations.json"),
+                _cric_mapping("services.json", "rcsite"),
+                _cric_mapping("rcsites.json", "sites"),
+                _cric_mapping("federations.json", "accounting_name"),
             ),
         ),
         GroupSpec(
@@ -464,7 +549,10 @@ GROUPS: dict[str, GroupSpec] = {
                                 "release_notes",
                                 "release_date",
                             ),
-                            _require_text("label"),
+                            _all(
+                                _require_text("label"),
+                                _text_matches(r"CMSSW_\S+", "label"),
+                            ),
                         ),
                     ),
                     primary_input="records.json",
@@ -480,7 +568,10 @@ GROUPS: dict[str, GroupSpec] = {
                     "records.json",
                     "list",
                     JIRA_SCHEMA,
-                    _require_text("key", "issue_key"),
+                    _all(
+                        _require_text("key", "issue_key"),
+                        _text_matches(r"[A-Z][A-Z0-9_]*-[0-9]+", "key", "issue_key"),
+                    ),
                 ),
                 # Optional for the reader; when present it must match.
                 JsonFile("meta.json", "object", _keys("record_count"), required=False),
@@ -495,7 +586,10 @@ GROUPS: dict[str, GroupSpec] = {
                     "records.json",
                     "list",
                     INDICO_SCHEMA,
-                    _require_text("id", "event_id"),
+                    _all(
+                        _require_text("id", "event_id"),
+                        _has_key("_contributions_text", "_pdf_texts"),
+                    ),
                 ),
             ),
         ),
@@ -591,7 +685,10 @@ GROUPS: dict[str, GroupSpec] = {
                         "snapshot_time",
                         "created_at",
                     ),
-                    _require_text("name", "tag_name"),
+                    _all(
+                        _require_text("name", "tag_name"),
+                        _has_key("release", "scenario"),
+                    ),
                 ),
             ),
         ),
@@ -623,7 +720,10 @@ GROUPS: dict[str, GroupSpec] = {
                     "records.json",
                     "list",
                     DBS_SCHEMA,
-                    _require_text("dataset_name", "dataset"),
+                    _all(
+                        _require_text("dataset_name", "dataset"),
+                        _text_matches(r"/[^/]+/[^/]+/[^/]+", "dataset_name", "dataset"),
+                    ),
                 ),
             ),
         ),

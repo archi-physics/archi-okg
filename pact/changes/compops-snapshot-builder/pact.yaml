@@ -120,6 +120,12 @@ requirements:
     counts one of each; the CMSSW group reads records.json when releases.map is absent and
     prefers the map when both exist. [evidence: executed_test]
 
+    - acc.compops-snapshot-builder.wrong-export: a CRIC responsibilities.json shaped like the
+    sites-compat export (other column names, or five fields per row), a CRIC or CRIC-core file
+    swapped for a sibling export, and JIRA, Indico, CondDB, DBS or CMSSW records from another
+    export each refuse the group by name; --tmp-dir receives every reader-check copy, and it
+    and the system temp dir are empty after a build and after a refusal. [evidence: executed_test]
+
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
     UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an
     unreadable file and deeply nested JSON each refuse the group by name. [evidence: executed_test]'

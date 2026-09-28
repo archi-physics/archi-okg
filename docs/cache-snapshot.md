@@ -39,7 +39,7 @@ groups:
 ```
 
 ```
-python -m archi.snapshot build --config snapshot.yaml --out <new-empty-dir> [--built-by NAME]
+python -m archi.snapshot build --config snapshot.yaml --out <new-empty-dir> [--built-by NAME] [--tmp-dir DIR]
 ```
 
 Known groups and the files each one reads (from `archi/snapshot/groups.py`):
@@ -76,7 +76,16 @@ For every group the build:
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC
-   `responsibilities.json` without its `result` list) refuses the whole group
+   `responsibilities.json` without its `result` list) refuses the whole group.
+   So does a file that has the right container but comes from another
+   export: every CRIC and CRIC-core record must carry the key that marks its
+   file (`sitedb_title`, `pledged-CMS`, `potential_max`, `cmssites`,
+   `rcsite`, `sites`, `accounting_name`); CRIC `responsibilities.json` must
+   have the columns `username, site_name, role` and exactly three fields per
+   row (CRIC's `sites-compat` export has five); JIRA keys must look like
+   `PROJECT-123`, CMSSW labels must start `CMSSW_`, Indico events must carry
+   `_contributions_text` or `_pdf_texts`, CondDB tags `release` or
+   `scenario`, and DBS datasets a `/primary/processed/tier` path. The group is refused
    with a message naming the file and the record. A group is never packed in
    part.
 3. **Removes every email address** from every string, JSON keys included, and
@@ -125,5 +134,10 @@ decompresses it and checks the member count, that every member is a plain
 file under the group's directory, and the contents digest. It prints one
 `ok` or `FAIL` line per group and exits 1 if any group fails. Unpack only
 after it exits 0, for example `zstd -d -c <group>.tar.zst | tar -x -C "$ARCHI_DATA_ROOT"`.
+
+The reader check stages two copies of each group in a temporary directory,
+so it needs about twice the largest group's size (TWiki is about 1 GB).
+`--tmp-dir` puts it somewhere with room (default: the system temp dir); it
+is removed when each group finishes, also when the group is refused.
 
 Both commands need the `zstd` command on `PATH`.

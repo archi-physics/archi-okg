@@ -23,6 +23,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--config", required=True, help="YAML: snapshot name and groups")
     b.add_argument("--out", required=True, help="new or empty output directory")
     b.add_argument("--built-by", default=None, help="recorded in the lock file")
+    b.add_argument(
+        "--tmp-dir",
+        default=None,
+        help=(
+            "where the reader-check copies go (about twice the largest group); "
+            "default: the system temp dir. Removed on exit, also on refusal."
+        ),
+    )
     v = sub.add_parser("verify", help="check archives against snapshot.lock.yaml")
     v.add_argument("--lock", required=True)
     v.add_argument("--archives", required=True, help="directory holding the archives")
@@ -30,7 +38,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "build":
-            lock = build(load_config(args.config), args.out, built_by=args.built_by)
+            lock = build(
+                load_config(args.config),
+                args.out,
+                built_by=args.built_by,
+                tmp_dir=args.tmp_dir,
+            )
             for name, row in lock["groups"].items():
                 print(
                     f"{name}: {row['record_count']} records, {row['file_count']} "

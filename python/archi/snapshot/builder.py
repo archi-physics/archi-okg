@@ -218,7 +218,9 @@ class PreparedGroup:
     transcoded: dict[str, int] = field(default_factory=dict)
 
 
-def prepare_group(group: GroupConfig) -> PreparedGroup:
+def prepare_group(
+    group: GroupConfig, *, tmp_dir: str | Path | None = None
+) -> PreparedGroup:
     """Validate, redact, prune and reader-check one group, or raise GroupRefused.
 
     An unreadable file (permission denied, an I/O error) or JSON nested too
@@ -226,7 +228,7 @@ def prepare_group(group: GroupConfig) -> PreparedGroup:
     ending the build with a traceback.
     """
     try:
-        return _prepare_group(group)
+        return _prepare_group(group, tmp_dir)
     except GroupRefused:
         raise
     except OSError as exc:
@@ -261,7 +263,7 @@ def _select_variant(spec: GroupSpec, source: Path) -> GroupSpec:
     raise GroupRefused(spec.name, f"neither {names} is in {source}")
 
 
-def _prepare_group(group: GroupConfig) -> PreparedGroup:
+def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGroup:
     if not group.path.is_dir():
         raise GroupRefused(group.name, f"source directory {group.path} does not exist")
     # The configured directory may itself be a link; nothing inside it may be.
@@ -321,7 +323,7 @@ def _prepare_group(group: GroupConfig) -> PreparedGroup:
                 group.name, f"a file path contains an email address: {archive_path}"
             )
     _check_no_addresses(group.name, final)
-    record_count = _reader_check(spec, redacted, final)
+    record_count = _reader_check(spec, redacted, final, tmp_dir)
     return PreparedGroup(
         name=group.name,
         collected=group.collected,
@@ -408,10 +410,9 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
     else:
         if not isinstance(payload, dict):
             raise GroupRefused(group, f"{spec.name}: expected a JSON object")
-        if spec.name == "responsibilities.json" and not isinstance(
-            payload.get("result"), list
-        ):
-            raise GroupRefused(group, f"{spec.name}: expected a 'result' list")
+        reason = spec.identity(payload) if spec.identity is not None else None
+        if reason:
+            raise GroupRefused(group, f"{spec.name}: {reason}")
         return
     if spec.identity is None:
         return
@@ -544,9 +545,20 @@ def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
 
 
 def _reader_check(
-    spec: GroupSpec, redacted: Mapping[str, bytes], final: Mapping[str, bytes]
+    spec: GroupSpec,
+    redacted: Mapping[str, bytes],
+    final: Mapping[str, bytes],
+    tmp_dir: str | Path | None = None,
 ) -> int:
-    with tempfile.TemporaryDirectory(prefix=f"snapshot-{spec.name}-") as tmp:
+    """Run the reader over two staged copies in one temporary directory.
+
+    The directory is made under ``tmp_dir`` (default: the system temp dir)
+    and removed when this returns or raises. It holds two copies of the group,
+    so it needs about twice the group's size.
+    """
+    with tempfile.TemporaryDirectory(
+        prefix=f"snapshot-{spec.name}-", dir=tmp_dir
+    ) as tmp:
         full_root = Path(tmp) / "redacted"
         final_root = Path(tmp) / "final"
         for root, files in ((full_root, redacted), (final_root, final)):
@@ -721,8 +733,14 @@ def build(
     out_dir: str | Path,
     *,
     built_by: Optional[str] = None,
+    tmp_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build every group, or raise BuildRefused having written nothing."""
+    """Build every group, or raise BuildRefused having written nothing.
+
+    ``tmp_dir`` holds the reader-check copies (default: the system temp dir).
+    """
+    if tmp_dir is not None and not Path(tmp_dir).is_dir():
+        raise SnapshotError(f"--tmp-dir {tmp_dir} is not a directory")
     out = Path(out_dir)
     if out.exists() and any(out.iterdir()):
         raise SnapshotError(f"{out} exists and is not empty; refusing to overwrite")
@@ -731,7 +749,7 @@ def build(
     refusals: list[GroupRefused] = []
     for group in config.groups:
         try:
-            prepared.append(prepare_group(group))
+            prepared.append(prepare_group(group, tmp_dir=tmp_dir))
         except GroupRefused as exc:
             refusals.append(exc)
     if refusals:
