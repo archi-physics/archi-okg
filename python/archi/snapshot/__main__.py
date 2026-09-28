@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
+import threading
 
 from archi.snapshot.builder import (
     BuildRefused,
@@ -13,7 +15,24 @@ from archi.snapshot.builder import (
 )
 
 
+def _terminate(signum: int, frame: object) -> None:
+    """Turn SIGTERM into an exception, so every ``with`` block and the
+    build's own cleanup run: the reader-check copies in --tmp-dir and the
+    output staging directory are removed before the process exits."""
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str] | None = None) -> int:
+    if threading.current_thread() is not threading.main_thread():
+        return _main(argv)
+    previous = signal.signal(signal.SIGTERM, _terminate)
+    try:
+        return _main(argv)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m archi.snapshot")
     sub = parser.add_subparsers(dest="command", required=True)
     b = sub.add_parser(
@@ -28,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "where the reader-check copies go (about twice the largest group); "
-            "default: the system temp dir. Removed on exit, also on refusal."
+            "default: the system temp dir. Removed on exit, on refusal, on "
+            "Ctrl-C and on SIGTERM; a SIGKILL leaves it behind."
         ),
     )
     v = sub.add_parser("verify", help="check archives against snapshot.lock.yaml")

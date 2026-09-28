@@ -42,9 +42,25 @@ class JsonFile:
     shape: str
     schema: Schema = None
     #: Returns a reason when a record (for ``object`` files, the whole object)
-    #: is malformed or does not look like this export, else ``None``.
+    #: is malformed, else ``None``.
     identity: Optional[Callable[[Any], Optional[str]]] = None
     required: bool = True
+    #: What marks this export among files of the same container type. At
+    #: least ``SIGNATURE_SHARE`` of the file's records must carry it, and the
+    #: file must hold at least one record.
+    signature: Optional["Signature"] = None
+
+
+@dataclass(frozen=True)
+class Signature:
+    description: str
+    matches: Callable[[Any], bool]
+
+
+#: The readers treat signature keys as optional, so one legitimate record
+#: without the key must not refuse its group; a swapped export carries the key
+#: in (almost) none of its records.
+SIGNATURE_SHARE = 0.95
 
 
 @dataclass(frozen=True)
@@ -52,14 +68,17 @@ class TextFiles:
     """Plain-text cache files: one exact name, or every match under the dir.
 
     A file with a NUL byte refuses the group (UTF-16 would hide an address
-    from the redactor). A file that is not UTF-8 refuses it too, unless
-    ``fallback_encodings`` names encodings to try in order; the file is then
-    stored re-encoded as UTF-8, and redaction runs on the decoded text.
+    from the redactor), and so does one whose decoded text is mostly control
+    characters (binary). Text that is not UTF-8 refuses it too, unless
+    ``fallback_invalid_bytes``: then the file is decoded as UTF-8 and only
+    each invalid byte run is decoded as cp1252 (Latin-1 for the bytes cp1252
+    leaves undefined). Valid UTF-8 around it stays intact, so one stray
+    Windows quote cannot garble the addresses on the rest of the page.
     """
 
     pattern: str
     recursive: bool = False
-    fallback_encodings: tuple[str, ...] = ()
+    fallback_invalid_bytes: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,48 +135,33 @@ def _require_text(*keys: str) -> Callable[[Any], Optional[str]]:
     return check
 
 
-def _all(*checks: Callable[[Any], Optional[str]]) -> Callable[[Any], Optional[str]]:
-    def check(item: Any) -> Optional[str]:
-        for one in checks:
-            reason = one(item)
-            if reason:
-                return reason
-        return None
-
-    return check
-
-
-# Signatures: a key every record of the right export carries and the sibling
-# exports of the same container type do not, so a file swapped for another
-# export (same JSON shape, wrong content) is refused instead of misread. The
-# CRIC, CRIC-core, JIRA, Indico, CondDB and CMSSW signatures were checked
-# against the real Aug 31 and June 12-16 caches: every record has them
-# (2026-09-28, counts only). The DBS one (a /primary/processed/tier path) was
-# not checked against real data.
+# Signatures: a key the right export carries and its siblings of the same
+# container type do not, so a file swapped for another export (same JSON
+# shape, wrong content) is refused instead of misread. Counted on the real
+# Aug 31 and June 12-16 caches (2026-09-28, counts only): every CRIC and
+# CRIC-core key is in 100% of its own export's records and 0% of each of the
+# six sibling exports', and the JIRA, Indico, CondDB and CMSSW signatures hold
+# for every record. The DBS one (a /primary/processed/tier path) was not
+# checked against real data.
 
 
-def _has_key(*keys: str) -> Callable[[Any], Optional[str]]:
-    def check(item: Any) -> Optional[str]:
-        if isinstance(item, dict) and any(key in item for key in keys):
-            return None
-        return (
-            f"has none of the keys {' / '.join(keys)} that mark this export "
-            "(is it another export?)"
-        )
-
-    return check
+def _has_key(*keys: str) -> Signature:
+    return Signature(
+        f"a {' / '.join(keys)} key",
+        lambda item: isinstance(item, dict) and any(key in item for key in keys),
+    )
 
 
-def _text_matches(pattern: str, *keys: str) -> Callable[[Any], Optional[str]]:
+def _text_matches(pattern: str, *keys: str) -> Signature:
     compiled = re.compile(pattern)
 
-    def check(item: Any) -> Optional[str]:
+    def matches(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
         value = next((item.get(k) for k in keys if item.get(k)), "")
-        if compiled.fullmatch(str(value)):
-            return None
-        return f"{' / '.join(keys)} does not match {pattern} (is it another export?)"
+        return compiled.fullmatch(str(value)) is not None
 
-    return check
+    return Signature(f"a {' / '.join(keys)} matching {pattern}", matches)
 
 
 RESPONSIBILITY_COLUMNS = ["username", "site_name", "role"]
@@ -485,7 +489,9 @@ DBS_SCHEMA = _keys(
 
 
 def _cric_mapping(name: str, signature: str) -> JsonFile:
-    return JsonFile(name, "mapping", CRIC_SCHEMA, _all(_require_dict, _has_key(signature)))
+    return JsonFile(
+        name, "mapping", CRIC_SCHEMA, _require_dict, signature=_has_key(signature)
+    )
 
 
 GROUPS: dict[str, GroupSpec] = {
@@ -549,10 +555,8 @@ GROUPS: dict[str, GroupSpec] = {
                                 "release_notes",
                                 "release_date",
                             ),
-                            _all(
-                                _require_text("label"),
-                                _text_matches(r"CMSSW_\S+", "label"),
-                            ),
+                            _require_text("label"),
+                            signature=_text_matches(r"CMSSW_\S+", "label"),
                         ),
                     ),
                     primary_input="records.json",
@@ -568,9 +572,9 @@ GROUPS: dict[str, GroupSpec] = {
                     "records.json",
                     "list",
                     JIRA_SCHEMA,
-                    _all(
-                        _require_text("key", "issue_key"),
-                        _text_matches(r"[A-Z][A-Z0-9_]*-[0-9]+", "key", "issue_key"),
+                    _require_text("key", "issue_key"),
+                    signature=_text_matches(
+                        r"[A-Z][A-Z0-9_]*-[0-9]+", "key", "issue_key"
                     ),
                 ),
                 # Optional for the reader; when present it must match.
@@ -586,10 +590,8 @@ GROUPS: dict[str, GroupSpec] = {
                     "records.json",
                     "list",
                     INDICO_SCHEMA,
-                    _all(
-                        _require_text("id", "event_id"),
-                        _has_key("_contributions_text", "_pdf_texts"),
-                    ),
+                    _require_text("id", "event_id"),
+                    signature=_has_key("_contributions_text", "_pdf_texts"),
                 ),
             ),
         ),
@@ -662,10 +664,10 @@ GROUPS: dict[str, GroupSpec] = {
             "twiki-eos",
             "data/twiki-eos",
             _twiki,
-            # TWiki pages predate UTF-8: Jason's lead, 2026-09-28, decode them
-            # as cp1252 (the Windows superset of Latin-1), else Latin-1.
+            # TWiki pages predate UTF-8 (lead decision, 2026-09-28): invalid
+            # byte runs decode as cp1252, the Windows superset of Latin-1.
             text=TextFiles(
-                "*.txt", recursive=True, fallback_encodings=("cp1252", "latin-1")
+                "*.txt", recursive=True, fallback_invalid_bytes=True
             ),
         ),
         GroupSpec(
@@ -685,10 +687,8 @@ GROUPS: dict[str, GroupSpec] = {
                         "snapshot_time",
                         "created_at",
                     ),
-                    _all(
-                        _require_text("name", "tag_name"),
-                        _has_key("release", "scenario"),
-                    ),
+                    _require_text("name", "tag_name"),
+                    signature=_has_key("release", "scenario"),
                 ),
             ),
         ),
@@ -720,9 +720,9 @@ GROUPS: dict[str, GroupSpec] = {
                     "records.json",
                     "list",
                     DBS_SCHEMA,
-                    _all(
-                        _require_text("dataset_name", "dataset"),
-                        _text_matches(r"/[^/]+/[^/]+/[^/]+", "dataset_name", "dataset"),
+                    _require_text("dataset_name", "dataset"),
+                    signature=_text_matches(
+                        r"/[^/]+/[^/]+/[^/]+", "dataset_name", "dataset"
                     ),
                 ),
             ),

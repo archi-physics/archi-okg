@@ -69,23 +69,32 @@ For every group the build:
    that contains an email address, and any file the builder cannot read
    (permission denied) or JSON nested too deeply to walk. The configured
    directory itself may be a link. TWiki pages are the one exception to
-   UTF-8: a page that is not UTF-8 is decoded as cp1252 (the Windows
-   superset of Latin-1), else as Latin-1, stored re-encoded as UTF-8, and
-   redacted after decoding. The lock counts these as `transcoded_files` and
-   `transcoded_by_encoding`.
+   UTF-8: a page is decoded as UTF-8, and only each invalid byte run is
+   decoded as cp1252 (the Windows superset of Latin-1; Latin-1 for the five
+   bytes cp1252 leaves undefined). Valid UTF-8 around a stray byte stays
+   intact, the page is stored as UTF-8, and it is redacted after decoding.
+   The lock records `text_pages`, `pages_valid_utf8`,
+   `pages_with_fallback_runs` and `fallback_bytes` (per decoding). Any text
+   file whose decoded text is more than 1% control characters (other than
+   tab, newline and carriage return) is refused as binary, and any string in
+   which a control character splits an address (`a.b@c<control>d.ch`) is
+   refused, because the redactor would not see that address.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC
    `responsibilities.json` without its `result` list) refuses the whole group.
    So does a file that has the right container but comes from another
-   export: every CRIC and CRIC-core record must carry the key that marks its
-   file (`sitedb_title`, `pledged-CMS`, `potential_max`, `cmssites`,
+   export: at least 95% of the records in every CRIC and CRIC-core file
+   (and at least one record) must carry the key that marks that file (`sitedb_title`, `pledged-CMS`, `potential_max`, `cmssites`,
    `rcsite`, `sites`, `accounting_name`); CRIC `responsibilities.json` must
    have the columns `username, site_name, role` and exactly three fields per
    row (CRIC's `sites-compat` export has five); JIRA keys must look like
    `PROJECT-123`, CMSSW labels must start `CMSSW_`, Indico events must carry
    `_contributions_text` or `_pdf_texts`, CondDB tags `release` or
-   `scenario`, and DBS datasets a `/primary/processed/tier` path. The group is refused
+   `scenario`, and DBS datasets a `/primary/processed/tier` path, each for at
+   least 95% of the records (the readers treat these keys as optional, so one
+   odd record is allowed). On the real caches each CRIC and CRIC-core key is
+   in all of its own file's records and in none of its six siblings'. The group is refused
    with a message naming the file and the record. A group is never packed in
    part.
 3. **Removes every email address** from every string, JSON keys included, and
@@ -118,7 +127,8 @@ same input with the same zstd version give byte-identical archives.
 The lock records, per group: `collected`, `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
 `addresses_removed`, `input_file` (for CMSSW, which input was used),
-`transcoded_files` and `transcoded_by_encoding` (TWiki),
+`text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs` and
+`fallback_bytes` (TWiki),
 `contents_sha256` (a digest of the unpacked files), `archive_dir`, and the
 dropped and extra kept fields. It also records who built it, when, on which
 host, the archi version and commit, and the zstd version and level.
@@ -137,7 +147,11 @@ after it exits 0, for example `zstd -d -c <group>.tar.zst | tar -x -C "$ARCHI_DA
 
 The reader check stages two copies of each group in a temporary directory,
 so it needs about twice the largest group's size (TWiki is about 1 GB).
-`--tmp-dir` puts it somewhere with room (default: the system temp dir); it
-is removed when each group finishes, also when the group is refused.
+`--tmp-dir` puts it somewhere with room (default: the system temp dir). It
+is removed when each group finishes, when the group is refused, on Ctrl-C
+and on SIGTERM (the command line turns SIGTERM into a clean exit, which also
+removes the output staging directory); only a SIGKILL leaves it behind. A
+full `--tmp-dir` refuses the group with "cannot write the reader-check copy
+... (disk full?)".
 
 Both commands need the `zstd` command on `PATH`.

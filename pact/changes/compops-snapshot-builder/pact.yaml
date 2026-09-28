@@ -78,9 +78,11 @@ requirements:
     so one snapshot can mix collection dates. For each group it refuses, with an error naming
     the group, file and record, any missing file, invalid JSON, wrong shape or record the
     reader would skip or drop; any symbolic link, dot-named path or path resolving outside
-    the group directory; any text file that holds a NUL byte or is not UTF-8 (TWiki pages
-    alone fall back to cp1252, then Latin-1, are stored as UTF-8 and are redacted after decoding,
-    with per-encoding counts in the lock); any file path containing an address; and any unreadable
+    the group directory; any text file that holds a NUL byte, is more than 1% control characters,
+    or is not UTF-8 (TWiki pages alone decode each invalid byte run as cp1252, Latin-1 for its
+    undefined bytes, keep valid UTF-8 intact, are stored as UTF-8 and are redacted after decoding,
+    with page and fallback-byte counts in the lock); any string where a control character splits
+    an address; any file path containing an address; and any unreadable
     file or too-deeply nested JSON (a named refusal, not a traceback). It removes every email
     address from every string with redact_email_addresses and records the count removed; drops
     every field the reader does not read plus the configured drop_fields (WMStats keeps Requestor
@@ -115,16 +117,21 @@ requirements:
     even when a config asks to keep it or the field that holds it; Requestor is kept. [evidence:
     executed_test]
 
-    - acc.compops-snapshot-builder.transcode: a Latin-1 TWiki page with an accented-local-part
-    address loses the address, a cp1252 page keeps its smart quotes as UTF-8, and the lock
-    counts one of each; the CMSSW group reads records.json when releases.map is absent and
+    - acc.compops-snapshot-builder.transcode: on the second review''s mixed page (three addresses
+    in valid UTF-8 plus one stray 0x93 byte) all three addresses are removed and the valid UTF-8
+    is kept; a Latin-1 page with an accented-local-part address loses the address; a cp1252 page
+    keeps its smart quotes as UTF-8; an address split by a C1 control is refused; a mostly-control
+    page is refused as binary; the lock counts pages and fallback bytes; the CMSSW group reads records.json when releases.map is absent and
     prefers the map when both exist. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.wrong-export: a CRIC responsibilities.json shaped like
-    the sites-compat export (other column names, or five fields per row), a CRIC or CRIC-core
-    file swapped for a sibling export, and JIRA, Indico, CondDB, DBS or CMSSW records from
-    another export each refuse the group by name; --tmp-dir receives every reader-check copy,
-    and it and the system temp dir are empty after a build and after a refusal. [evidence:
+    the sites-compat export (other column names, or five fields per row), each of the 42 ways to
+    swap a CRIC or CRIC-core file for a sibling export, and JIRA, Indico, CondDB, DBS or CMSSW
+    records from another export each refuse the group by name; signature keys need 95% of
+    records (19 of 20 passes, 18 of 20 and an empty file are refused); --tmp-dir, or the system
+    temp dir by default, receives every reader-check copy and is empty after a build, a refusal
+    and a SIGTERM (which also removes the output staging directory); a full --tmp-dir is reported
+    as a write failure. [evidence:
     executed_test]
 
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,

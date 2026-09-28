@@ -9,9 +9,11 @@ import dataclasses
 import io
 import json
 import os
+import signal
 import subprocess
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -581,7 +583,7 @@ def test_an_address_only_jira_key_refuses_the_group(tmp_path, sources):
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text()) + [{"key": "bob@cern.ch", "summary": "x"}]
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="record 2 is malformed: key / issue_key does not match"):
+    with pytest.raises(BuildRefused, match="only 2 of 3 records carry a key / issue_key matching"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -652,36 +654,106 @@ def test_non_utf8_text_without_a_fallback_refuses_the_group(tmp_path, sources):
         )
 
 
-def test_twiki_pages_in_cp1252_and_latin1_are_transcoded_then_redacted(tmp_path, sources):
-    twiki = sources["twiki-eos"]
-    # 0x81 is undefined in cp1252, so this page only decodes as Latin-1. Its
-    # address has an accented local part (j\xe9r\xf4me = jérôme).
-    (twiki / "LatinPage.txt").write_bytes(
-        b"---+ Contacts\nWrite to j\xe9r\xf4me.dupont@cern.ch \x81today.\n"
+#: Plain text that keeps one control character under the 1% binary limit.
+PADDING = b"Ordinary page text. " * 10 + b"\n"
+
+REVIEWER_MIXED_PAGE = (
+    "---+ Contacts\nCaf\u00e9 team: j\u00e9r\u00f4me.dupont@cern.ch, jdoe@c\u00e9rn.ch "
+    "and jdoe\uff20cern\uff0ech.\n"
+).encode("utf-8") + b"A stray Windows quote: \x93quoted.\n"
+
+
+def test_a_stray_byte_does_not_garble_the_valid_utf8_around_it(tmp_path, sources):
+    # The second review's page: mostly UTF-8, three addresses, one stray
+    # cp1252 byte. Decoding the whole page as cp1252 leaked "j\u00c3\u00a9r\u00c3\u00b4".
+    (sources["twiki-eos"] / "Mixed.txt").write_bytes(REVIEWER_MIXED_PAGE)
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Mixed.txt"].decode("utf-8")
+    assert page == (
+        "---+ Contacts\nCaf\u00e9 team: ,  and .\n"
+        "A stray Windows quote: \u201cquoted.\n"
     )
-    # cp1252 smart quotes (0x93, 0x94) and an en dash (0x96).
+    for fragment in ("dupont", "j\u00e9r\u00f4me", "jdoe", "c\u00e9rn", "\u00c3"):
+        assert fragment not in page
+    row = lock["groups"]["twiki-eos"]
+    assert row["text_pages"] == 3
+    assert row["pages_valid_utf8"] == 2
+    assert row["pages_with_fallback_runs"] == 1
+    assert row["fallback_bytes"] == {"cp1252": 1, "latin-1": 0}
+    assert row["addresses_removed"] == 4  # three here, one planted elsewhere
+
+
+def test_cp1252_and_latin1_runs_are_decoded_and_counted(tmp_path, sources):
+    twiki = sources["twiki-eos"]
+    # A whole Latin-1 page: its address has an accented local part.
+    (twiki / "LatinPage.txt").write_bytes(
+        b"---+ Contacts\nWrite to j\xe9r\xf4me.dupont@cern.ch today.\n"
+    )
+    # cp1252 smart quotes and an en dash, and one byte cp1252 leaves undefined.
     (twiki / "QuotePage.txt").write_bytes(
-        b"---+ Quotes\nThe \x93golden\x94 JSON \x96 see caf\xe9 notes.\n"
+        b"---+ Quotes\nThe \x93golden\x94 JSON \x96 see notes \x81here.\n" + PADDING
     )
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
     members = read_archive(out / "twiki-eos.tar.zst")
-    latin = members["data/twiki-eos/LatinPage.txt"].decode("utf-8")
-    assert latin == "---+ Contacts\nWrite to  \x81today.\n"
-    quotes = members["data/twiki-eos/QuotePage.txt"].decode("utf-8")
-    assert quotes == "---+ Quotes\nThe \u201cgolden\u201d JSON \u2013 see caf\u00e9 notes.\n"
+    assert members["data/twiki-eos/LatinPage.txt"].decode("utf-8") == (
+        "---+ Contacts\nWrite to  today.\n"
+    )
+    assert members["data/twiki-eos/QuotePage.txt"].decode("utf-8") == (
+        "---+ Quotes\nThe \u201cgolden\u201d JSON \u2013 see notes \x81here.\n"
+        + PADDING.decode("ascii")
+    )
     row = lock["groups"]["twiki-eos"]
-    assert row["transcoded_files"] == 2
-    assert row["transcoded_by_encoding"] == {"cp1252": 1, "latin-1": 1}
-    # The planted UTF-8 address and the Latin-1 one: both counted.
-    assert row["addresses_removed"] == 2
-    assert b"dupont" not in _all_bytes(out, "twiki-eos")
+    assert row["pages_with_fallback_runs"] == 2
+    assert row["fallback_bytes"] == {"cp1252": 5, "latin-1": 1}
 
 
-def test_utf8_only_twiki_reports_zero_transcoded(built):
+def test_an_address_split_by_a_c1_control_refuses_the_group(tmp_path, sources):
+    # 0x81 is undefined in cp1252, so it decodes as the C1 control U+0081,
+    # which hides a.b@cd.ch from the redactor.
+    (sources["twiki-eos"] / "Split.txt").write_bytes(
+        b"---+ Page\nMail a.b@c\x81d.ch now.\n" + PADDING
+    )
+    with pytest.raises(BuildRefused, match="an address is split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_an_address_split_by_a_control_in_json_refuses_the_group(tmp_path, sources):
+    path = sources["dqm"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["filename"] = "owner a.b@c\u0001d.ch"
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"---+ Page\n" + b"\x01\x02 data " * 20, b"---+ Page\n" + b"\x81\x8d\x8f" * 10],
+    ids=["c0-controls", "c1-from-fallback"],
+)
+def test_a_page_that_is_mostly_control_characters_is_refused_as_binary(
+    tmp_path, sources, content
+):
+    (sources["twiki-eos"] / "Blob.txt").write_bytes(content)
+    with pytest.raises(BuildRefused, match=r"Blob.txt looks binary: \d+ of \d+ characters"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_a_few_control_characters_are_allowed(tmp_path, sources):
+    (sources["twiki-eos"] / "Tabs.txt").write_bytes(
+        b"---+ Page\n" + b"x" * 200 + b"\x0c\n\ttab\r\n"
+    )
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_utf8_only_twiki_reports_no_fallback(built):
     _, lock = built
     row = lock["groups"]["twiki-eos"]
-    assert row["transcoded_files"] == 0 and row["transcoded_by_encoding"] == {}
+    assert row["pages_valid_utf8"] == row["text_pages"] == 2
+    assert row["pages_with_fallback_runs"] == 0
+    assert row["fallback_bytes"] == {"cp1252": 0, "latin-1": 0}
 
 
 def test_cmssw_group_accepts_records_json_when_the_map_is_absent(tmp_path, sources):
@@ -1063,33 +1135,71 @@ def test_responsibility_rows_of_the_wrong_shape_refuse_cric(tmp_path, sources, r
         build(load_config(write_config(tmp_path, sources, only=["cric"])), tmp_path / "out")
 
 
+CRIC_EXPORTS = {
+    ("cric", "sites.json"): "sitedb_title",
+    ("cric", "storage_units.json"): "pledged-CMS",
+    ("cric", "compute_units.json"): "potential_max",
+    ("cric", "facilities.json"): "cmssites",
+    ("cric-core", "services.json"): "rcsite",
+    ("cric-core", "rcsites.json"): "sites",
+    ("cric-core", "federations.json"): "accounting_name",
+}
+SIBLING_SWAPS = [
+    (target, donor) for target in CRIC_EXPORTS for donor in CRIC_EXPORTS if donor != target
+]
+
+
 @pytest.mark.parametrize(
-    "group, target, donor, expected",
-    [
-        ("cric", "sites.json", "storage_units.json", "none of the keys sitedb_title"),
-        ("cric", "compute_units.json", "sites.json", "none of the keys potential_max"),
-        ("cric", "facilities.json", "compute_units.json", "none of the keys cmssites"),
-        ("cric", "storage_units.json", "facilities.json", "none of the keys pledged-CMS"),
-        ("cric-core", "services.json", "rcsites.json", "none of the keys rcsite"),
-        ("cric-core", "rcsites.json", "federations.json", "none of the keys sites"),
-        ("cric-core", "federations.json", "services.json", "none of the keys accounting_name"),
-    ],
+    "target, donor", SIBLING_SWAPS, ids=[f"{t[1]}<-{d[1]}" for t, d in SIBLING_SWAPS]
 )
-def test_a_cric_file_swapped_for_a_sibling_export_is_refused(
-    tmp_path, sources, group, target, donor, expected
+def test_every_cric_file_swapped_for_any_sibling_export_is_refused(
+    tmp_path, sources, target, donor
 ):
-    (sources[group] / target).write_bytes((sources[group] / donor).read_bytes())
-    with pytest.raises(BuildRefused, match=expected):
+    group, name = target
+    (sources[group] / name).write_bytes((sources[donor[0]] / donor[1]).read_bytes())
+    key = CRIC_EXPORTS[target]
+    with pytest.raises(BuildRefused) as info:
         build(load_config(write_config(tmp_path, sources, only=[group])), tmp_path / "out")
+    assert info.value.refusals[0].reason.startswith(
+        f"{name}: only 0 of 1 records carry a {key} key (95% needed)"
+    )
+
+
+def _services(count_with, count_without):
+    services = {
+        f"ce{i}.example.org": {"type": "CE", "endpoint": f"ce{i}.example.org", "rcsite": "MIT"}
+        for i in range(count_with)
+    }
+    services.update(
+        {f"odd{i}.example.org": {"type": "CE", "endpoint": "x"} for i in range(count_without)}
+    )
+    return services
+
+
+def test_a_few_records_without_the_signature_key_are_accepted(tmp_path, sources):
+    _write_json(sources["cric-core"] / "services.json", _services(19, 1))  # 95%
+    build(load_config(write_config(tmp_path, sources, only=["cric-core"])), tmp_path / "out")
+
+
+def test_too_many_records_without_the_signature_key_are_refused(tmp_path, sources):
+    _write_json(sources["cric-core"] / "services.json", _services(18, 2))  # 90%
+    with pytest.raises(BuildRefused, match="only 18 of 20 records carry a rcsite key"):
+        build(load_config(write_config(tmp_path, sources, only=["cric-core"])), tmp_path / "out")
+
+
+def test_an_empty_export_is_refused(tmp_path, sources):
+    _write_json(sources["cric-core"] / "services.json", {})
+    with pytest.raises(BuildRefused, match="services.json holds no records"):
+        build(load_config(write_config(tmp_path, sources, only=["cric-core"])), tmp_path / "out")
 
 
 @pytest.mark.parametrize(
     "group, record, expected",
     [
-        ("jira", {"key": "not an issue key", "summary": "x"}, "does not match"),
+        ("jira", {"key": "not an issue key", "summary": "x"}, "only 2 of 3 records carry a key"),
         ("indico", {"id": "9", "title": "no derived text"}, "_contributions_text / _pdf_texts"),
         ("conddb-global-tags", {"name": "GT", "description": "x"}, "release / scenario"),
-        ("dbs", {"dataset": "not-a-dataset-path"}, "does not match"),
+        ("dbs", {"dataset": "not-a-dataset-path"}, "dataset_name / dataset matching"),
     ],
 )
 def test_a_record_from_another_export_is_refused(tmp_path, sources, group, record, expected):
@@ -1104,7 +1214,7 @@ def test_a_record_from_another_export_is_refused(tmp_path, sources, group, recor
 def test_cmssw_records_with_non_release_labels_are_refused(tmp_path, sources):
     (sources["cmssw-releases"] / "releases.map").unlink()
     _write_json(sources["cmssw-releases"] / "records.json", [{"label": "ECALTBH4_0_2_2"}])
-    with pytest.raises(BuildRefused, match=r"label does not match CMSSW_"):
+    with pytest.raises(BuildRefused, match=r"only 0 of 1 records carry a label matching CMSSW_"):
         build(
             load_config(write_config(tmp_path, sources, only=["cmssw-releases"])),
             tmp_path / "out",
@@ -1161,9 +1271,79 @@ def test_tmp_dir_is_emptied_on_refusal(tmp_path, sources, system_tmp):
     assert not (tmp_path / "out").exists()
 
 
-def test_tmp_dir_defaults_to_the_system_temp_dir(tmp_path, sources, system_tmp):
-    build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+def _spy_tempdirs(monkeypatch):
+    import archi.snapshot.builder as builder_module
+
+    seen = []
+    real = tempfile.TemporaryDirectory
+
+    def spy(*args, **kwargs):
+        handle = real(*args, **kwargs)
+        seen.append(Path(handle.name))
+        return handle
+
+    monkeypatch.setattr(builder_module.tempfile, "TemporaryDirectory", spy)
+    return seen
+
+
+def test_tmp_dir_defaults_to_the_system_temp_dir(tmp_path, sources, system_tmp, monkeypatch):
+    seen = _spy_tempdirs(monkeypatch)
+    build(load_config(write_config(tmp_path, sources, only=["dqm", "jira"])), tmp_path / "out")
+    assert len(seen) == 2
+    assert all(path.parent == system_tmp for path in seen)
     assert list(system_tmp.iterdir()) == []
+
+
+def test_a_full_tmp_dir_is_reported_as_a_write_failure(tmp_path, sources, monkeypatch):
+    import errno as errno_module
+
+    import archi.snapshot.builder as builder_module
+
+    def full(root, files):
+        raise OSError(errno_module.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(builder_module, "_stage", full)
+    with pytest.raises(BuildRefused) as info:
+        build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+    reason = info.value.refusals[0].reason
+    assert reason.startswith("cannot write the reader-check copy in ")
+    assert "(disk full?)" in reason and "cannot read its cache" not in reason
+
+
+def _sigterm_during(monkeypatch, attribute):
+    import archi.snapshot.builder as builder_module
+
+    real = getattr(builder_module, attribute)
+    fired = []
+
+    def wrapper(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(1)  # the handler raises before this returns
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builder_module, attribute, wrapper)
+
+
+@pytest.mark.parametrize("attribute", ["_run_reader", "write_archive"])
+def test_sigterm_cleans_tmp_dir_and_output_staging(
+    tmp_path, sources, system_tmp, monkeypatch, attribute
+):
+    work = tmp_path / "work-tmp"
+    work.mkdir()
+    _sigterm_during(monkeypatch, attribute)
+    config = write_config(tmp_path, sources, only=["dqm", "jira"])
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit) as info:
+        cli_main(["build", "--config", str(config), "--out", str(tmp_path / "o"),
+                  "--tmp-dir", str(work)])
+    assert info.value.code == 128 + signal.SIGTERM
+    assert list(work.iterdir()) == []
+    assert list(system_tmp.iterdir()) == []
+    assert not (tmp_path / "o").exists()
+    assert not list(tmp_path.glob(".o.*"))  # the output staging directory
+    assert signal.getsignal(signal.SIGTERM) is before
 
 
 def test_cli_tmp_dir_must_exist(tmp_path, sources, capsys):

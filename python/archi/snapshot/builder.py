@@ -29,8 +29,11 @@ inside the group's directory, contents digest).
 """
 from __future__ import annotations
 
+import codecs
+import contextvars
 import dataclasses
 import datetime as dt
+import errno
 import fnmatch
 import hashlib
 import io
@@ -42,7 +45,7 @@ import socket
 import subprocess
 import tarfile
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
@@ -52,7 +55,13 @@ from archi.enrichment.anonymizer import (
     redact_email_addresses,
     redact_email_addresses_with_count,
 )
-from archi.snapshot.groups import GROUPS, GroupSpec, JsonFile, Schema
+from archi.snapshot.groups import (
+    GROUPS,
+    SIGNATURE_SHARE,
+    GroupSpec,
+    JsonFile,
+    Schema,
+)
 
 LOCK_NAME = "snapshot.lock.yaml"
 LOCK_VERSION = 1
@@ -215,7 +224,9 @@ class PreparedGroup:
     kept_fields: tuple[str, ...]
     deep_dropped_keys: tuple[str, ...] = ()
     input_file: Optional[str] = None
-    transcoded: dict[str, int] = field(default_factory=dict)
+    #: For groups whose text may fall back on invalid bytes (TWiki):
+    #: pages, pages with fallback runs, and fallback bytes per decoding.
+    text_stats: Optional[dict[str, Any]] = None
 
 
 def prepare_group(
@@ -302,14 +313,26 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
             keep=keep if record_level else set(),
         )
         final[archive_path] = _dump_json(_drop_keys_deep(pruned, deep))
-    transcoded: dict[str, int] = {}
+    text_stats: Optional[dict[str, Any]] = None
     if spec.text is not None:
+        fallback = spec.text.fallback_invalid_bytes
+        if fallback:
+            text_stats = {
+                "text_pages": 0,
+                "pages_valid_utf8": 0,
+                "pages_with_fallback_runs": 0,
+                "fallback_bytes": {"cp1252": 0, "latin-1": 0},
+            }
         for rel, path in _text_files(spec, source):
-            text, encoding = _read_text(
-                group.name, rel, path, spec.text.fallback_encodings
-            )
-            if encoding != "utf-8":
-                transcoded[encoding] = transcoded.get(encoding, 0) + 1
+            text, stats = _read_text(group.name, rel, path, fallback=fallback)
+            if text_stats is not None:
+                text_stats["text_pages"] += 1
+                if any(stats.values()):
+                    text_stats["pages_with_fallback_runs"] += 1
+                    for kind, count in stats.items():
+                        text_stats["fallback_bytes"][kind] += count
+                else:
+                    text_stats["pages_valid_utf8"] += 1
             data = counter.redact(text).encode("utf-8")
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
@@ -334,7 +357,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         kept_fields=tuple(sorted(keep)),
         deep_dropped_keys=tuple(sorted(deep)),
         input_file=spec.primary_input,
-        transcoded=transcoded,
+        text_stats=text_stats,
     )
 
 
@@ -414,12 +437,25 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
         if reason:
             raise GroupRefused(group, f"{spec.name}: {reason}")
         return
-    if spec.identity is None:
-        return
-    for where, item in items:
-        reason = spec.identity(item)
-        if reason:
-            raise GroupRefused(group, f"{spec.name} {where} is malformed: {reason}")
+    records = list(items)
+    if spec.identity is not None:
+        for where, item in records:
+            reason = spec.identity(item)
+            if reason:
+                raise GroupRefused(
+                    group, f"{spec.name} {where} is malformed: {reason}"
+                )
+    if spec.signature is not None:
+        if not records:
+            raise GroupRefused(group, f"{spec.name} holds no records")
+        carrying = sum(1 for _, item in records if spec.signature.matches(item))
+        if carrying < SIGNATURE_SHARE * len(records):
+            raise GroupRefused(
+                group,
+                f"{spec.name}: only {carrying} of {len(records)} records carry "
+                f"{spec.signature.description} ({SIGNATURE_SHARE:.0%} needed); "
+                "is it another export?",
+            )
 
 
 def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
@@ -496,28 +532,77 @@ def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
     return [(rel, _safe_file(spec.name, source, rel)) for rel in sorted(names)]
 
 
+_FALLBACK_ERRORS = "archi-snapshot-cp1252-runs"
+_fallback_counts: contextvars.ContextVar[dict[str, int]] = contextvars.ContextVar(
+    "archi_snapshot_fallback_counts"
+)
+
+
+def _decode_invalid_run(exc: UnicodeError) -> tuple[str, int]:
+    """Codec error handler: decode one invalid UTF-8 byte run as cp1252.
+
+    Bytes cp1252 leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) decode as
+    Latin-1, which gives C1 control characters; the control-character checks
+    below then see them.
+    """
+    if not isinstance(exc, UnicodeDecodeError):
+        raise exc
+    counts = _fallback_counts.get()
+    chars = []
+    for byte in exc.object[exc.start : exc.end]:
+        try:
+            chars.append(bytes([byte]).decode("cp1252"))
+            counts["cp1252"] += 1
+        except UnicodeDecodeError:
+            chars.append(chr(byte))
+            counts["latin-1"] += 1
+    return "".join(chars), exc.end
+
+
+codecs.register_error(_FALLBACK_ERRORS, _decode_invalid_run)
+
+#: C0 controls other than tab, newline and carriage return, DEL, and C1.
+_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+#: A page with more control characters than this share is binary, not text.
+CONTROL_SHARE_LIMIT = 0.01
+
+
 def _read_text(
-    group: str, rel: str, path: Path, fallbacks: tuple[str, ...] = ()
-) -> tuple[str, str]:
-    """The file's text and the encoding it was decoded with.
+    group: str, rel: str, path: Path, *, fallback: bool = False
+) -> tuple[str, dict[str, int]]:
+    """The file's text, and how many bytes were decoded by the fallback.
 
     A NUL byte always refuses the group (UTF-16 puts a NUL between the letters
-    of an address, hiding it from the redactor). Text that is not UTF-8 is
-    decoded with the first of ``fallbacks`` that accepts it, or refuses the
-    group when there are none.
+    of an address, hiding it from the redactor). Invalid UTF-8 refuses it
+    unless ``fallback``: then only each invalid byte run is decoded as cp1252
+    (Latin-1 for bytes cp1252 leaves undefined) and valid UTF-8 stays intact.
+    Decoded text that is more than 1% control characters is refused as
+    binary.
     """
     data = path.read_bytes()
     if b"\0" in data:
         raise GroupRefused(group, f"{rel} contains NUL bytes (not UTF-8 text)")
-    try:
-        return data.decode("utf-8"), "utf-8"
-    except UnicodeDecodeError as exc:
-        for encoding in fallbacks:
-            try:
-                return data.decode(encoding), encoding
-            except UnicodeDecodeError:
-                continue
-        raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
+    counts = {"cp1252": 0, "latin-1": 0}
+    if fallback:
+        token = _fallback_counts.set(counts)
+        try:
+            text = data.decode("utf-8", errors=_FALLBACK_ERRORS)
+        finally:
+            _fallback_counts.reset(token)
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
+    if text:
+        controls = len(_CONTROL_RE.findall(text))
+        if controls / len(text) > CONTROL_SHARE_LIMIT:
+            raise GroupRefused(
+                group,
+                f"{rel} looks binary: {controls} of {len(text)} characters "
+                f"({100 * controls / len(text):.1f}%) are control characters",
+            )
+    return text, counts
 
 
 def _strings(value: Any) -> Iterator[str]:
@@ -533,7 +618,10 @@ def _strings(value: Any) -> Iterator[str]:
 
 
 def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
-    """Every string must be a fixed point of the redactor."""
+    """Every string must be a fixed point of the redactor, also with its
+    control characters removed: a control character inside an address (for
+    example a C1 control from the Latin-1 fallback in ``a.b@c<U+0081>d.ch``)
+    hides it from the redactor, so such a string refuses the group."""
     for path, data in files.items():
         text = data.decode("utf-8")
         strings = _strings(json.loads(text)) if path.endswith(".json") else [text]
@@ -542,6 +630,13 @@ def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
                 raise GroupRefused(
                     group, f"{path}: an address survived redaction"
                 )
+            if _CONTROL_RE.search(value):
+                bare = _CONTROL_RE.sub("", value)
+                if redact_email_addresses(bare) != bare:
+                    raise GroupRefused(
+                        group,
+                        f"{path}: an address is split by a control character",
+                    )
 
 
 def _reader_check(
@@ -561,9 +656,18 @@ def _reader_check(
     ) as tmp:
         full_root = Path(tmp) / "redacted"
         final_root = Path(tmp) / "final"
-        for root, files in ((full_root, redacted), (final_root, final)):
-            _stage(root, spec.validation_stubs)
-            _stage(root, files)
+        try:
+            for root, files in ((full_root, redacted), (final_root, final)):
+                _stage(root, spec.validation_stubs)
+                _stage(root, files)
+        except OSError as exc:
+            full = exc.errno in (errno.ENOSPC, errno.EDQUOT)
+            raise GroupRefused(
+                spec.name,
+                "cannot write the reader-check copy in "
+                f"{tmp}{' (disk full?)' if full else ''}: "
+                f"{type(exc).__name__}: {exc}",
+            ) from exc
         full_facts, _ = _run_reader(spec, full_root)
         final_facts, record_count = _run_reader(spec, final_root)
     if full_facts != final_facts:
@@ -779,9 +883,8 @@ def build(
                 row["dropped_keys_at_any_depth"] = list(group.deep_dropped_keys)
             if group.input_file:
                 row["input_file"] = group.input_file
-            if GROUPS[group.name].text is not None or group.transcoded:
-                row["transcoded_files"] = sum(group.transcoded.values())
-                row["transcoded_by_encoding"] = dict(sorted(group.transcoded.items()))
+            if group.text_stats is not None:
+                row.update(group.text_stats)
             groups_lock[group.name] = row
         lock = {
             "lock_version": LOCK_VERSION,
