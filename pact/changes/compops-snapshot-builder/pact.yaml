@@ -134,9 +134,11 @@ requirements:
     a refusal and a SIGTERM (which also removes the output staging directory); a full --tmp-dir
     is reported as a write failure. [evidence: executed_test]
 
-    - acc.compops-snapshot-builder.file-dates: an optional per-group file_dates map (Jason,
-    2026-09-28: the June CRIC set, files dated 06-12, facilities fetched 04-09) is carried
-    into the lock, and must name a file the group archives. [evidence: executed_test]
+    - acc.compops-snapshot-builder.file-dates: an optional per-group file_dates map is carried
+    into the lock and must name a file the group archives; an optional per-group note (at most
+    300 characters, refused if it holds an address) is carried into the lock, so the June CRIC
+    group records collected: 2026-04-09 with the note "files written 2026-06-12; fetched
+    2026-04-09" (lead decision, 2026-09-28). [evidence: executed_test]
 
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
     UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an

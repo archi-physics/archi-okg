@@ -1392,3 +1392,54 @@ def test_file_dates_must_be_dates(value):
                                                     "file_dates": value}}},
             base=Path("/tmp"),
         )
+
+
+# --- group notes ---------------------------------------------------------------------
+
+CRIC_NOTE = "files written 2026-06-12; fetched 2026-04-09"
+
+
+def test_a_group_note_is_carried_into_the_lock(tmp_path, sources):
+    # Lead decision, 2026-09-28: the June CRIC set is dated by its fetch, and the
+    # lock itself says when the files were written.
+    config = write_config(
+        tmp_path, sources, only=["cric"], extra={"cric": {"collected": "2026-04-09", "note": CRIC_NOTE}}
+    )
+    out = tmp_path / "out"
+    build(load_config(config), out)
+    row = yaml.safe_load((out / LOCK_NAME).read_text())["groups"]["cric"]
+    assert row["collected"] == "2026-04-09"
+    assert row["note"] == CRIC_NOTE
+    assert "file_dates" not in row
+    assert verify(out / LOCK_NAME, out).ok
+
+
+def test_a_group_without_a_note_has_none_in_the_lock(built):
+    _, lock = built
+    assert all("note" not in row for row in lock["groups"].values())
+
+
+@pytest.mark.parametrize(
+    "note, expected",
+    [("x" * 301, "'note' is 301 characters; the limit is 300"), ("   ", "non-empty text"), (7, "non-empty text")],
+)
+def test_note_must_be_short_text(note, expected):
+    with pytest.raises(SnapshotError, match=expected):
+        parse_config(
+            {"snapshot": "s", "groups": {"cric": {"path": "x", "collected": "2026-04-09", "note": note}}},
+            base=Path("/tmp"),
+        )
+
+
+@pytest.mark.parametrize(
+    "note, expected",
+    [
+        ("fetched by jdoe@cern.ch", "note: an address survived redaction"),
+        ("fetched by a.b@c\u0081d.ch", "note: an address is split by a control character"),
+    ],
+)
+def test_an_address_in_a_note_refuses_the_group(tmp_path, sources, note, expected):
+    config = write_config(tmp_path, sources, only=["cric"], extra={"cric": {"note": note}})
+    with pytest.raises(BuildRefused, match=expected):
+        build(load_config(config), tmp_path / "out")
+    assert not (tmp_path / "out").exists()

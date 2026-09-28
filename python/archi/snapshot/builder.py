@@ -72,7 +72,9 @@ DEFAULT_ZSTD_LEVEL = 19
 VALIDATION_RUN_ID = "snapshot-validate"
 _DATE = r"\d{4}-\d{2}-\d{2}"
 _COLLECTED_RE = re.compile(rf"^({_DATE})(?:\.\.({_DATE}))?$")
-_GROUP_KEYS = {"path", "collected", "file_dates", "drop_fields", "keep_fields"}
+_GROUP_KEYS = {"path", "collected", "file_dates", "note", "drop_fields", "keep_fields"}
+#: A group note is a line or two for the lock, not a document.
+NOTE_MAX_CHARS = 300
 _CONFIG_KEYS = {"snapshot", "zstd_level", "groups"}
 
 
@@ -114,6 +116,8 @@ class GroupConfig:
     #: file fetched earlier than the rest), by file name in the group
     #: directory. Carried into the lock.
     file_dates: tuple[tuple[str, str], ...] = ()
+    #: Free text carried into the lock (for example how the dates were read).
+    note: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +187,21 @@ def _parse_group(name: str, raw: Any, base: Path) -> GroupConfig:
         drop_fields=_field_list(name, raw, "drop_fields"),
         keep_fields=_field_list(name, raw, "keep_fields"),
         file_dates=_file_dates(name, raw.get("file_dates")),
+        note=_note(name, raw.get("note")),
     )
+
+
+def _note(name: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise SnapshotError(f"group {name!r}: 'note' must be non-empty text")
+    if len(value) > NOTE_MAX_CHARS:
+        raise SnapshotError(
+            f"group {name!r}: 'note' is {len(value)} characters; "
+            f"the limit is {NOTE_MAX_CHARS}"
+        )
+    return value
 
 
 def _file_dates(name: str, value: Any) -> tuple[tuple[str, str], ...]:
@@ -248,6 +266,7 @@ class PreparedGroup:
     #: pages, pages with fallback runs, and fallback bytes per decoding.
     text_stats: Optional[dict[str, Any]] = None
     file_dates: tuple[tuple[str, str], ...] = ()
+    note: Optional[str] = None
 
 
 def prepare_group(
@@ -373,6 +392,8 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                 f"file_dates names {file_name}, which the group does not archive",
             )
     _check_no_addresses(group.name, final)
+    if group.note is not None:
+        _check_string(group.name, "note", group.note)
     record_count = _reader_check(spec, redacted, final, tmp_dir)
     return PreparedGroup(
         name=group.name,
@@ -386,6 +407,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         input_file=spec.primary_input,
         text_stats=text_stats,
         file_dates=group.file_dates,
+        note=group.note,
     )
 
 
@@ -654,17 +676,18 @@ def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
         text = data.decode("utf-8")
         strings = _strings(json.loads(text)) if path.endswith(".json") else [text]
         for value in strings:
-            if redact_email_addresses(value) != value:
-                raise GroupRefused(
-                    group, f"{path}: an address survived redaction"
-                )
-            if _CONTROL_RE.search(value):
-                bare = _CONTROL_RE.sub("", value)
-                if redact_email_addresses(bare) != bare:
-                    raise GroupRefused(
-                        group,
-                        f"{path}: an address is split by a control character",
-                    )
+            _check_string(group, path, value)
+
+
+def _check_string(group: str, where: str, value: str) -> None:
+    if redact_email_addresses(value) != value:
+        raise GroupRefused(group, f"{where}: an address survived redaction")
+    if _CONTROL_RE.search(value):
+        bare = _CONTROL_RE.sub("", value)
+        if redact_email_addresses(bare) != bare:
+            raise GroupRefused(
+                group, f"{where}: an address is split by a control character"
+            )
 
 
 def _reader_check(
@@ -897,6 +920,7 @@ def build(
             row: dict[str, Any] = {
                 "collected": group.collected,
                 **({"file_dates": dict(group.file_dates)} if group.file_dates else {}),
+                **({"note": group.note} if group.note is not None else {}),
                 "archive": archive.name,
                 "sha256": _sha256_file(archive),
                 "bytes": archive.stat().st_size,

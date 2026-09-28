@@ -30,9 +30,8 @@ groups:
     collected: 2026-08-31           # required: YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD
   cric:
     path: /data/cms-202606/cric
-    collected: 2026-06-12
-    file_dates:                     # optional: a file dated apart from the rest
-      facilities.json: 2026-04-09
+    collected: 2026-04-09           # when the data was fetched
+    note: files written 2026-06-12; fetched 2026-04-09   # optional, into the lock
   indico:
     path: /data/cms-202606/indico
     collected: 2026-06-12..2026-06-16
@@ -41,7 +40,13 @@ groups:
     collected: 2026-08-31
     drop_fields: [SomeField]        # optional, top-level record fields
     keep_fields: [OtherField]       # optional, keep an unread field
+    file_dates:                     # optional, only when one file's date differs
+      records.json: 2026-08-30      # from the group's own `collected`
 ```
+
+`collected` is when the data was fetched, not when the files were written.
+`note` is free text of at most 300 characters, carried into the lock so the
+snapshot describes itself; it must contain no email address.
 
 ```
 python -m archi.snapshot build --config snapshot.yaml --out <new-empty-dir> [--built-by NAME] [--tmp-dir DIR]
@@ -129,7 +134,8 @@ deterministic: members sorted by path, mtime fixed at 2000-01-01, owner 0,
 mode 0644, PAX tar, `zstd -T1` at the configured level. Two builds from the
 same input with the same zstd version give byte-identical archives.
 
-The lock records, per group: `collected`, `file_dates` (when configured), `archive`, `sha256`, `bytes`,
+The lock records, per group: `collected`, `file_dates` and `note` (when
+configured), `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
 `addresses_removed`, `input_file` (for CMSSW, which input was used),
 `text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs` and
