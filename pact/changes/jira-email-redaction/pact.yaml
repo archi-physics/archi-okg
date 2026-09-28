@@ -66,14 +66,32 @@ requirements:
     byte-identical and its chunk text and chunk id do not change.
 
 
-    Accepted over-removal (fail closed): a URL query key before an address goes with it (?mail=bob%40cern.ch
-    leaves ?), and address-shaped non-mail tokens are removed (image@2x.png, the user@host
-    part of git@github.com:org/x and https://user@host/x).
+    Accepted over-removal (fail closed): characters of the local-part set next to an address
+    go with it. A whole query string before an address goes, not only a mail= key
+    (?project=CMS&assignee=bob@cern.ch and ?mail=bob%40cern.ch both leave ?); JIRA table
+    separators around an address go (|bob@cern.ch|alice@fnal.gov| leaves |); and
+    address-shaped non-mail tokens are removed (image@2x.png, the user@host part of
+    git@github.com:org/x and https://user@host/x).
 
 
-    Known gaps, not covered: an IP-literal domain (bob@[127.0.0.1]); MIME =40 header encoding;
-    a quoted local part that itself contains @ ("a@b"@cern.ch leaves a@b); a domain with no
+    Known gaps, not covered (verified at 619e2ab):
+
+    - An IP-literal domain (bob@[127.0.0.1]), MIME =40 header encoding, and a domain with no
     dot (bob@localhost).
+
+    - A letter written as an HTML character reference: jdo&#101;@cern.ch, bob@&#99;ern.ch and
+    fully entity-encoded addresses are not removed; an encoded soft hyphen (b&shy;ob@cern.ch,
+    b&#173;ob@cern.ch) leaves b&shy; or b&#173;.
+
+    - Ideographic and halfwidth dots (U+3002, U+FF61) and the URL-encoded dot %2E are not dots,
+    so bob@cern<U+3002>ch, bob@cern<U+FF61>ch and bob%40cern%2Ech pass through.
+
+    - Invisible characters outside the handled set (soft hyphen, U+200B-U+200D, U+2060) cut
+    the address: U+FEFF, U+200E or U+2062 inside bob leaves bo and that character.
+
+    - Two separators: bob@lxplus@cern.ch leaves bob@. A quoted local part with an escaped
+    quote ("bob\"x"@cern.ch) leaves "bob\, and one that contains @ ("a@b"@cern.ch) is not
+    removed at all.
 
 
     Acceptance:
@@ -90,7 +108,8 @@ requirements:
     characters), keeps entities around an address, keeps version pins such as numpy@1.26.4,
     leaves address-free text (including &amp;, &commat;, &#64; and fullwidth @ on their own)
     byte-identical, agrees with a slow single-regex definition of the same grammar on 20,000
-    random strings, and runs in linear time on long runs with and without separators. [evidence:
+    random strings (plain ASCII without the digits 4, 6, 0 or quotes, so it shows the
+    scanner follows its rules, not that the rules catch every address), and runs in linear time on long runs with and without separators. [evidence:
     executed_test]'
 tasks:
 - id: task.jira-email-redaction.deliver
