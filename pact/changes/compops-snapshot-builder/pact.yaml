@@ -2,31 +2,31 @@ pact_version: 5
 id: compops-snapshot-builder
 title: Move the cms cache downloaders into archi and add a cache snapshot builder
 tier: 2
-why: 'Row 6 ("A4") of the comp-ops design that Jason approved on 2026-09-28
-  (okg branch claude/lane-b, pact/changes/epoch-lane-b-comp-ops/evidence/compops-inventory-design.md,
-  sections 1d, 6.4 and 7). Two gaps block a comp-ops install that needs no CERN credentials.
+why: 'Row 6 ("A4") of the comp-ops design that Jason approved on 2026-09-28 (okg branch claude/lane-b,
+  pact/changes/epoch-lane-b-comp-ops/evidence/compops-inventory-design.md, sections 1d, 6.4
+  and 7). Two gaps block a comp-ops install that needs no CERN credentials.
 
 
-  First, the only cache downloaders (download_jira.py, download_static_docs.py, sso-login.py and
-  their source-download-manifest.yaml) live in okg-deployments cms/scripts, which the comp-ops
-  rewrite deletes. The design moves them to archi-okg, where docs/connector-caches.md already
-  names them. They import nothing from okg; their defaults assumed the okg-deployments layout
-  (data/cms/..., <repo>/.cookies).
+  First, the only cache downloaders (download_jira.py, download_static_docs.py, sso-login.py
+  and their source-download-manifest.yaml) live in okg-deployments cms/scripts, which the
+  comp-ops rewrite deletes. The design moves them to archi-okg, where docs/connector-caches.md
+  already names them. They import nothing from okg; their defaults assumed the okg-deployments
+  layout (data/cms/..., <repo>/.cookies).
 
 
   Second, six of the ten required source groups have no downloader and two need CERN tokens,
-  so the design ships one private, checksummed cache snapshot. Nothing can build or check one
-  today. The builder must validate each group the way its archi reader reads it, remove every
-  email address, drop fields the readers never read, and write deterministic archives with a
-  lock file a fresh machine can verify.
+  so the design ships one private, checksummed cache snapshot. Nothing can build or check
+  one today. The builder must validate each group the way its archi reader reads it, remove
+  every email address, drop fields the readers never read, and write deterministic archives
+  with a lock file a fresh machine can verify.
 
 
   Jason''s answers, relayed by the lane B lead on 2026-09-28: (1) the first snapshot mixes
   collection dates (Aug 31 for cric, cric-core, jira, gitlab-docs and twiki-eos; June 12-16
   for indico, dqm, gocdb-downtimes, cmssw-releases and conddb-global-tags), so each group''s
-  collection date is a required config field carried into the lock; (2) WMStats drops
-  RequestorDN and keeps Requestor by default. This change builds no real snapshot and reads
-  no real cache; that is design row 12, after this merges.'
+  collection date is a required config field carried into the lock; (2) WMStats drops RequestorDN
+  and keeps Requestor by default. This change builds no real snapshot and reads no real cache;
+  that is design row 12, after this merges.'
 affected_code:
 - python/archi/downloaders/__init__.py
 - python/archi/downloaders/jira.py
@@ -50,17 +50,17 @@ requirements:
   statement: 'The JIRA, static-docs and SSO-login downloaders and the source download manifest
     run from archi-okg as python -m archi.downloaders.{jira,static_docs,sso_login}, import
     nothing from okg, and write caches the archi readers accept. Default output paths follow
-    ARCHI_DATA_ROOT (data/jira, data/gitlab-docs, data/docsite) and cookie files go to
-    --cookie-dir, else ARCHI_COOKIE_DIR, else ./.cookies. Record shapes and the login flow are
-    unchanged from okg-deployments main 32f2b4e3c2.
+    ARCHI_DATA_ROOT (data/jira, data/gitlab-docs, data/docsite) and cookie files go to --cookie-dir,
+    else ARCHI_COOKIE_DIR, else ./.cookies. Record shapes and the login flow are unchanged
+    from okg-deployments main 32f2b4e3c2.
 
 
     Acceptance:
 
-    - acc.compops-snapshot-builder.jira-download: with a fake jira client, the downloader pages
-    through issues, writes records.json and meta.json, and the archi JIRA reader reads the cache
-    with a completed scope; a missing token or a missing jira package stops with a named message.
-    [evidence: executed_test]
+    - acc.compops-snapshot-builder.jira-download: with a fake jira client, the downloader
+    pages through issues, writes records.json and meta.json, and the archi JIRA reader reads
+    the cache with a completed scope; a missing token or a missing jira package stops with
+    a named message. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.docs-download: with a fake HTTP session, the static-docs
     downloader writes GitLab and public-page caches that the archi documentation reader reads
@@ -74,40 +74,41 @@ requirements:
   statement: 'python -m archi.snapshot build takes a config mapping each group to its cache
     directory and a required collection date (YYYY-MM-DD or a YYYY-MM-DD..YYYY-MM-DD range),
     so one snapshot can mix collection dates. For each group it refuses, with an error naming
-    the group, file and record, any missing file, invalid JSON, wrong shape or record the reader
-    would skip or drop; removes every email address from every string with redact_email_addresses;
+    the group, file and record, any missing file, invalid JSON, wrong shape or record the
+    reader would skip or drop; removes every email address from every string with redact_email_addresses;
     drops every field the reader does not read plus the configured drop_fields (WMStats always
-    drops RequestorDN and keeps Requestor); and runs the group''s archi reader, which must report
-    health ok, a completed scope, and the same facts as from the unpruned cache. If any group is
-    refused nothing is written. Otherwise it writes one deterministic tar.zst per group and
-    snapshot.lock.yaml with each group''s collection date, SHA-256, size, file count, record count
-    and contents digest. python -m archi.snapshot verify checks archives against a lock.
+    drops RequestorDN and keeps Requestor); and runs the group''s archi reader, which must
+    report health ok, a completed scope, and the same facts as from the unpruned cache. If
+    any group is refused nothing is written. Otherwise it writes one deterministic tar.zst
+    per group and snapshot.lock.yaml with each group''s collection date, SHA-256, size, file
+    count, record count and contents digest. python -m archi.snapshot verify checks archives
+    against a lock.
 
 
     Acceptance:
 
-    - acc.compops-snapshot-builder.malformed: a malformed record in any of 11 JSON groups refuses
-    exactly that group and writes nothing. [evidence: executed_test]
+    - acc.compops-snapshot-builder.malformed: a malformed record in any of 11 JSON groups
+    refuses exactly that group and writes nothing. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.addresses: a planted address in each of the 12 text-bearing
     groups is absent from every archive. [evidence: executed_test]
 
-    - acc.compops-snapshot-builder.jira-facts: the archi JIRA reader emits the same facts from a
-    raw JIRA fixture and from the snapshot''s redacted copy. [evidence: executed_test]
+    - acc.compops-snapshot-builder.jira-facts: the archi JIRA reader emits the same facts
+    from a raw JIRA fixture and from the snapshot''s redacted copy. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.deterministic: two builds give byte-identical archives.
     [evidence: executed_test]
 
-    - acc.compops-snapshot-builder.verify: verify fails, naming the group, on one flipped byte.
-    [evidence: executed_test]
+    - acc.compops-snapshot-builder.verify: verify fails, naming the group, on one flipped
+    byte. [evidence: executed_test]
 
-    - acc.compops-snapshot-builder.requestor-dn: the WMStats DN never appears in the output, even
-    when a config asks to keep it; Requestor is kept. [evidence: executed_test]'
+    - acc.compops-snapshot-builder.requestor-dn: the WMStats DN never appears in the output,
+    even when a config asks to keep it; Requestor is kept. [evidence: executed_test]'
 tasks:
 - id: task.compops-snapshot-builder.downloaders
   requirement: req.compops-snapshot-builder.downloaders
-  verification: 'Copy the three scripts and the manifest verbatim in one commit, adapt them in
-    the next, and test them offline.
+  verification: 'Copy the three scripts and the manifest verbatim in one commit, adapt them
+    in the next, and test them offline.
 
 
     Proof: the downloader tests fail against the verbatim copies and pass with the change.
@@ -132,5 +133,34 @@ tasks:
     - python/tests/snapshot [evidence: pytest]
 
     - python/tests [evidence: pytest]'
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 96a34d62f89c90748340c43d8a0c02d4779b16d8
+  at: '2026-09-28T06:14:54+00:00'
+  note: '13 passed at this head (okg origin/dev ef4121e62f exported source, Python 3.12, no
+    network: fake jira client, fake requests.Session). The same 13 tests against the verbatim
+    okg-deployments copies (commit c87fc27): 9 failed (ARCHI_DATA_ROOT default, named missing-jira
+    error, cookie-dir precedence and the three sso tests that pass --cookie-dir or directory=,
+    both static-docs runs that rely on the ARCHI_DATA_ROOT outputs and main(argv), and the
+    manifest paths); the 4 that already passed are the unchanged JIRA record/cache shape,
+    probe-only, missing token, and GitLab token fallback.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 96a34d62f89c90748340c43d8a0c02d4779b16d8
+  at: '2026-09-28T06:14:54+00:00'
+  note: '582 passed at this head (okg origin/dev ef4121e62f exported source, Python 3.12,
+    zstd v1.5.7, hatchling on the path for the wheel tests), including 59 snapshot tests on
+    synthetic fixtures: 11 malformed-record cases each refuse only their group and write nothing;
+    a planted address in each of 12 text-bearing groups is absent from every archive; JIRA
+    reader facts from the raw fixture equal those from the snapshot copy; archives byte-identical
+    across two builds; verify fails naming dqm on one flipped byte. Before this change the
+    snapshot tests fail at import (no archi.snapshot). Mutation sweep, each safeguard disabled
+    in turn against the 59 tests: no redaction 14 failed, no pruning 4, no record check 12,
+    clock mtime 2, shuffled members 1, verify without SHA-256 1, no reader fact comparison
+    2, no WMStats DN default drop 3. No real cache was read.'
 decisions: []
