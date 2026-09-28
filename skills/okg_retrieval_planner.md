@@ -15,6 +15,13 @@ Use this plan before answering:
 3. Inspect promising canonical candidates with `inspect`. When search returns
    chunks, roll them to parent issues or documentation pages before treating
    them as final evidence.
+   When the question names a specific page, document, or ticket, or search
+   surfaces one as the likely source, read its text with
+   `inspect(target={"kind": "text", "node_id": "<page node id>"})` before
+   answering or concluding the answer is absent. `inspect` with
+   `kind: "node"` on a page returns metadata (title, URL) only. For a long
+   page, repeat the call with the returned `continuation_token` in the target
+   while `complete` is false.
 4. Expand compact hits into source context. For a promising chunk, use
    `expand` or bounded `query` to find its parent document/ticket and
    adjacent or ordered sibling chunks before synthesis.

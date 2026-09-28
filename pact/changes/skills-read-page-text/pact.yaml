@@ -1,0 +1,50 @@
+pact_version: 5
+id: skills-read-page-text
+title: 'Skills: read a named page''s text before answering'
+tier: 1
+why: 'In a skills benchmark run on 2026-09-28, a question named one specific TWiki page.
+  In 0 of 15 agent runs did the agent read that page''s text first. Inspecting the page
+  node (inspect with kind "node") returns only its metadata, such as title and URL. Only
+  the runs that went on to read the text found the answer; some others concluded the answer
+  was not in the graph.
+
+
+  okg now has a one-call read of a whole record''s text: inspect(target={"kind": "text",
+  "node_id": ...}) returns the text of a page, document, or ticket in reading order, in
+  pages that resume with a continuation_token while complete is false, and reports
+  order_basis and coverage. It reads chunks linked to the record by contains or member_of
+  edges; the archi TWiki and JIRA sources link their chunks by contains edges. The CMS
+  retrieval skills did not teach this read.
+
+
+  This change adds that rule to the three retrieval skills and nothing else. The
+  minimum-evidence rules from closed pull request #12 are not included.'
+affected_code:
+- skills/okg_traversal.md
+- skills/okg_retrieval_planner.md
+- skills/agentic_benchmark.md
+- python/tests/test_skills.py
+requirements:
+- id: req.skills-read-page-text.main
+  statement: 'okg_traversal.md, okg_retrieval_planner.md and agentic_benchmark.md each
+    tell the agent: when the question names a specific page, document, or ticket, or search
+    surfaces one as the likely source, read its text with inspect(target={"kind": "text",
+    "node_id": ...}) before answering or concluding the answer is absent; inspect with kind
+    "node" gives metadata only; and while complete is false, follow the continuation_token.
+    No other rule in these skills changes.'
+tasks:
+- id: task.skills-read-page-text.deliver
+  requirement: req.skills-read-page-text.main
+  verification: 'Add the rule to the three skills and a test in python/tests/test_skills.py
+    that checks each skill for it.
+
+
+    Proof: the new test fails against main''s skills and passes with the change, and the
+    full archi suite passes.
+
+
+    Test plan:
+
+    - python/tests [evidence: pytest]'
+evidence: []
+decisions: []
