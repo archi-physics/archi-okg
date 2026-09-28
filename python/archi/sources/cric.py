@@ -23,7 +23,7 @@ and ``schemas/bridges/``; ``output_scope_summary`` must accompany
 
     cric:
       module: archi.sources.cric
-      class: CRICSource
+      class: CRICAdapter
       ownership_id: <instance>.cric
       admission_policy:
         producer_id: <instance>.cric
@@ -74,7 +74,7 @@ and ``schemas/bridges/``; ``output_scope_summary`` must accompany
 
     cric_core:
       module: archi.sources.cric
-      class: CRICCoreSource
+      class: CRICCoreAdapter
       ownership_id: <instance>.cric-core
       admission_policy:
         producer_id: <instance>.cric-core
@@ -134,6 +134,7 @@ from archi.auth.cache import (
     load_json,
     resolve_repo_path,
 )
+from archi.sources._sdk_adapter import ReaderAdapter
 
 _TIER_MAP = {0: "T0", 1: "T1", 2: "T2", 3: "T3"}
 _NODE_ID_PREFIX = {
@@ -755,3 +756,39 @@ def _core_edge_facts(
                 },
                 source_revision=revision,
             )
+
+
+class CRICAdapter(ReaderAdapter):
+    """Registry adapter for :class:`CRICSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = CRICSource
+    profile = "discovery_crawl"
+    change_probe_kind = "content_hash"
+
+
+class CRICCoreAdapter(ReaderAdapter):
+    """Registry adapter for :class:`CRICCoreSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = CRICCoreSource
+    profile = "discovery_crawl"
+    change_probe_kind = "content_hash"

@@ -20,7 +20,7 @@ Registry-entry template — same three prerequisites as
 
     gocdb_downtimes:
       module: archi.sources.gocdb
-      class: GoCDBDowntimeSource
+      class: GoCDBDowntimeAdapter
       ownership_id: <instance>.gocdb-downtimes
       admission_policy:
         producer_id: <instance>.gocdb-downtimes
@@ -81,6 +81,7 @@ from archi.auth.cache import (
     resolve_repo_path,
 )
 from archi.sources._cache_report import skipped_items_status
+from archi.sources._sdk_adapter import ReaderAdapter
 
 
 @dataclass(frozen=True)
@@ -374,3 +375,21 @@ def _affects_edges(
             },
             source_revision=revision,
         )
+
+
+class GoCDBDowntimeAdapter(ReaderAdapter):
+    """Registry adapter for :class:`GoCDBDowntimeSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = GoCDBDowntimeSource
+    profile = "discovery_crawl"
+    change_probe_kind = "content_hash"

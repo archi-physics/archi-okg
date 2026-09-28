@@ -18,7 +18,7 @@ Registry-entry template — same three prerequisites as
 
     conddb_global_tags:
       module: archi.sources.conddb
-      class: CondDBGlobalTagSource
+      class: CondDBGlobalTagAdapter
       ownership_id: <instance>.conddb-global-tags
       admission_policy:
         producer_id: <instance>.conddb-global-tags
@@ -79,6 +79,7 @@ from archi.sources._cache_report import (
     cache_preflight_result,
     cache_source_health,
 )
+from archi.sources._sdk_adapter import ReaderAdapter
 
 _GT_VERSION_RE = re.compile(r"_v(\d+)$")
 _CMSSW_VERSION_RE = re.compile(r"^CMSSW_(\d+)_(\d+)_(\d+)")
@@ -354,3 +355,21 @@ def _parse_cmssw_family(label: str) -> dict[str, Any]:
         "minor": int(minor),
         "family": True,
     }
+
+
+class CondDBGlobalTagAdapter(ReaderAdapter):
+    """Registry adapter for :class:`CondDBGlobalTagSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = CondDBGlobalTagSource
+    profile = "reference_catalog"
+    change_probe_kind = "content_hash"

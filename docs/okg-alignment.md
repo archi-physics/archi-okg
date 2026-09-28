@@ -20,6 +20,20 @@ reimplementation of OKG services.
 
 ## Current state (update this section when it changes)
 
+**Comp-ops readers can now be run by okg (2026-09-27).** CRIC, CRIC core, DQM,
+GOCDB downtimes, CondDB global tags, DBS datasets, WMStats workflows and GitHub
+repositories each gain a registry adapter (`CRICAdapter`, `CRICCoreAdapter`,
+`DQMAdapter`, `GoCDBDowntimeAdapter`, `CondDBGlobalTagAdapter`,
+`DBSDatasetAdapter`, `WMStatsWorkflowAdapter`, `GitHubRepoAdapter`), and the
+registry template in each reader's docstring now names it. Before, the template
+named the bare reader, and okg's runner failed every run because the reader's
+result has no `next_cursor`. Tested against okg `5b2fd076c`. **Still blocked:**
+all eight templates declare a profile combination okg refuses at install
+(`record_identity_kind: remote_id` for seven, `content_hash` revisions under
+`mutable_api` for WMStats), so a pasted template still fails `okg install`.
+A test pins that list. HyperNews, SITECONF, the four MONIT readers and
+`CERNPreflightSource` have no adapter yet.
+
 **Archi installs as-is on current okg (2026-09-15, OKG#1906).** okg `dev` @
 `5b2fd076c` removed the framework's Archi-specific install code. Archi needed no
 change: the full suite passes against that commit, and `okg install --profile

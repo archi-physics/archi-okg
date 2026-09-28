@@ -19,7 +19,7 @@ Registry-entry template — same three prerequisites as
 
     wmstats_workflows:
       module: archi.sources.wmstats
-      class: WMStatsWorkflowSource
+      class: WMStatsWorkflowAdapter
       ownership_id: <instance>.wmstats-workflows
       admission_policy:
         producer_id: <instance>.wmstats-workflows
@@ -80,6 +80,7 @@ from archi.sources._cache_report import (
     cache_preflight_result,
     cache_source_health,
 )
+from archi.sources._sdk_adapter import ReaderAdapter
 
 
 @dataclass(frozen=True)
@@ -332,3 +333,21 @@ def _dataset_node(dataset: str, revision: dict[str, Any]) -> NodeFact:
         source_record_id={"dataset": dataset},
         source_revision=revision,
     )
+
+
+class WMStatsWorkflowAdapter(ReaderAdapter):
+    """Registry adapter for :class:`WMStatsWorkflowSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = WMStatsWorkflowSource
+    profile = "mutable_api"
+    change_probe_kind = "content_hash"
