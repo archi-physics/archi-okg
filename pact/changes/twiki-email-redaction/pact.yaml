@@ -142,8 +142,8 @@ requirements:
 
     - url=git@github.com:x/y.git loses url=git@github.com, and url=''git@github.com:x'' loses
     url=''git@github.com (a word before git in the scanned local part is not a wrapper, so
-    a name before git cannot hide an address). git config usually writes url =
-    git@... with spaces, which is kept.
+    a name before git cannot hide an address). git config usually writes url = git@... with
+    spaces, which is kept.
 
     - Table pipes and the TWiki ! escape directly before an address go with it (|x@cern.ch|).
 
@@ -154,8 +154,8 @@ requirements:
     at cern.ch and jdoe AT cern DOT ch reach the chat. On the snapshot this is the largest
     remaining group (see the real-data receipt).
 
-    - The git@ exemption keeps a real mailbox literally named git@ (git@cern.ch), and one written
-    behind a wrapper character (`git@cern.ch`).
+    - The git@ exemption keeps a real mailbox literally named git@ (git@cern.ch), and one
+    written behind a wrapper character (`git@cern.ch`).
 
     - Glued separators before a domain other than cern.ch, fnal.gov, gmail.com, .edu or .gov
     (jdoe_at_infn.it), a bracketed form with doubled spaces or a line break inside it, the
@@ -288,4 +288,45 @@ evidence:
     next address and an ssh login removed). ssh user@host and bracketed-removal tests pass
     on both, as intended (behavior kept). Timing tests under 1 s including new git@ and bracketed-dot
     runs.'
+- kind: executed_test
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 1d1186f74ee0d54d8a3f1fad5ee92a095beed07a
+  at: '2026-09-28T14:33:17+00:00'
+  note: '602 passed at 1d1186f (okg origin/dev 435ab285ac, Python 3.12, hatchling for the
+    wheel tests), after the adversarial-review fixes. The same test files against the cb610275
+    anonymizer: 25 failed, 215 passed across test_anonymizer.py, test_twiki.py and test_jira.py.
+    Failing-before tests cover each operator rule item: git@ account kept (7 unit cases),
+    an address next to a kept git@ still removed (3), bracketed [at] with a spaced dot removed
+    (1), free-prose forms byte-identical (9) and the revised over-removal test; TWiki source:
+    every-field test with the two prose forms kept, a prose plus git@ topic keeping the parser''s
+    exact text and chunk id, bracketed and ssh removed with git@ kept; JIRA source: git@ kept,
+    the next address and an ssh login removed. Tests that pass on both by design: ssh/scp
+    logins removed, other bracketed forms removed, look-alikes (john.git@, GIT@, git&#64;,
+    git%40, jdoe''git@, url=git@) removed, git@ runs ending at another separator removed.
+    Timing tests under 1 s.'
+- kind: manual
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: nice -n 19 python3 measure2.py; python3 check2.py; python3 check3.py (submit75,
+    /work/submit/mohoney/lane-a/tmp/twiki-email2, deleted after; anonymizer.py from cb610275
+    as before and from 1d1186f as after, _twiki_parse.py, Python 3.9)
+  head: 1d1186f74ee0d54d8a3f1fad5ee92a095beed07a
+  at: '2026-09-28T14:53:03+00:00'
+  note: 'cms-kb TWiki snapshot (/ceph/submit/data/user/p/pmlugato/cms-kb/twiki, 43,888 real
+    topic pages, read-only), EOS parser defaults, same two draws as the earlier receipts (seed
+    20260928). Random 200 pages: 10 with an address; 38 @-shaped tokens; cb610275 left 0,
+    this revision leaves 3, all git@ tokens (operator rule 3); 1 ssh login removed by both.
+    Address-bearing 200 pages: 586 @-shaped tokens; cb610275 left 0, this revision leaves
+    35, all git@; 48 ssh-shaped tokens, of which this revision leaves 3: 1 git@ and 2 ssh://git@.
+    Free-prose tokens: 43 and 68 in the two samples, all kept (cb610275 removed 1 in the second).
+    Spelled-out candidates: a broader grep than the earlier 1,261-file list (not kept) gave
+    1,436 files, 1,434 real pages. Rule matches cb610275 -> this revision: bracketed 15 ->
+    15 (spaced-bracket-dot rule 0, so the new spaced-dot acceptance changed nothing here),
+    spaced plus glued word separators 128 -> glued 27 (101 free-prose forms now kept, rule
+    2), glued .edu/.gov 6 -> 6, NOSPAM 6 -> 6. Left after this revision: 1 bracket-shaped
+    match with a numeric last label (not an address), 92 @-shaped tokens all git@, 13 ssh://git@
+    plus 2 ssh user@IPv4 logins (IP-literal hosts are a #5 known gap, left by both). No address
+    printed; examples masked.'
 decisions: []
