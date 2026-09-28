@@ -2,30 +2,30 @@ pact_version: 5
 id: twiki-email-redaction
 title: Remove email addresses from TWiki text, keep names
 tier: 2
-why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (TwikiEOSSource, the
-  EOS snapshot reader behind TwikiEOSAdapter, and TwikiCrawlSource) emit topic text unchanged,
+why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (TwikiEOSSource,
+  the EOS snapshot reader behind TwikiEOSAdapter, and TwikiCrawlSource) emit topic text unchanged,
   so contact addresses in topic bodies reach documentation_page attrs and document_chunk text.
   On the cms-kb snapshot (43,888 topic pages), a random sample of 200 pages held 38 addresses
   in 10 pages. Operator decision (Jason, 2026-09-28): "Keep names", remove emails.
 
 
   This change removes addresses at emission with redact_email_addresses, the email-only pass
-  PR #5 added for the JIRA source, unchanged. It does not call Anonymizer.anonymize, which also
-  deletes names, greetings and sign-offs.
+  PR #5 added for the JIRA source, unchanged. It does not call Anonymizer.anonymize, which
+  also deletes names, greetings and sign-offs.
 
 
   TWiki topics also spell addresses out, which redact_email_addresses does not cover because
   they have no @: jdoe[AT]cern.ch, jdoe(at)cern(dot)ch, john.doe at cern.ch, john.doe_at_cern.ch,
-  jdoe AT cern DOT ch, and NOSPAM insertions. Over 1,261 candidate topics on the snapshot these
-  were 37 bracketed, about 134 word-separator and 8 NOSPAM addresses that the @ pass left in.
-  This change adds redact_obfuscated_email_addresses next to it in archi.enrichment.anonymizer
+  jdoe AT cern DOT ch, and NOSPAM insertions. Over 1,261 candidate topics on the snapshot
+  these were 37 bracketed, about 134 word-separator and 8 NOSPAM addresses that the @ pass
+  left in. This change adds redact_obfuscated_email_addresses next to it in archi.enrichment.anonymizer
   and calls it from the TWiki sources only; the JIRA source is unchanged.
 
 
-  CARRIED SIDE EFFECT, as in #5: on the next ingest, chunks whose text held an address get new
-  chunk ids (the chunk id hashes the chunk text), and a page whose author, parent topic or
-  version held an address gets new attrs. Chunks and pages without an address keep their ids
-  and text byte for byte.'
+  CARRIED SIDE EFFECT, as in #5: on the next ingest, chunks whose text held an address get
+  new chunk ids (the chunk id hashes the chunk text), and a page whose author, parent topic
+  or version held an address gets new attrs. Chunks and pages without an address keep their
+  ids and text byte for byte.'
 affected_code:
 - python/archi/sources/twiki.py
 - python/archi/enrichment/anonymizer.py
@@ -39,30 +39,30 @@ requirements:
 
     Covered, for both TwikiEOSSource and TwikiCrawlSource and for fixture records: the page
     title, body, author, parent topic, version and date, and so every documentation_page text
-    attr (label, title, author, parent_topic, version, last_updated, text) and every
-    document_chunk text and heading_path. The chunk reference edges are matched on the redacted
-    chunk text. Redaction runs before chunking, so an address that the 4,000-character window
-    would split is removed whole.
+    attr (label, title, author, parent_topic, version, last_updated, text) and every document_chunk
+    text and heading_path. The chunk reference edges are matched on the redacted chunk text.
+    Redaction runs before chunking, so an address that the 4,000-character window would split
+    is removed whole.
 
 
-    Two passes, both removing only the matched token and decoding nothing, so text without a
-    match is returned byte-identical and its chunk id does not change:
+    Two passes, both removing only the matched token and decoding nothing, so text without
+    a match is returned byte-identical and its chunk id does not change:
 
     - redact_email_addresses (from #5, unchanged): @, fullwidth @, %40, &#64; and the other
     forms its PACT jira-email-redaction lists.
 
-    - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in any
-    case with any dotted domain ending in a label with a letter, and (dot) dots; word separators
-    " at ", " AT ", _at_, -at-, _AT_ and _NOSPAM_AT_ only before a mail domain -- exactly cern.ch,
-    fnal.gov or gmail.com, or a domain ending in .edu, with . or DOT/dot/(dot) as the dot and
-    nothing domain-like after it; and any token that carries NOSPAM plus at least two other
-    letters or digits.
+    - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
+    any case with any dotted domain ending in a label with a letter, and (dot) dots; word
+    separators " at ", " AT ", _at_, -at-, _AT_ and _NOSPAM_AT_ only before a mail domain
+    -- exactly cern.ch, fnal.gov or gmail.com, or a domain ending in .edu, with . or DOT/dot/(dot)
+    as the dot and nothing domain-like after it; and any token that carries NOSPAM plus at
+    least two other letters or digits.
 
 
-    Kept: names (Main.JohnDoe, John Doe, the %META author WikiName, the label of a mailto link),
-    prose and file names that use "at" as a word ("run at 13.6 TeV", "x_2016_at_13TeV.root"),
-    hosts after a word separator ("served at cmsweb.cern.ch"), version pins (numpy@1.26.4) and
-    NOSPAM on its own.
+    Kept: names (Main.JohnDoe, John Doe, the %META author WikiName, the label of a mailto
+    link), prose and file names that use "at" as a word ("run at 13.6 TeV", "x_2016_at_13TeV.root"),
+    hosts after a word separator ("served at cmsweb.cern.ch"), version pins (numpy@1.26.4)
+    and NOSPAM on its own.
 
 
     Not redacted: the identity fields page_id, source_path, url, web_name and web_root, which
@@ -72,32 +72,32 @@ requirements:
 
     Accepted over-removal (fail closed), measured on the snapshot:
 
-    - user@host tokens that are logins, not mail, go as in #5: in a 200-page sample of
-    address-bearing topics, 91 of 586 removals were ssh user@lxplus..., git@github.com:org/x or
-    similar, so "git clone git@github.com:cms-sw/x.git" becomes "git clone :cms-sw/x.git".
+    - user@host tokens that are logins, not mail, go as in #5: in a 200-page sample of address-bearing
+    topics, 91 of 586 removals were ssh user@lxplus..., git@github.com:org/x or similar, so
+    "git clone git@github.com:cms-sw/x.git" becomes "git clone :cms-sw/x.git".
 
     - One word before " at cern.ch" goes even when it is prose ("based at cern.ch").
 
     - Table pipes and the TWiki ! escape directly before an address go with it (|x@cern.ch|).
 
 
-    Known gaps: word-separator forms with other domains (jdoe at ucsd.edu is removed, but jdoe
-    at infn.it or jdoe AT jwood.cern.ch are not), and the gaps PACT jira-email-redaction lists
-    for the @ pass.
+    Known gaps: word-separator forms with other domains (jdoe at ucsd.edu is removed, but
+    jdoe at infn.it or jdoe AT jwood.cern.ch are not), and the gaps PACT jira-email-redaction
+    lists for the @ pass.
 
 
     Acceptance:
 
     - acc.twiki-email-redaction.fields: a snapshot topic with a distinct address in the author,
-    version, parent topic, body plain, mailto link, %40, &#64;, +tag, HTML href and table forms
-    and six spelled-out forms emits no fact that contains any of them, keeps Main.JohnDoe,
-    John Doe, Jane Roe and Alice Smith, and redacts the title and body of fixture records and
-    the crawl source; an address across a chunk boundary leaves no fragment; the same tests
-    fail on main. [evidence: executed_test]
+    version, parent topic, body plain, mailto link, %40, &#64;, +tag, HTML href and table
+    forms and six spelled-out forms emits no fact that contains any of them, keeps Main.JohnDoe,
+    John Doe, Jane Roe and Alice Smith, and redacts the title and body of fixture records
+    and the crawl source; an address across a chunk boundary leaves no fragment; the same
+    tests fail on main. [evidence: executed_test]
 
-    - acc.twiki-email-redaction.identity: a topic with entities, names, a version pin and "at"
-    words but no address is emitted with exactly the parser''s text and the chunk id computed
-    from it. [evidence: executed_test]
+    - acc.twiki-email-redaction.identity: a topic with entities, names, a version pin and
+    "at" words but no address is emitted with exactly the parser''s text and the chunk id
+    computed from it. [evidence: executed_test]
 
     - acc.twiki-email-redaction.forms: redact_obfuscated_email_addresses removes each spelled-out
     form, leaves prose, hosts, file names and NOSPAM alone byte-identical, and runs in linear
@@ -111,12 +111,44 @@ tasks:
 
 
     Proof: the new tests fail against main and pass with the change, the full archi suite
-    passes, and a run over the cms-kb TWiki snapshot on submit75 shows the address counts before
-    and after.
+    passes, and a run over the cms-kb TWiki snapshot on submit75 shows the address counts
+    before and after.
 
 
     Test plan:
 
     - python/tests [evidence: pytest]'
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 043375de4a577e6ca4c1d85d742c368f6e367c06
+  at: '2026-09-28T07:20:30+00:00'
+  note: '544 passed at 043375d (okg origin/dev 9ad926c3d1, Python 3.12, hatchling on the path
+    for the wheel tests), including 45 new tests: 5 TWiki emission tests (every field and
+    form from the EOS snapshot path, fixture-record title, chunk-boundary address, address-free
+    topic byte-identical with its chunk id, crawl source with an HTML table) and 40 redact_obfuscated_email_addresses
+    cases (19 forms removed, 8 texts kept byte-identical, accepted over-removal, linear time).
+    Against main (b4dac901) the same test files give: test_twiki.py 4 failed, 48 passed (the
+    byte-identical guard passes on main, as it should); test_anonymizer.py fails at import
+    (redact_obfuscated_email_addresses absent).'
+- kind: manual
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: nice -n 19 python3 measure.py; python3 spelled.py < candidates.txt (submit75, /work/submit/mohoney/lane-a/tmp/twiki-email,
+    branch anonymizer.py and _twiki_parse.py, Python 3.9)
+  head: 043375de4a577e6ca4c1d85d742c368f6e367c06
+  at: '2026-09-28T07:20:40+00:00'
+  note: 'cms-kb TWiki snapshot (/ceph/submit/data/user/p/pmlugato/cms-kb/twiki, 43,888 real
+    topic pages, read-only), EOS parser defaults. Random 200 pages (seed 20260928): 38 address-shaped
+    tokens in 10 pages before, 0 after, all in body. 200 address-bearing pages: 586 before,
+    0 after; of the removals 551 strict mail addresses, 35 addresses with a table pipe, !
+    escape or query-string key attached, and 91 login or git host tokens (ssh user@lxplus...,
+    git@github.com:org/x), the accepted over-removal. Spelled-out forms over 1,261 grep candidates:
+    bracketed 39 before, 2 after (both with a numeric last label, not addresses); obfuscated
+    pass removed 37 bracketed, 134 word-separator and 8 NOSPAM tokens; word separators left
+    before a mail-like domain: 30, all hosts or subdomains (at cmsweb.cern.ch, at lxplus.cern.ch)
+    plus one jdoe AT host.cern.ch form. No file name holds @ or %40. No address printed; examples
+    shown with <removed>.'
 decisions: []
