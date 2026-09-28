@@ -89,15 +89,15 @@ requirements:
     accents, invisible characters), &amp; and encoded-dot tokens (read whole, so &amp;#46;
     is one encoded dot), and a quoted string that ends at a separator. A git@ token inside
     a quoted string whose closing quote is followed by a separator ("x git@host:y z"@cern.ch)
-    is not kept either. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch,
-    git@gitlab.cern.ch.o''brien@cern.ch, ''git@github.com.jdoe''@cern.ch and git@github.com.jdoe"x"@cern.ch
-    lose the whole span, as they would with no exemption, while :, /, a space or other text
-    after the host stops the scan and keeps git@host:path. Invariant, checked by a differential
-    property test against the function with the exemption disabled: the exemption never keeps
-    a character that the function without it removes, except a git@ token whose wrappers and
-    host are not part of any address-shaped span once git@ is taken out. john.git@, my-git@,
-    jdoe''git@, url=git@, GIT@, git&#64; and git%40 are still removed. ssh user@host logins
-    are still removed (rule item 4).
+    is not kept either. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch, git@gitlab.cern.ch.o''brien@cern.ch,
+    ''git@github.com.jdoe''@cern.ch and git@github.com.jdoe"x"@cern.ch lose the whole span,
+    as they would with no exemption, while :, /, a space or other text after the host stops
+    the scan and keeps git@host:path. Invariant, checked by a differential property test against
+    the function with the exemption disabled: the exemption never keeps a character that the
+    function without it removes, except a git@ token whose wrappers and host are not part
+    of any address-shaped span once git@ is taken out. john.git@, my-git@, jdoe''git@, url=git@,
+    GIT@, git&#64; and git%40 are still removed. ssh user@host logins are still removed (rule
+    item 4).
 
     - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
     any case, before a dotted domain (., a bracketed (dot) / [DOT], or a spaced dot) whose
@@ -364,4 +364,24 @@ evidence:
     once git@ is taken out; 0.2 s. On bfbadbf2 it fails on ''x git@GITHUB.COM.JDOE+@CERN.CH''.
     Linear time: 11 crowded inputs up to 100,000 characters under 1 s; a 16x larger input
     takes 14-17x longer for each of 13 shapes.'
+- kind: executed_test
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: cca57fcb2db10d4587e30a53db067b2988fa6dce
+  at: '2026-09-28T15:16:53+00:00'
+  note: '666 passed at cca57fc (okg origin/dev 435ab285ac, Python 3.12, archi and okg editable
+    in a scratch venv). Closes the two git@ leaks left at b657568: a double-escaped encoded
+    dot after the host (&amp;#46;, &amp;#x2e;, &amp;period;, &amp;amp;#46;, &AMP;#X2E;; found
+    by the independent differential review) and a git@ token inside a quoted local part ("x
+    git@github.com:y z"@cern.ch; found by a git@-biased fuzz). New tests since b657568: 12
+    rows (7 layered-dot, 5 quoted-local), 1 kept case (quotes elsewhere on the line), wider
+    property-test generator and oracle, 3 linear-time inputs. Fail-before: this test file
+    gives 12 failed, 198 passed against the b657568 anonymizer (the 11 new leak rows and the
+    property test) and 50 failed, 160 passed against bfbadbf2. Property test: 21,584 seeded
+    inputs, shipped vs exemption disabled by monkeypatch, 0.23 s; the oracle keeps the quotes
+    and line breaks before a kept token. Separate one-off fuzz with the same oracle: 900,000
+    inputs (600,000 biased to start with a git@ token, about 400,000 kept tokens), 0 violations.
+    Linear time: 14 crowded inputs under 1 s (0.45 s locally); a 16x larger input takes 15.8-16.1x
+    longer for each quote-lookup shape.'
 decisions: []
