@@ -17,26 +17,42 @@ why: 'In a skills benchmark run on 2026-09-28, a question named one specific TWi
   this read.
 
 
-  This change adds that rule to the three retrieval skills and nothing else. The minimum-evidence
-  rules from closed pull request #12 are not included.'
+  This change adds that rule to the four retrieval skills (source_document_exploration.md
+  is the skill attached to documentation_page and jira_issue nodes) and nothing else. The
+  minimum-evidence rules from closed pull request #12 are not included.
+
+
+  Known limit: the text read needs okg with mitdbg/okg#2697 (merged 2026-09-28, okg dev
+  00424f3e9d). archi CI pins okg at ac078aabd5, which predates it, so on that okg the call
+  is refused ("inspect target kind must be one of ..."). Each skill therefore says to fall
+  back to the existing ordered-chunk SQL recipe (Parent To Ordered Chunks). Bumping the CI
+  pin is a separate CI-config change for Jason and is not part of this change. For archi
+  pages coverage reports "unknown" (archi chunks carry char_offset but no chunk_ordinal,
+  chunk_total or char_end) and overlapping chunk text can repeat; okg_traversal.md says so.'
 affected_code:
 - skills/okg_traversal.md
 - skills/okg_retrieval_planner.md
 - skills/agentic_benchmark.md
+- skills/source_document_exploration.md
 - python/tests/test_skills.py
 requirements:
 - id: req.skills-read-page-text.main
-  statement: 'okg_traversal.md, okg_retrieval_planner.md and agentic_benchmark.md each tell
-    the agent: when the question names a specific page, document, or ticket, or search surfaces
-    one as the likely source, read its text with inspect(target={"kind": "text", "node_id":
-    ...}) before answering or concluding the answer is absent; inspect with kind "node" gives
-    metadata only; and while complete is false, follow the continuation_token. No other rule
-    in these skills changes.'
+  statement: 'okg_traversal.md, okg_retrieval_planner.md, agentic_benchmark.md and source_document_exploration.md
+    each tell the agent: when the question names a specific page, document, or ticket, or search
+    surfaces one as the likely source, read its text with inspect(target={"kind": "text",
+    "node_id": ...}) before answering or concluding the answer is absent; inspect with kind
+    "node" gives metadata only; while complete is false, follow the continuation_token; and
+    the read needs okg with mitdbg/okg#2697, so on an older okg that refuses it, fall back
+    to the Parent To Ordered Chunks SQL recipe. okg_retrieval_planner.md step 4 and source_document_exploration.md
+    prefer the text read over the LIMIT 12 ordered-chunk recipe. okg_traversal.md says an
+    "unknown" coverage means okg cannot prove completeness, not that text is missing, and
+    that overlapping lines may repeat. No other rule in these skills changes.'
 tasks:
 - id: task.skills-read-page-text.deliver
   requirement: req.skills-read-page-text.main
-  verification: 'Add the rule to the three skills and a test in python/tests/test_skills.py
-    that checks each skill for it.
+  verification: 'Add the rule to the four skills and a test in python/tests/test_skills.py
+    that checks each skill for it, including the okg#2697 requirement, the fallback recipe
+    name, and the kind-node-is-metadata-only clause.
 
 
     Proof: the new test fails against main''s skills and passes with the change, and the full

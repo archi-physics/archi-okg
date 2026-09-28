@@ -5,6 +5,7 @@ every skill file is nonempty, contains no instance-specific site markers
 left over from the okg-deployments CMS deployment (main@f33a9c4), and the
 shipped ``skill-triggers.yaml`` only references skills that exist.
 """
+import re
 from pathlib import Path
 
 import yaml
@@ -110,6 +111,7 @@ TEXT_READ_SKILLS = [
     "agentic_benchmark",
     "okg_retrieval_planner",
     "okg_traversal",
+    "source_document_exploration",
 ]
 
 
@@ -128,7 +130,15 @@ def test_retrieval_skills_teach_named_record_text_read():
             "before answering or concluding",
             "continuation_token",
             "`complete` is false",
+            # Older okg refuses kind "text"; the skill must name the okg
+            # change it needs and the SQL fallback.
+            "mitdbg/okg#2697",
+            "Parent To Ordered Chunks",
         ):
             if needle not in text:
                 missing.append(f"{name}.md lacks {needle!r}")
+        # The `kind: node` inspect must be described as metadata only, so the
+        # agent does not treat it as having read the page.
+        if not re.search(r"kind: node.{0,160}?metadata", text):
+            missing.append(f"{name}.md lacks the kind-node-is-metadata-only clause")
     assert not missing, "\n".join(missing)

@@ -21,10 +21,15 @@ Use this plan before answering:
    answering or concluding the answer is absent. `inspect` with
    `kind: "node"` on a page returns metadata (title, URL) only. For a long
    page, repeat the call with the returned `continuation_token` in the target
-   while `complete` is false.
+   while `complete` is false. The text read needs okg with mitdbg/okg#2697
+   (merged 2026-09-28); an older okg refuses it ("inspect target kind must be
+   one of ..."). Then fall back to the ordered-chunk recipe (Parent To
+   Ordered Chunks in `source_document_exploration.md`).
 4. Expand compact hits into source context. For a promising chunk, use
-   `expand` or bounded `query` to find its parent document/ticket and
-   adjacent or ordered sibling chunks before synthesis.
+   `expand` or bounded `query` to find its parent document/ticket, then read
+   the parent's text with the text read above. Prefer it over the `LIMIT 12`
+   ordered-chunk SQL recipe, which can stop partway through a long page; use
+   that recipe only when the text read is refused.
 5. Use bounded SQL as a retrieval primitive, not as final evidence. Keep SQL
    view rows in `evidence_notes`; cite real OKG node IDs from the rows.
 6. Expand one promising candidate when evidence exists. Use one-hop `expand`,
