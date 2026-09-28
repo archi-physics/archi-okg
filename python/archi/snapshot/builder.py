@@ -36,6 +36,7 @@ import errno
 import functools
 import fnmatch
 import hashlib
+import html
 import io
 import json
 import os
@@ -53,6 +54,7 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 import yaml
 
 from archi.enrichment.anonymizer import (
+    ADDRESS_SEPARATOR_RE,
     email_address_spans,
     obfuscated_email_address_spans,
     redact_email_addresses,
@@ -319,7 +321,7 @@ class _Counter:
         self.normalized = 0
 
     def strip_ansi(self, text: str) -> str:
-        clean, count = _CSI_RE.subn("", text)
+        clean, count = _STRIP_RE.subn("", text)
         self.ansi += count
         return clean
 
@@ -565,6 +567,10 @@ def _clean(group: str, where: str, text: str, counter: _Counter) -> str:
     an invisible character are removed whole first (see
     :func:`_hidden_address_spans`).
     """
+    if _SURROGATE_RE.search(text):
+        raise GroupRefused(
+            group, f"{where}: has an unpaired UTF-16 surrogate (not valid Unicode)"
+        )
     text = _remove_normalized(group, where, text, counter)
     stripped = counter.strip_ansi(text)
     if stripped != text:
@@ -669,25 +675,52 @@ def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
 #: C0 controls other than tab, newline, vertical tab, form feed and carriage
 #: return; DEL; and C1. Counted by the binary guard.
 _CONTROL_RE = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
-#: Hidden characters: the control characters above and every invisible
-#: format character (Unicode category Cf, such as U+200E, U+2068, U+FEFF,
-#: and also soft hyphen, zero-width space and joiners, and word joiner).
-_HIDDEN_RE = re.compile(
+#: Invisible characters the redactor itself reads inside an address (soft
+#: hyphen, zero-width space, non-joiner and joiner, word joiner). Hidden, but
+#: an address that only they (or NFKC) hide is removed whole, not refused.
+_SOFT_HIDDEN = frozenset("\u00ad\u200b\u200c\u200d\u2060")
+#: Hidden characters that change what a screen shows: the control
+#: characters above (with backspace, ESC and C1) and every invisible format
+#: character (Unicode category Cf: bidi controls such as U+200E, U+202E,
+#: U+2068, and U+FEFF ...) except :data:`_SOFT_HIDDEN`.
+_HARD_HIDDEN_RE = re.compile(
     "[\x00-\x08\x0e-\x1f\x7f-\x9f"
     + "".join(
         re.escape(chr(code))
         for code in range(0x110000)
         if unicodedata.category(chr(code)) == "Cf"
+        and chr(code) not in _SOFT_HIDDEN
     )
     + "]"
 )
+#: All hidden characters: :data:`_HARD_HIDDEN_RE` and :data:`_SOFT_HIDDEN`.
+_HIDDEN_RE = re.compile(
+    _HARD_HIDDEN_RE.pattern[:-1]
+    + "".join(sorted(_SOFT_HIDDEN))
+    + "]"
+)
+#: What makes a line display differently from its bytes: a hard hidden
+#: character, or a carriage return that is not part of a CRLF line end.
+_DISPLAY_RE = re.compile(_HARD_HIDDEN_RE.pattern + r"|\r(?!\n|$)")
+#: HTML character references a browser would decode: numeric, hex and
+#: named (with or without the ``;`` where browsers accept that).
+_ENTITY_RE = re.compile(
+    r"&(?:#[0-9]{1,7};?|#[xX][0-9a-fA-F]{1,6};?|[A-Za-z][A-Za-z0-9]{1,31};?)"
+)
+#: An unpaired UTF-16 surrogate: JSON can carry one, UTF-8 cannot store it.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 #: A page is binary when more than this share of its characters, and at
 #: least ``CONTROL_MIN_COUNT`` of them, are control characters.
 CONTROL_SHARE_LIMIT = 0.01
 CONTROL_MIN_COUNT = 16
-#: ANSI CSI escape sequences (terminal colours pasted from logs), removed
-#: from text after the hidden-address check and before redaction.
-_CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
+#: What is stripped from stored text after the hidden-address check and
+#: before redaction: ANSI CSI sequences (terminal colours pasted from logs,
+#: ``ESC [`` + parameters + a final byte) and two-character escapes
+#: (``ESC`` + one byte from ``0`` to ``~``, such as ``ESC 7`` and ``ESC 8``,
+#: save and restore cursor).
+_STRIP_RE = re.compile(
+    r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b[\x30-\x7e]"
+)
 #: Longest body of an OSC, DCS, SOS, PM or APC string the hidden-address
 #: check reads as one sequence. Past it, or at a control character inside
 #: the body, the opening character is a lone hidden character; this keeps
@@ -714,17 +747,139 @@ _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
 
 @functools.lru_cache(maxsize=65536)
 def _fold(char: str) -> str:
-    return unicodedata.normalize("NFKC", char)
+    """NFKC of one character; the ideographic full stops (U+3002, and
+    U+FF61, which NFKC makes U+3002) read as ``.``."""
+    folded = unicodedata.normalize("NFKC", char)
+    return "." if folded == "\u3002" else folded
 
 
 def _reads_as_itself(text: str) -> bool:
     """Whether both readings of :func:`_canonical` are ``text`` itself: no
     hidden character, no terminal sequence, nothing NFKC changes."""
+    if _decode_entities(text) is not None:
+        return False
     if _PLAIN_RE.fullmatch(text):
         return True
     if _HIDDEN_RE.search(text) or _SEQUENCE_RE.search(text):
         return False
     return all(_fold(char) == char for char in set(_NON_ASCII_RE.findall(text)))
+
+
+@dataclass
+class _Decoded:
+    """``raw`` with its HTML character references decoded, mapped back.
+
+    Segment ``k`` starts at ``starts[k]`` in ``text`` and comes from
+    ``raw[sources[k]:ends[k]]``: a run copied one for one, or one reference
+    (listed by its decoded positions in ``entities``).
+    """
+
+    text: str
+    starts: list[int]
+    sources: list[int]
+    ends: list[int]
+    copied: list[bool]
+    entities: list[int]
+
+    def raw_start(self, index: int) -> int:
+        k = bisect.bisect_right(self.starts, index) - 1
+        if self.copied[k]:
+            return self.sources[k] + index - self.starts[k]
+        return self.sources[k]
+
+    def raw_end(self, index: int) -> int:
+        k = bisect.bisect_right(self.starts, index) - 1
+        if self.copied[k]:
+            return self.sources[k] + index - self.starts[k] + 1
+        return self.ends[k]
+
+
+def _decode_entities(raw: str) -> Optional[_Decoded]:
+    """``raw`` as a browser shows its character references, or None when
+    it has none that decode."""
+    if "&" not in raw:
+        return None
+    parts: list[str] = []
+    starts: list[int] = []
+    sources: list[int] = []
+    ends: list[int] = []
+    copied: list[bool] = []
+    entities: list[int] = []
+    length = 0
+    last = 0
+    for match in _ENTITY_RE.finditer(raw):
+        decoded = html.unescape(match.group())
+        if decoded == match.group():
+            continue
+        if match.start() > last:
+            parts.append(raw[last : match.start()])
+            starts.append(length)
+            sources.append(last)
+            ends.append(match.start())
+            copied.append(True)
+            length += match.start() - last
+        parts.append(decoded)
+        starts.append(length)
+        sources.append(match.start())
+        ends.append(match.end())
+        copied.append(False)
+        entities.extend(range(length, length + len(decoded)))
+        length += len(decoded)
+        last = match.end()
+    if not entities:
+        return None
+    if last < len(raw):
+        parts.append(raw[last:])
+        starts.append(length)
+        sources.append(last)
+        ends.append(len(raw))
+        copied.append(True)
+    return _Decoded("".join(parts), starts, sources, ends, copied, entities)
+
+
+def _bases(text: str) -> list[tuple[str, Optional[_Decoded]]]:
+    """The texts the hidden-address check reads: ``text`` itself and, when
+    it has character references that decode, ``text`` decoded."""
+    decoded = _decode_entities(text)
+    if decoded is None:
+        return [(text, None)]
+    return [(text, None), (decoded.text, decoded)]
+
+
+def _readings(base: str) -> list[str]:
+    """The canonical readings of ``base`` (see :func:`_canonical`)."""
+    texts = [_canonical(base).text]
+    if _SEQUENCE_RE.search(base):
+        texts.append(_canonical(base, sequences=False).text)
+    return texts
+
+
+def _refuse_display_tricks(group: str, where: str, text: str) -> None:
+    """Refuse ``text`` when a line that shows differently from its bytes
+    may hold an address.
+
+    ``text`` (and, when it has character references that decode, ``text``
+    decoded) is split into lines at LF, a CRLF counting as one line end. A
+    line that has a hard hidden character (:data:`_HARD_HIDDEN_RE`:
+    backspace, ESC, C1, bidi controls ...) or a carriage return not before
+    LF, and whose canonical reading has a separator either redactor reads
+    (:data:`ADDRESS_SEPARATOR_RE`), refuses the group: the line can show an
+    address its bytes spell differently (``____@example.org<CR>jdoe``,
+    ``<U+202E>gro.elpmaxe@eodj``, ``ESC 7 ... ESC 8``, backspace).
+    """
+    for base, _decoded in _bases(text):
+        if not _DISPLAY_RE.search(base):
+            continue
+        for line in base.split("\n"):
+            if _DISPLAY_RE.search(line) and any(
+                ADDRESS_SEPARATOR_RE.search(reading) for reading in _readings(line)
+            ):
+                raise GroupRefused(
+                    group,
+                    f"{where}: an address is split by a control character (a "
+                    "line with a carriage return, backspace, escape or bidi "
+                    "control has an address separator)",
+                )
 
 
 @dataclass
@@ -771,10 +926,6 @@ def _redaction_mask(text: str) -> bytearray:
     return mask
 
 
-#: Invisible characters the redactor itself reads inside an address (soft
-#: hyphen, zero-width space, non-joiner and joiner, word joiner). Hidden, but
-#: an address that only they (or NFKC) hide is removed whole, not refused.
-_SOFT_HIDDEN = frozenset("\u00ad\u200b\u200c\u200d\u2060")
 _HARD = 1
 _SOFT = 2
 
@@ -883,31 +1034,42 @@ def _hidden_address_spans(group: str, where: str, text: str) -> list[tuple[int, 
     A value that reads as itself (:func:`_reads_as_itself`) returns no
     spans at once: the normal redaction sees exactly what the readings see.
     """
+    _refuse_display_tricks(group, where, text)
     if _reads_as_itself(text):
         return []
-    readings = [True]
-    if _SEQUENCE_RE.search(text):
-        readings.append(False)
     spans: list[tuple[int, int]] = []
-    for sequences in readings:
-        view = _canonical(text, sequences=sequences)
-        if not view.changed and not any(view.removed):
-            return []
-        mask = bytes(_redaction_mask(view.text))
-        for run in re.finditer(b"\x01+", mask):
-            low = view.raw(run.start())
-            high = view.raw(run.end() - 1)
-            if _HARD in view.removed[max(low - 1, 0) : high + 2]:
-                raise GroupRefused(
-                    group,
-                    f"{where}: an address is split by a control character or "
-                    "touches one",
-                )
-            first = bisect.bisect_left(view.changed, low)
-            if _SOFT in view.removed[low : high + 1] or (
-                first < len(view.changed) and view.changed[first] <= high
-            ):
-                spans.append((low, high + 1))
+    for base, decoded in _bases(text):
+        readings = [True]
+        if _SEQUENCE_RE.search(base):
+            readings.append(False)
+        for sequences in readings:
+            view = _canonical(base, sequences=sequences)
+            # A decoded character reference counts as a changed character.
+            changed = (
+                view.changed
+                if decoded is None
+                else sorted(set(view.changed) | set(decoded.entities))
+            )
+            if not changed and not any(view.removed):
+                continue
+            mask = bytes(_redaction_mask(view.text))
+            for run in re.finditer(b"\x01+", mask):
+                low = view.raw(run.start())
+                high = view.raw(run.end() - 1)
+                if _HARD in view.removed[max(low - 1, 0) : high + 2]:
+                    raise GroupRefused(
+                        group,
+                        f"{where}: an address is split by a control character "
+                        "or touches one",
+                    )
+                first = bisect.bisect_left(changed, low)
+                if _SOFT in view.removed[low : high + 1] or (
+                    first < len(changed) and changed[first] <= high
+                ):
+                    if decoded is None:
+                        spans.append((low, high + 1))
+                    else:
+                        spans.append((decoded.raw_start(low), decoded.raw_end(high)))
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
@@ -981,7 +1143,7 @@ def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _
             page = _Page(data.decode("utf-8"), {})
         except UnicodeDecodeError as exc:
             raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
-    text = _CSI_RE.sub("", page.text)
+    text = _STRIP_RE.sub("", page.text)
     if text:
         controls = len(_CONTROL_RE.findall(text))
         if controls >= CONTROL_MIN_COUNT and controls / len(text) > CONTROL_SHARE_LIMIT:
@@ -1026,11 +1188,10 @@ def _check_string(group: str, where: str, value: str) -> None:
         raise GroupRefused(
             group, f"{where}: a spelled-out address survived redaction"
         )
+    _refuse_display_tricks(group, where, value)
     if _reads_as_itself(value):
         return
-    readings = [True, False] if _SEQUENCE_RE.search(value) else [True]
-    for sequences in readings:
-        reading = _canonical(value, sequences=sequences).text
+    for reading in (r for base, _ in _bases(value) for r in _readings(base)):
         if (
             redact_email_addresses(reading) != reading
             or redact_obfuscated_email_addresses(reading) != reading

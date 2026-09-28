@@ -505,9 +505,10 @@ _OBF_END = r"(?![\w-]|[./:@(][\w-])"
 # After a bracketed ``[at]`` any dot counts, bracketed or spelled out
 # (``jdoe[at]cern dot ch``): the brackets already mark the token.
 _OBF_ANY_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| dot )"
+_OBF_BRACKET_AT = r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
 _OBF_STRONG_RE = re.compile(
     _OBF_LOCAL
-    + r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
+    + _OBF_BRACKET_AT
     + r"[\w-]+(?:" + _OBF_ANY_DOT + r"[\w-]+)*"
     + _OBF_ANY_DOT + r"[^\W\d_]{2,}"
     + _OBF_END,
@@ -549,6 +550,26 @@ _OBF_NOSPAM_RE = re.compile(
 )
 _OBF_NOSPAM_DOMAIN_END_RE = re.compile(
     r"(?:(?:\.|dot|_)(?:ch|edu|gov|org|com)|cernch)\.?$", re.IGNORECASE
+)
+
+
+#: Every separator either redactor reads, built from the patterns above: the
+#: ``@`` forms of redact_email_addresses (``@``, full-width and small ``@``,
+#: ``%40``, ``&commat;``, ``&#64;``, ``&#x40;``), and the bracketed ``at``
+#: and ``dot``, glued ``_at_`` / ``-at-`` / ``_NOSPAM_AT_`` and ``NOSPAM``
+#: of redact_obfuscated_email_addresses. A match marks text that may hold
+#: an address; it is not itself one.
+ADDRESS_SEPARATOR_RE = re.compile(
+    "|".join(
+        (
+            _SEP_CORE_RE.pattern,
+            _OBF_BRACKET_AT,
+            _OBF_BRACKET_DOT,
+            _OBF_GLUED_SEP,
+            "nospam",
+        )
+    ),
+    re.IGNORECASE,
 )
 
 

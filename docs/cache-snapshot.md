@@ -98,9 +98,29 @@ For every group the build:
 
    Before anything is stripped or redacted, each text file, each JSON
    string and key, and each archive path is checked for addresses that
-   hidden or look-alike characters keep from the redactor. The check reads
-   the value twice, keeping a map from every character read back to the
-   raw value:
+   hidden or look-alike characters keep from the redactor. A JSON string
+   with an unpaired UTF-16 surrogate (which JSON can carry and UTF-8
+   cannot store) refuses the group.
+
+   **Line rule.** The value is split into lines at LF, a CRLF counting as
+   one line end. A line refuses the group when it both shows differently
+   from its bytes and may hold an address. It shows differently when it
+   has a carriage return not directly before LF (which returns the cursor
+   and overwrites: `____@example.org<CR>jdoe`), a backspace, `ESC`, any C1
+   control, a bidi control (U+202A to U+202E, U+2066 to U+2069, U+200E,
+   U+200F) or any other hidden character except the five invisible ones
+   named below. It may hold an address when either reading below has a
+   separator either redactor reads: `@` (also full-width and small),
+   `%40`, `&commat;`, `&#64;`, a bracketed `at` or `dot` (`[at]`, `(dot)`,
+   `<at>` ...), a glued `_at_`, `-at-` or `_NOSPAM_AT_`, or `NOSPAM` (the
+   list is built from the redactors' own patterns). So a colour code on
+   the same line as an address, `ESC 7 ... ESC 8` (save and restore
+   cursor), `<U+202E>gro.elpmaxe@eodj` and `jdoe(<BS>@example.org` refuse,
+   whatever the address looks like. This rule is also checked on the text
+   with HTML character references decoded (below).
+
+   **Match rule.** The check reads the value twice, keeping a map from
+   every character read back to the raw value:
 
    - as a terminal shows it: terminal sequences removed, hidden characters
      removed, and NFKC applied to each remaining character (NFKC turns
@@ -109,6 +129,12 @@ For every group the build:
    - when the value has a terminal sequence, also as a program that ignores
      control characters sees it: only the hidden characters removed, NFKC
      applied.
+
+   When the value has HTML character references that decode (`&#8203;`,
+   `&#x200B;`, `&shy;`, `&lrm;`, `&#65312;`, `&#64;` ...), both readings
+   are also made of the value as a browser shows it, with each decoded
+   reference mapped back to its raw span. NFKC here also reads the
+   ideographic full stops U+3002 and U+FF61 as `.`.
 
    Hidden characters are the control characters above (including `ESC`
    and U+009B) and every Unicode format character (category Cf, such as
@@ -133,16 +159,20 @@ For every group the build:
      joiner). So `jdoe<DEL>x@example.org`, `jdoe@example<ESC>.org`,
      `jdoe<U+200E>x@example.org`, `<U+2068>jdoe<U+2069>@example.org`, an
      address wrapped directly in colour codes (`ESC[31mjdoe@example.org
-     ESC[0m`, including a coloured shell prompt with a dotted host) and a
+     ESC[0m`) and a
      string where a control character only joins a word to an address
      (`word<control>jdoe@example.org`) refuse the group.
    - **Removed whole:** otherwise, if the match contains one of those five
      invisible characters or a character NFKC changed, the raw text from
      the match's first character to its last is removed, and the lock
-     counts it in `normalized_addresses_removed`. So `jdoe＠example.org`,
-     `jdoe [at] example．org`, `jdoe<U+200B> [at] example.org`, an address
-     with a ligature (`ﬁ`) in it and one with a soft hyphen in its domain
-     are removed with no fragment left.
+     counts it in `normalized_addresses_removed`. A decoded character
+     reference inside the match counts as a character NFKC changed. So
+     `jdoe＠example.org`, `jdoe [at] example．org`,
+     `jdoe<U+200B> [at] example.org`, `jdoe&#8203;@example.org`,
+     `jdoe&shy;@example.org`, `jdoe&#64;example.org`, `jdoe@example。org`,
+     an address with a ligature (`ﬁ`) in it and one with a soft hyphen in
+     its domain are removed with no fragment left. (`jdoe&lrm;@example.org`
+     decodes to a bidi control and refuses.)
    - **Redacted normally:** otherwise the match is left to the normal
      redaction. A character NFKC changes that only sits next to a match
      (`：jdoe@example.org`, `jdoe@example.org…`) or is in text that is not
@@ -152,20 +182,20 @@ For every group the build:
    file cannot be renamed. The check runs on the raw value and again after
    the colour codes are stripped, since stripping can join text. Afterwards
    every stored string, and the configured `note` (which is checked but
-   not redacted), must be left unchanged by both redactors in both
-   readings, or the group is refused. A value no reading shows as an
-   address passes, as its plain-text equivalent would:
-   `jdoe<ESC>[@example.org` is stored as `jdoeexample.org`, and a shell
-   prompt whose host has no dot (`jdoe@laptop`) is kept, as it is without
-   colour codes. Tab, newline, vertical tab, form feed, carriage return
-   and the Unicode line and paragraph separators (U+2028, U+2029) are not
-   hidden characters: they show as breaks, so `jdoe<CR>x@example.org`
-   stores `jdoe<CR>` as two separate words would.
+   not redacted), must pass the line rule and be left unchanged by both
+   redactors in every reading, or the group is refused. Tab, newline,
+   vertical tab, form feed and the Unicode line and paragraph separators
+   (U+2028, U+2029) are not hidden characters. A carriage return is not a
+   hidden character either, but it is not only a break: a lone one can
+   overwrite what came before it on screen, so it counts for the line
+   rule; a CRLF line end does not.
 
    Only then are ANSI CSI sequences (`ESC [` + parameters + a final byte)
-   removed and the value redacted. A lone `ESC` or U+009B that starts no
-   such sequence is kept, with the text after it. The lock counts the
-   removed sequences as `ansi_sequences_stripped` for every group.
+   and two-character escapes (`ESC` + one byte from `0` to `~`, such as
+   `ESC 7` and `ESC 8`) removed and the value redacted. A lone `ESC`, one
+   followed by a space or other intermediate byte (`ESC<space>5`), or a lone
+   U+009B is kept, with the text after it. The lock counts the removed
+   sequences as `ansi_sequences_stripped` for every group.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC
