@@ -164,6 +164,33 @@ _DEFAULT_EMAIL_PATTERN = (
 )
 _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 
+# Email-only redaction for source text, ported from okg-deployments
+# ``cms/cms_sources/anonymizer.py`` (commit b25e36f06c), where the cms
+# JIRA source applied it to every string it read. Same address pattern
+# as the Anonymizer's email pass. The decoding is deliberately narrower
+# than :func:`_normalize_encodings` (only ``&amp;``, ``&commat;`` and the
+# numeric forms of ``@``), so that, like the cms original, nothing in
+# the text changes except the addresses it removes.
+_EMAIL_ADDRESS_RE = re.compile(_DEFAULT_EMAIL_PATTERN, re.IGNORECASE)
+_ENCODED_AT_RE = re.compile(r"&#(?:64|x40);", re.IGNORECASE)
+
+
+def redact_email_addresses(text: str) -> str:
+    """Remove whole email addresses, including tagged and encoded forms.
+
+    ``john.doe+ops@cern.ch``, ``"john doe"@cern.ch``, ``jdoe&#64;cern.ch``
+    and the URL form ``jdoe%40cern.ch`` are removed outright (replaced
+    by nothing, as in the cms source); the surrounding text is kept.
+    """
+    for _ in range(3):
+        previous = text
+        text = text.replace("&amp;", "&")
+        text = text.replace("&commat;", "@")
+        text = _ENCODED_AT_RE.sub("@", text)
+        if text == previous:
+            break
+    return _EMAIL_ADDRESS_RE.sub("", text)
+
 # Text-level HTML character references decoded before redaction. The
 # numeric-reference decoder below deliberately keeps &lt;/&gt; (and any
 # reference that would decode to "<" or ">") encoded, so decoding never

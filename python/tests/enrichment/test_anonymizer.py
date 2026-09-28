@@ -4,7 +4,9 @@ Runs with NER disabled (``nlp_model=None``) so no spaCy model is
 needed: the regex passes plus ``known_names`` cover the connector
 emission hook (jira/docs ``anonymize_data``) deterministically.
 """
-from archi.enrichment.anonymizer import Anonymizer
+import pytest
+
+from archi.enrichment.anonymizer import Anonymizer, redact_email_addresses
 
 
 def _anonymizer(**kwargs):
@@ -246,3 +248,30 @@ def test_real_greetings_and_signoffs_still_stripped():
     )
     out = an.anonymize(text)
     assert out.strip() == "The transfer failed overnight."
+
+
+# --- redact_email_addresses: the email-only pass sources call ---------------
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("mail john.doe@cern.ch now", "mail  now"),
+        ("tagged john.doe+ops@cern.ch", "tagged "),
+        ('quoted "john doe"@cern.ch.', "quoted ."),
+        ("encoded jdoe&#64;cern.ch", "encoded "),
+        ("hex jdoe&#x40;cern.ch", "hex "),
+        ("named jdoe&commat;cern.ch", "named "),
+        ("double jdoe&amp;#64;cern.ch", "double "),
+        ("url ?mail=john.doe%40cern.ch&x=1", "url ?mail=&x=1"),
+        ("host cmsweb.cern.ch stays", "host cmsweb.cern.ch stays"),
+    ],
+)
+def test_redact_email_addresses_forms(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def test_redact_email_addresses_changes_nothing_else():
+    # Unlike Anonymizer.anonymize: no greeting, sign-off, name, NBSP or
+    # general entity pass, so text without an address is returned as is.
+    text = "Hi,\nJohn Doe &lt;b&gt; run 381000\nThanks"
+    assert redact_email_addresses(text) == text
