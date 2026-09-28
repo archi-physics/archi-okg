@@ -329,6 +329,75 @@ def redact_email_addresses(text: str) -> str:
     pieces.append(text[kept:])
     return "".join(pieces)
 
+
+# Spelled-out ("anti-spam") address forms, which have no ``@`` at all and
+# so are outside redact_email_addresses. Measured on the cms-kb TWiki
+# snapshot (2026-09-28, 1,261 candidate topics of 43,888): bracketed
+# ``jdoe[AT]cern.ch`` / ``jdoe(at)cern(dot)ch`` (39), word separators
+# ``john.doe at cern.ch`` / ``AT`` / ``john.doe_at_cern.ch`` (about 120
+# with a bare ``cern.ch`` domain), and ``NOSPAM`` insertions (11).
+#
+# - Bracketed ``(at)`` ``[at]`` ``{at}`` ``<at>`` (any case, optional
+#   spaces) are unambiguous: any domain with a dot (``.`` or a bracketed
+#   ``(dot)``) ending in a label with a letter.
+# - Word separators ``" at "``, ``" AT "``, ``_at_``, ``-at-``, ``_AT_``
+#   and ``_NOSPAM_AT_`` are ordinary words too ("run at 13.6 TeV",
+#   "served at cmsweb.cern.ch", file names like ``x_2016_at_13TeV.root``;
+#   885 such matches in the same candidates), so they count only before
+#   a mail domain: exactly ``cern.ch``, ``fnal.gov`` or ``gmail.com``, or
+#   a domain ending in ``.edu``, with ``.`` or ``DOT`` / ``dot`` /
+#   ``(dot)`` as the dot and nothing domain-like after it. A host such as
+#   ``cmsweb.cern.ch`` is not a mail domain and stays.
+# - A token that carries ``NOSPAM`` (any case) plus other text is removed
+#   whole, with a preceding ``name AT`` / ``name_at_`` part.
+#
+# Like redact_email_addresses this decodes nothing and only removes the
+# matched token, so text with no match comes back byte-identical.
+# Accepted over-removal: one word before " at cern.ch" goes even when it
+# is prose ("based at cern.ch" leaves "").
+_OBF_LOCAL = r"(?<![\w.+-])[\w.+-]{1,64}"
+_OBF_BRACKET_DOT = r"\s?[(\[{<]\s?dot\s?[)\]}>]\s?"
+_OBF_STRONG_RE = re.compile(
+    _OBF_LOCAL
+    + r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
+    + r"[\w-]+(?:(?:\.|" + _OBF_BRACKET_DOT + r")[\w-]+)*"
+    + r"(?:\.|" + _OBF_BRACKET_DOT + r")[\w-]*[^\W\d_][\w-]*",
+    re.IGNORECASE,
+)
+_OBF_WORD_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| (?:DOT|dot) |_(?:DOT|dot)_)"
+_OBF_WEAK_RE = re.compile(
+    _OBF_LOCAL
+    + r"(?: at | AT |_at_|-at-|_AT_|_NOSPAM_AT_)"
+    + r"(?i:cern" + _OBF_WORD_DOT + r"ch|fnal" + _OBF_WORD_DOT + r"gov"
+    + r"|gmail" + _OBF_WORD_DOT + r"com"
+    + r"|(?:[\w-]+" + _OBF_WORD_DOT + r")+edu)"
+    + r"(?![\w-]|\.[\w-])"
+)
+_OBF_NOSPAM_RE = re.compile(
+    r"(?<![\w.+-])(?:[\w.+-]{1,64}(?: at | AT |_at_|_AT_))?"
+    r"[\w.+-]*NOSPAM[\w.+-]*",
+    re.IGNORECASE,
+)
+
+
+def _nospam_token(match: re.Match) -> str:
+    rest = re.sub("nospam", "", match.group(0), flags=re.IGNORECASE)
+    return "" if sum(c.isalnum() for c in rest) >= 2 else match.group(0)
+
+
+def redact_obfuscated_email_addresses(text: str) -> str:
+    """Remove spelled-out addresses: ``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``,
+    ``john.doe at cern.ch``, ``john.doe_at_cern.ch``, ``jdoe AT cern DOT ch``
+    and ``NOSPAM`` forms. See the comment above for the exact rules.
+
+    Run it after :func:`redact_email_addresses`; it only removes matched
+    tokens, so text without one is returned byte-identical.
+    """
+    out = _OBF_STRONG_RE.sub("", text)
+    out = _OBF_WEAK_RE.sub("", out)
+    return _OBF_NOSPAM_RE.sub(_nospam_token, out)
+
+
 # Text-level HTML character references decoded before redaction. The
 # numeric-reference decoder below deliberately keeps &lt;/&gt; (and any
 # reference that would decode to "<" or ">") encoded, so decoding never

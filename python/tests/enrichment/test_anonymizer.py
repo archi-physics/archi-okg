@@ -6,7 +6,11 @@ emission hook (jira/docs ``anonymize_data``) deterministically.
 """
 import pytest
 
-from archi.enrichment.anonymizer import Anonymizer, redact_email_addresses
+from archi.enrichment.anonymizer import (
+    Anonymizer,
+    redact_email_addresses,
+    redact_obfuscated_email_addresses,
+)
 
 
 def _anonymizer(**kwargs):
@@ -436,3 +440,77 @@ def test_redact_email_addresses_matches_reference_on_random_text():
             rng.choice(alphabet) for _ in range(rng.randint(0, 18))
         )
         assert redact_email_addresses(text) == _reference_redact(text), text
+
+
+# --- redact_obfuscated_email_addresses: spelled-out TWiki forms --------------
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Bracketed separators: any case, optional spaces, any domain.
+        ("mail jdoe[AT]cern.ch now", "mail  now"),
+        ("mail j-d-o-e(AT)cern.ch now", "mail  now"),
+        ("mail jdoe+ops[at]phys.cern.ch now", "mail  now"),
+        ("mail john.doe [at] cern.ch now", "mail  now"),
+        ("mail jdoe (at) univ.edu now", "mail  now"),
+        ("mail jdoe{at}fnal.gov now", "mail  now"),
+        ("mail j-doe(at)cern(dot)ch now", "mail  now"),
+        ("end jdoe[AT]cern.ch. Next", "end . Next"),
+        # Word separators before a mail domain.
+        ("mail john.doe at cern.ch now", "mail  now"),
+        ("mail john.doe AT CERN.CH now", "mail  now"),
+        ("mail john.doe_at_cern.ch now", "mail  now"),
+        ("mail john-doe-at-cern.ch now", "mail  now"),
+        ("mail jdoe AT cern DOT ch now", "mail  now"),
+        ("mail jdoe at fnal.gov now", "mail  now"),
+        ("mail jdoe_at_physics.ucsd.edu now", "mail  now"),
+        ("mail jdoe.x_NOSPAM_AT_cern.ch now", "mail  now"),
+        # NOSPAM insertions.
+        ("mail jdoeNOSPAM.cern.ch now", "mail  now"),
+        ("mail jdoe.cernNOSPAMch now", "mail  now"),
+        ("mail jdoeATfnalDOTeduNOSPAM now", "mail  now"),
+    ],
+)
+def test_redact_obfuscated_email_addresses_forms(text, expected):
+    assert redact_obfuscated_email_addresses(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Prose and file names that use "at" as a word, and hosts.
+        "run at 13.6 TeV and at 8 TeV",
+        "served at cmsweb.cern.ch and at lxplus.cern.ch",
+        "file Zmm_2016_at_13TeV.root and x-at-2.3",
+        "at cern.chip and at cern.ch.example",
+        "remove NOSPAM and _NOSPAM_ markers",
+        "Main.JohnDoe (John Doe) at CERN",
+        "AT&amp;T &commat; ops, &#64; alone",
+        "",
+    ],
+)
+def test_redact_obfuscated_email_addresses_leaves_other_text_identical(text):
+    assert redact_obfuscated_email_addresses(text) == text
+
+
+def test_redact_obfuscated_email_addresses_accepted_over_removal():
+    # One word before " at cern.ch" goes even when it is prose.
+    assert redact_obfuscated_email_addresses("based at cern.ch.") == "."
+
+
+def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
+    import time
+
+    crowded = [
+        "a" * 50000,
+        "a[at]" * 10000,
+        "a[at]b." + "1" * 50000,
+        "a at " * 10000,
+        "a_at_" * 10000,
+        "NOSPAM" * 10000,
+        "a." * 25000 + "[at]",
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_obfuscated_email_addresses(text)
+    assert time.perf_counter() - started < 1.0
