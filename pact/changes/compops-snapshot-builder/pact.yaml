@@ -79,13 +79,13 @@ requirements:
     the group, file and record, any missing file, invalid JSON, wrong shape or record the
     reader would skip or drop; any symbolic link, dot-named path or path resolving outside
     the group directory; any text file that holds a NUL byte, is more than 1% control characters,
-    or is not UTF-8 (TWiki pages alone decode each invalid byte run as cp1252, Latin-1 for its
-    undefined bytes, keep valid UTF-8 intact, are stored as UTF-8 and are redacted after decoding,
-    with page and fallback-byte counts in the lock); any string where a control character splits
-    an address; any file path containing an address; and any unreadable
-    file or too-deeply nested JSON (a named refusal, not a traceback). It removes every email
-    address from every string with redact_email_addresses and records the count removed; drops
-    every field the reader does not read plus the configured drop_fields (WMStats keeps Requestor
+    or is not UTF-8 (TWiki pages alone decode each invalid byte run as cp1252, Latin-1 for
+    its undefined bytes, keep valid UTF-8 intact, are stored as UTF-8 and are redacted after
+    decoding, with page and fallback-byte counts in the lock); any string where a control
+    character splits an address; any file path containing an address; and any unreadable file
+    or too-deeply nested JSON (a named refusal, not a traceback). It removes every email address
+    from every string with redact_email_addresses and records the count removed; drops every
+    field the reader does not read plus the configured drop_fields (WMStats keeps Requestor
     and removes every RequestorDN and DN key at any depth, which no keep_fields entry can
     undo); and runs the group''s archi reader, which must report health ok, a completed scope,
     and the same facts as from the unpruned cache. If any group is refused nothing is written.
@@ -118,25 +118,25 @@ requirements:
     executed_test]
 
     - acc.compops-snapshot-builder.transcode: on the second review''s mixed page (three addresses
-    in valid UTF-8 plus one stray 0x93 byte) all three addresses are removed and the valid UTF-8
-    is kept; a Latin-1 page with an accented-local-part address loses the address; a cp1252 page
-    keeps its smart quotes as UTF-8; an address split by a C1 control is refused; a mostly-control
-    page is refused as binary; the lock counts pages and fallback bytes; the CMSSW group reads records.json when releases.map is absent and
-    prefers the map when both exist. [evidence: executed_test]
+    in valid UTF-8 plus one stray 0x93 byte) all three addresses are removed and the valid
+    UTF-8 is kept; a Latin-1 page with an accented-local-part address loses the address; a
+    cp1252 page keeps its smart quotes as UTF-8; an address split by a C1 control is refused;
+    a mostly-control page is refused as binary; the lock counts pages and fallback bytes;
+    the CMSSW group reads records.json when releases.map is absent and prefers the map when
+    both exist. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.wrong-export: a CRIC responsibilities.json shaped like
-    the sites-compat export (other column names, or five fields per row), each of the 42 ways to
-    swap a CRIC or CRIC-core file for a sibling export, and JIRA, Indico, CondDB, DBS or CMSSW
-    records from another export each refuse the group by name; signature keys need 95% of
-    records (19 of 20 passes, 18 of 20 and an empty file are refused); --tmp-dir, or the system
-    temp dir by default, receives every reader-check copy and is empty after a build, a refusal
-    and a SIGTERM (which also removes the output staging directory); a full --tmp-dir is reported
-    as a write failure. [evidence:
-    executed_test]
+    the sites-compat export (other column names, or five fields per row), each of the 42 ways
+    to swap a CRIC or CRIC-core file for a sibling export, and JIRA, Indico, CondDB, DBS or
+    CMSSW records from another export each refuse the group by name; signature keys need 95%
+    of records (19 of 20 passes, 18 of 20 and an empty file are refused); --tmp-dir, or the
+    system temp dir by default, receives every reader-check copy and is empty after a build,
+    a refusal and a SIGTERM (which also removes the output staging directory); a full --tmp-dir
+    is reported as a write failure. [evidence: executed_test]
 
-    - acc.compops-snapshot-builder.file-dates: an optional per-group file_dates map (Jason, 2026-09-28:
-    the June CRIC set, files dated 06-12, facilities fetched 04-09) is carried into the lock, and must
-    name a file the group archives. [evidence: executed_test]
+    - acc.compops-snapshot-builder.file-dates: an optional per-group file_dates map (Jason,
+    2026-09-28: the June CRIC set, files dated 06-12, facilities fetched 04-09) is carried
+    into the lock, and must name a file the group archives. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
     UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an
@@ -266,4 +266,29 @@ evidence:
   head: cde0859d64cb80cc0dbfef3525399f0925d863cb
   at: '2026-09-28T12:04:18+00:00'
   note: 13 passed at this head inside the 630-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 22ce5d0ae36a47ba67fad6ce697be28cc1580fc1
+  at: '2026-09-28T13:36:24+00:00'
+  note: '682 passed at this head (okg origin/dev 435ab285ac exported source, Python 3.12,
+    zstd v1.5.7, hatchling on the path), 159 snapshot tests. Second-review fixes: the reviewer''s
+    mixed page (three addresses in valid UTF-8 plus a stray 0x93) loses all three and keeps
+    its valid UTF-8; only invalid byte runs fall back (cp1252, Latin-1 for undefined bytes);
+    an address split by a C1 or C0 control refuses the group; a page over 1% control characters
+    is refused as binary; signatures need 95% of records and at least one; all 42 sibling
+    swaps refused; SIGTERM cleans --tmp-dir and output staging; a full --tmp-dir reads as
+    a write failure; per-file dates carried into the lock. Mutations: whole-page cp1252 4
+    failed, no control-split check 2, no binary guard 2, signature in every record 43, share
+    0 49, empty file allowed 1, no disk-full wording 1; without the SIGTERM handler the signal
+    killed the test run. Real-cache dry run (submit76 /var/tmp, counts only): all 10 required
+    groups pass with cric from the June set.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 22ce5d0ae36a47ba67fad6ce697be28cc1580fc1
+  at: '2026-09-28T13:36:24+00:00'
+  note: 13 passed at this head inside the 682-test suite; downloaders unchanged since 96a34d6.
 decisions: []
