@@ -511,4 +511,24 @@ evidence:
   head: 95e240a5e15857752310b16d5090bd3280c7726d
   at: '2026-09-28T22:32:26+00:00'
   note: 13 passed at this head inside the 1048-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 8c2fdd819be290d7190f6b2bba3114b21dc1043c
+  at: '2026-09-28T22:51:27+00:00'
+  note: '1059 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 380 snapshot tests. Tenth-review fixes: Perl, Doxygen and shell backslash-escaped
+    addresses (jdoe\@example.org, jdoe\@example\.org) are removed in JSON and TWiki; a coloured
+    line with PR #642 is stored with the colour stripped; refusals name file, line, rule.
+    The same test file on cd0404b: 97 failed, 283 passed (11 for the new behaviour, the rest
+    because refusal wording changed). Reviewer fuzz.py 56,252 cases and fuzzfw.py 257 cases,
+    0 leaks; own fuzz 240,000 cases, 0 leaks.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 8c2fdd819be290d7190f6b2bba3114b21dc1043c
+  at: '2026-09-28T22:51:27+00:00'
+  note: 13 passed at this head inside the 1059-test suite; downloaders unchanged since 96a34d6.
 decisions: []
