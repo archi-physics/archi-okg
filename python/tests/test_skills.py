@@ -101,3 +101,49 @@ def test_skill_triggers_has_no_site_markers():
     text = (SKILLS_DIR / "skill-triggers.yaml").read_text(encoding="utf-8")
     for marker in SITE_MARKERS:
         assert marker not in text, f"site marker {marker!r} in skill-triggers.yaml"
+
+
+# Retrieval contract ported from okg-deployments PR #111: agents take the
+# minimum sufficient evidence path instead of a fixed call count.
+FIXED_SEQUENCE_RULES = [
+    "at least two OKG calls",
+    "at least one expansion call",
+    "Perform at least one expansion action",
+    "Run multiple query variants unless",
+    "Expand one promising candidate when evidence exists",
+]
+
+MINIMUM_PATH_RULES = {
+    "okg_traversal": [
+        "Use the minimum sufficient evidence path:",
+        "no graph call for a clearly out-of-scope session or meta question;",
+        "Do not make an extra call only to satisfy a count.",
+    ],
+    "okg_retrieval_planner": [
+        "Use `inspect` directly for a known canonical node ID",
+        "Do not add a second call or an expansion merely to satisfy a fixed sequence.",
+        "If the harness supplies a per-question retrieval card",
+    ],
+    "agentic_benchmark": [
+        "1. Use the minimum sufficient evidence path.",
+        "A clearly out-of-scope\n   question may stop without a graph call.",
+        "For a question that needs OKG evidence, early stop is allowed only",
+    ],
+}
+
+
+def test_skills_teach_no_fixed_call_sequence():
+    hits = []
+    for path in _skill_files():
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for rule in FIXED_SEQUENCE_RULES:
+            if rule in text:
+                hits.append(f"{path.name}: {rule!r}")
+    assert not hits, "fixed-sequence retrieval rules left in skills:\n" + "\n".join(hits)
+
+
+def test_skills_teach_minimum_sufficient_evidence_path():
+    for skill, phrases in MINIMUM_PATH_RULES.items():
+        text = (SKILLS_DIR / f"{skill}.md").read_text(encoding="utf-8")
+        for phrase in phrases:
+            assert phrase in text, f"{skill}.md lost retrieval rule {phrase!r}"

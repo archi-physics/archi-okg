@@ -37,12 +37,17 @@ next.
 
 ## Minimum Evidence
 
-An evidence-backed answer should normally have:
+Use the minimum sufficient evidence path:
 
-- at least two OKG calls;
+- no graph call for a clearly out-of-scope session or meta question;
+- one pinned exact inspection or complete bounded aggregate when it directly
+  supplies the answer and source metadata;
 - at least one canonical ID when a canonical parent/source exists;
-- at least one expansion call after first evidence is found;
+- inspection or expansion when the evidence is chunk-only, ambiguous,
+  historical, conflicting, or multi-hop;
 - a gap statement when only chunk-level or conflicting evidence is available.
+
+Do not make an extra call only to satisfy a count.
 
 ## Live-State Completion
 

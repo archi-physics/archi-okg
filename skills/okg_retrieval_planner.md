@@ -2,30 +2,37 @@
 
 Use this plan before answering:
 
-1. Start with exact identifiers and short query variants. Use site names, RSEs,
+1. If the harness supplies a per-question retrieval card, read it first. Treat
+   its authority profiles as required source families, not evidence that those
+   families are present. Start with exact identifiers: site names, RSEs,
    datasets, workflow names, command fragments, config keys, JIRA keys, service
    names, and aliases from retrieval hints.
-2. If the first search is weak, do not repeat it. Try independent variants:
-   exact phrase, acronym expansion, service/repo/path term, source-family term,
-   ticket key, config key, command fragment, and timestamp/status verbs.
+2. Use `inspect` directly for a known canonical node ID and `aggregate` for a
+   complete bounded count or distribution. Stop after that call if it directly
+   supplies the answer and source metadata.
+3. Use `search` only when discovery is needed. Start with at most three
+   candidates. If the first search is weak, do not repeat it. Try independent
+   variants: exact phrase, acronym expansion, service/repo/path term,
+   source-family term, ticket key, config key, command fragment, and
+   timestamp/status verbs.
    Use `search(method="lexical")` and exact `search(method="alias")` by
    default. Semantic search is available only when the instance's MCP
    server explicitly has an embedder; do not call
    `search(method="semantic")` unless the instance provides one.
-3. Inspect promising canonical candidates with `inspect`. When search returns
+4. Inspect promising canonical candidates with `inspect`. When search returns
    chunks, roll them to parent issues or documentation pages before treating
    them as final evidence.
-4. Expand compact hits into source context. For a promising chunk, use
-   `expand` or bounded `query` to find its parent document/ticket and
-   adjacent or ordered sibling chunks before synthesis.
-5. Use bounded SQL as a retrieval primitive, not as final evidence. Keep SQL
+5. Expand compact hits only when the answer depends on context or relations.
+   For a promising chunk, use `expand` or bounded `query` to find its parent
+   document/ticket and adjacent or ordered sibling chunks before synthesis.
+6. Use bounded SQL as a retrieval primitive, not as final evidence. Keep SQL
    view rows in `evidence_notes`; cite real OKG node IDs from the rows.
-6. Expand one promising candidate when evidence exists. Use one-hop `expand`,
-   typed-path `expand`, `aggregate`, `search(method="identifier_mentions")`, or
-   bounded `query` over `okg.v_*` views.
-7. For count, impact, distribution, or high-cardinality RSE/dataset questions,
+7. Do not add a second call or an expansion merely to satisfy a fixed sequence.
+   Clearly out-of-scope questions may use no graph call. Ambiguous, historical,
+   conflicting, chunk-only, and multi-hop evidence normally requires follow-up.
+8. For count, impact, distribution, or high-cardinality RSE/dataset questions,
    aggregate before listing rows.
-8. For current, latest, status, deploy, or how-to questions, run a reasonable
+9. For current, latest, status, deploy, or how-to questions, run a reasonable
    timestamp-ranked check over candidate canonical nodes. Prefer
    `jira_issue.updated`, `documentation_page.last_updated`,
    `monitoring_snapshot.observed_at`, `workflow.updated_at`, then subtype
@@ -90,7 +97,7 @@ ORDER BY COALESCE((e.attrs->>'chunk_index')::int,
                   (c.attrs->>'char_offset')::int,
                   0),
          c.node_id
-LIMIT 12
+LIMIT 4
 ```
 
 Search source metadata when URL/path/title/source family matters:
@@ -113,7 +120,7 @@ WHERE subtype IN ('documentation_page', 'jira_issue', 'document')
     OR attrs->>'source_repo' ILIKE '%<term>%'
   )
 ORDER BY COALESCE(attrs->>'last_updated', attrs->>'updated', attrs->>'created') DESC NULLS LAST
-LIMIT 20
+LIMIT 8
 ```
 
 For generic doc-corpus sources, `okg.v_documents`, `okg.v_doc_chunks`, and

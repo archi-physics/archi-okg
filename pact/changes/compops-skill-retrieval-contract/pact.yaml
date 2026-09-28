@@ -1,0 +1,82 @@
+pact_version: 5
+id: compops-skill-retrieval-contract
+title: Port the minimum-evidence retrieval contract into the CMS skills
+tier: 2
+why: 'okg-deployments PR #111 ("CMS: harden agent retrieval UX", head 8e0e1a67e8) changed three
+  CMS skills so an agent takes the minimum sufficient evidence path instead of a fixed call
+  count: no graph call for a clearly out-of-scope question, one call for a decisive exact
+  inspect or complete bounded aggregate, follow-up only when evidence is chunk-only, ambiguous,
+  historical, conflicting or multi-hop. The skills it edits now live in archi-okg (skills/,
+  symlinked into bundles/cern-team/skills/), and the comp-ops deployment uses archi''s skills,
+  so the approved comp-ops design (okg lane B, row A5) moves #111''s skill edits here. Its
+  MCP docs, agent profile and replay script go to okg-deployments cms/ in a later change.
+
+
+  archi-okg changed two of the three files after porting them from the cms base (47ed15c139,
+  #111''s merge base): the planner''s search-method line and the traversal opening line were
+  de-site-ified, and python/tests/test_skills.py forbids the old cms wording. This change keeps
+  archi''s text for both and applies #111''s retrieval guidance around it.'
+affected_code:
+- skills/agentic_benchmark.md
+- skills/okg_retrieval_planner.md
+- skills/okg_traversal.md
+- python/tests/test_skills.py
+requirements:
+- id: req.compops-skill-retrieval-contract.main
+  statement: 'The three skills teach okg-deployments #111''s retrieval contract, reconciled with
+    archi-okg''s own edits.
+
+
+    - okg_traversal.md "Minimum Evidence" is #111''s text: minimum sufficient path, no graph
+    call for an out-of-scope question, one exact inspection or bounded aggregate when decisive,
+    inspection or expansion for chunk-only, ambiguous, historical, conflicting or multi-hop
+    evidence, and no extra call to satisfy a count. archi''s opening line is kept.
+
+    - okg_retrieval_planner.md takes #111''s nine-step plan (inspect a known ID directly,
+    aggregate for bounded counts, search only for discovery with at most three candidates,
+    expand only when context or relations matter, no call added for a fixed sequence) and
+    its smaller recipe limits (ordered chunks LIMIT 4, source metadata LIMIT 8). archi''s
+    de-site-ified search-method sentence replaces #111''s "For this CMS deployment" sentence,
+    and the retrieval-card step is conditional ("If the harness supplies a per-question retrieval
+    card"), because the card comes from the cms replay harness, not from archi.
+
+    - agentic_benchmark.md "Answer Contract" is #111''s text. The early-stop paragraph after
+    it is scoped to questions that need OKG evidence, so it no longer contradicts the zero-call
+    out-of-scope answer #111 allows.
+
+    - No skill teaches a fixed call count ("at least two OKG calls", "at least one expansion
+    call", "Perform at least one expansion action", "Run multiple query variants unless",
+    "Expand one promising candidate when evidence exists").
+
+    - Tool names and arguments stay inside the okg MCP contract on dev: inspect, search, expand,
+    filter, map, aggregate, query; search methods lexical, alias, semantic, identifier_mentions,
+    attrs. No skill passes conditions through search''s filter.
+
+
+    Not covered: the MCP instructions doc, the Codex agent profile and benchmark_replay.py from
+    #111 (they go to okg-deployments cms/), and teaching inspect kind "text" for whole-record
+    reads (okg #2697, not merged).
+
+
+    Acceptance:
+
+    - acc.compops-skill-retrieval-contract.skills: test_skills.py rejects every fixed-count phrase
+    in any skill and requires the new rules in each of the three skills; both new tests fail
+    against main''s skills and pass with the change, and the archi suite passes. [evidence:
+    executed_test]'
+tasks:
+- id: task.compops-skill-retrieval-contract.deliver
+  requirement: req.compops-skill-retrieval-contract.main
+  verification: 'Apply #111''s skill hunks with the reconciliations above and add the two contract
+    tests.
+
+
+    Proof: the new tests fail against main''s skills and pass with the change, and the full
+    archi suite passes.
+
+
+    Test plan:
+
+    - python/tests [evidence: pytest]'
+evidence: []
+decisions: []

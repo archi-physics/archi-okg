@@ -22,16 +22,18 @@ external CLI agent connected to the CMS OKG MCP server.
 
 ## Answer Contract
 
-For every question with OKG evidence:
+For every question that needs OKG evidence:
 
-1. Run multiple query variants unless an exact canonical answer is found and
-   verified.
-2. Inspect canonical parents for chunk hits.
-3. Perform at least one expansion action: neighbor traversal, path traversal,
-   alias/entity lookup, source-family search, or bounded `okg.v_*` SQL.
+1. Use the minimum sufficient evidence path. A verified exact inspection or
+   complete bounded aggregate may stop after one call. A clearly out-of-scope
+   question may stop without a graph call.
+2. Try another query variant only when the first result is ambiguous,
+   incomplete, stale, or from the wrong authority family.
+3. Inspect canonical parents for chunk hits. Expand only when the answer needs
+   parent, relationship, historical, or multi-hop context.
 4. Rerank evidence clusters by canonical source ID, not by chunk rank alone.
-5. Return real evidence IDs, traversal receipts, query variants, tool-call
-   count, confidence, and any gaps.
+5. Return real evidence IDs and any traversal receipts, query variants,
+   tool-call count, confidence, and gaps that actually occurred.
 6. Classify the operator knowledge type and assemble typed evidence before
    writing the final answer. Include `operator_knowledge_type`,
    `typed_evidence`, and `answer_completeness` when the harness requests them.
@@ -41,9 +43,9 @@ retrieval pass over candidate canonical nodes. Use `updated`, `last_updated`,
 `observed_at`, `updated_at`, `created`, or `date` according to subtype, and
 record the source dates in evidence notes when they affect source authority.
 
-Early stop is allowed only when the answer includes a verified canonical ID,
-the requested value or command, and a note explaining why further traversal
-would not change the answer.
+For a question that needs OKG evidence, early stop is allowed only when the
+answer includes a verified canonical ID, the requested value or command, and
+a note explaining why further traversal would not change the answer.
 
 ## Evidence IDs
 
