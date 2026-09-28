@@ -292,28 +292,50 @@ def _domain_end(text: str, start: int) -> int | None:
     return None
 
 
-# Characters that can start another separator right after a domain run.
-_GIT_UNSAFE_NEXT = frozenset("@＠﹫%&")
 # Wrapping characters that may sit directly before a kept ``git@`` inside
 # the scanned local part (```git@host```, ``'git@host'``, ``|git@host|``).
 _GIT_WRAPPERS = frozenset("`'|{")
+# A whole separator (core plus any leading ``&`` / ``&amp;`` layers)
+# starting at a given position.
+_SEP_AT_RE = re.compile(
+    r"[@＠﹫]|%(?:25)*40|&(?:amp;)*(?:commat;|#0*64;?|#x0*40;?)",
+    re.IGNORECASE,
+)
 
 
-def _domain_run_end(text: str, start: int) -> int:
-    """End of the raw run of domain characters from ``start``, untrimmed."""
+def _runs_into_separator(text: str, start: int) -> bool:
+    """Whether a local part could run from ``start`` into a separator.
+
+    Scans rightwards over everything :func:`_local_start` would scan
+    leftwards over (local-part characters and ``&amp;`` / encoded-dot
+    tokens), plus the domain dots, and over a quoted string that ends
+    directly at a separator. True if that scan reaches any separator
+    ``_SEP_CORE_RE`` recognises, whether or not a domain follows it.
+    """
     i, size = start, len(text)
     while i < size:
+        if _SEP_AT_RE.match(text, i):
+            return True
         char = text[i]
-        if char in _DOTS or _is_word(char) or char == "-" or char in _INVISIBLE:
+        if char == "&":
+            token = _LOCAL_TOKEN_RE.match(text, i)
+            i = token.end() if token else i + 1
+        elif char == '"':
+            # ``git@host.jdoe"@cern.ch`` and ``git@host.jdoe"x y"@cern.ch``:
+            # the quote may close or open a quoted local part.
+            if _SEP_AT_RE.match(text, i + 1):
+                return True
+            close = text.find('"', i + 1)
+            return (
+                close != -1
+                and "\n" not in text[i:close]
+                and _SEP_AT_RE.match(text, close + 1) is not None
+            )
+        elif _is_local(char) or char in _DOTS:
             i += 1
-        elif char == "&":
-            token = _DOT_TOKEN_RE.match(text, i)
-            if token is None:
-                break
-            i = token.end()
         else:
-            break
-    return i
+            return False
+    return False
 
 
 def _is_git_account(text: str, sep: int, local: int, end: int) -> bool:
@@ -324,16 +346,21 @@ def _is_git_account(text: str, sep: int, local: int, end: int) -> bool:
     ``'``, ``|`` or ``{``). So ``git@github.com``, ``ssh://git@host`` and
     ```git@host``` qualify, while ``john.git@cern.ch``, ``my-git@cern.ch``,
     ``jdoe'git@cern.ch``, ``url=git@host``, ``GIT@host`` and ``git%40host``
-    do not. The domain run must not end at another separator
-    (``git@host.jdoe@cern.ch``, ``git@host.jdoe.1@cern.ch``): it may have
-    absorbed a local part, so such a token is not kept (fail closed).
+    do not.
+
+    The token must also not run into another address: if a local part
+    could continue from its end to any separator (``git@host.jdoe@cern.ch``,
+    ``git@host.jdoe.1+x@cern.ch``, ``git@host.o'brien@cern.ch``,
+    ``'git@host.jdoe'@cern.ch``, ``git@host.jdoe"x"@cern.ch``), its tail may
+    be part of that address's local part, so it is not kept (fail closed).
+    ``git@host:path``, ``git@host/path`` and ``git@host`` before a space
+    stop the scan and are kept.
     """
     if text[sep] != "@" or sep - 3 < local or text[sep - 3:sep] != "git":
         return False
     if any(char not in _GIT_WRAPPERS for char in text[local:sep - 3]):
         return False
-    run_end = _domain_run_end(text, end)
-    return run_end == len(text) or text[run_end] not in _GIT_UNSAFE_NEXT
+    return not _runs_into_separator(text, end)
 
 
 def redact_email_addresses(text: str) -> str:

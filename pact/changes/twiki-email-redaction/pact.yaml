@@ -82,11 +82,20 @@ requirements:
     only wrapping characters (backtick, '', |, {), is kept whole: git@github.com:org/x.git,
     ssh://git@gitlab.cern.ch:7999/x.git, `git@host:x`, ''git@host:x''. The kept token neither
     hides nor absorbs an address after it (git@github.com:x/y.git by jdoe@cern.ch loses only
-    jdoe@cern.ch), and a git@ token whose raw domain run ends at another separator (@, fullwidth
-    @, % or &, e.g. git@github.com.jdoe@cern.ch or git@github.com.jdoe.1@cern.ch) is not kept
-    and is removed whole with what follows it. john.git@, my-git@, jdoe''git@, url=git@, GIT@,
-    git&#64; and git%40 are still removed. ssh user@host logins are still removed (rule item
-    4).
+    jdoe@cern.ch). A git@ token is not kept, and is removed whole with what follows it, when
+    a local part could run from its end into any separator the @ pass recognises (@, fullwidth
+    or small @, %40, %2540, &#64;, &commat; and their &amp; layers): the scan after the host
+    crosses every local-part character (+ = ! # $ * ^ ` { | } ~ '' % & . - _, letters with
+    accents, invisible characters), &amp; and encoded-dot tokens, and a quoted string that
+    ends at a separator. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch, git@gitlab.cern.ch.o''brien@cern.ch,
+    ''git@github.com.jdoe''@cern.ch and git@github.com.jdoe"x"@cern.ch lose the whole span,
+    as they would with no exemption, while :, /, a space or other text after the host stops
+    the scan and keeps git@host:path. Invariant, checked by a differential property test
+    against the function with the exemption disabled: the exemption never keeps a character
+    that the function without it removes, except a git@ token whose wrappers and host are
+    not part of any address-shaped span once git@ is taken out. john.git@, my-git@, jdoe''git@,
+    url=git@, GIT@, git&#64; and git%40 are still removed. ssh user@host logins are still
+    removed (rule item 4).
 
     - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
     any case, before a dotted domain (., a bracketed (dot) / [DOT], or a spaced dot) whose
