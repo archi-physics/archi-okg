@@ -87,15 +87,15 @@ requirements:
     or small @, %40, %2540, &#64;, &commat; and their &amp; layers): the scan after the host
     crosses every local-part character (+ = ! # $ * ^ ` { | } ~ '' % & . - _, letters with
     accents, invisible characters), &amp; and encoded-dot tokens, and a quoted string that
-    ends at a separator. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch, git@gitlab.cern.ch.o''brien@cern.ch,
-    ''git@github.com.jdoe''@cern.ch and git@github.com.jdoe"x"@cern.ch lose the whole span,
-    as they would with no exemption, while :, /, a space or other text after the host stops
-    the scan and keeps git@host:path. Invariant, checked by a differential property test
-    against the function with the exemption disabled: the exemption never keeps a character
-    that the function without it removes, except a git@ token whose wrappers and host are
-    not part of any address-shaped span once git@ is taken out. john.git@, my-git@, jdoe''git@,
-    url=git@, GIT@, git&#64; and git%40 are still removed. ssh user@host logins are still
-    removed (rule item 4).
+    ends at a separator. So git@github.com.jdoe@cern.ch, git@github.com.jdoe.1+x@cern.ch,
+    git@gitlab.cern.ch.o''brien@cern.ch, ''git@github.com.jdoe''@cern.ch and git@github.com.jdoe"x"@cern.ch
+    lose the whole span, as they would with no exemption, while :, /, a space or other text
+    after the host stops the scan and keeps git@host:path. Invariant, checked by a differential
+    property test against the function with the exemption disabled: the exemption never keeps
+    a character that the function without it removes, except a git@ token whose wrappers and
+    host are not part of any address-shaped span once git@ is taken out. john.git@, my-git@,
+    jdoe''git@, url=git@, GIT@, git&#64; and git%40 are still removed. ssh user@host logins
+    are still removed (rule item 4).
 
     - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
     any case, before a dotted domain (., a bracketed (dot) / [DOT], or a spaced dot) whose
@@ -338,4 +338,28 @@ evidence:
     match with a numeric last label (not an address), 92 @-shaped tokens all git@, 13 ssh://git@
     plus 2 ssh user@IPv4 logins (IP-literal hosts are a #5 known gap, left by both). No address
     printed; examples masked.'
+- kind: executed_test
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: b657568d8e184d3920634f6d64fa2f588f7731bc
+  at: '2026-09-28T15:05:59+00:00'
+  note: '653 passed at b657568 (okg origin/dev 435ab285ac, Python 3.12, archi and okg editable
+    in a scratch venv). Fix for the review of bfbadbf2: a git@ token is kept only when no
+    local part can run from its end into a separator. New tests: 29 rows (the 7 reported rows,
+    quoted strings, backtick/pipe/brace wrappers, %40, %2540, &#64;, &#x40;, &commat;, &amp;#64;,
+    fullwidth and small @ after +x, &amp;/encoded-dot/%2e tokens, uppercase), the 13 local-part
+    characters + = ! # $ * ^ ` { | } ~ '' in three shapes each, 7 kept positives (git@github.com:org/x.git,
+    ''git@host:x'', `git@host:path`, ssh://git@host/x/y.git, git@github.com.jdoe alone and
+    before a word, a double-quoted git@ URL), a differential property test and a linear-time
+    test for the new scan. The same test file run against the bfbadbf2 anonymizer: 40 failed,
+    157 passed (every reported row, all 13 characters and the property test fail; the &amp;,
+    encoded-dot and %2e rows and the positives pass on both, as the old guard already caught
+    & and %). Property test: 21,224 seeded inputs (every joiner x every separator x 3 drawn
+    prefixes, hosts, tails, locals and domains, plus 20,000 random strings over the same pieces),
+    shipped vs exemption disabled by monkeypatch; asserts the only difference is whole kept
+    git@ tokens and that each kept token''s wrappers and host lie in no address-shaped span
+    once git@ is taken out; 0.2 s. On bfbadbf2 it fails on ''x git@GITHUB.COM.JDOE+@CERN.CH''.
+    Linear time: 11 crowded inputs up to 100,000 characters under 1 s; a 16x larger input
+    takes 14-17x longer for each of 13 shapes.'
 decisions: []
