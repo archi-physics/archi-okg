@@ -20,6 +20,16 @@ reimplementation of OKG services.
 
 ## Current state (update this section when it changes)
 
+**Cache downloaders and a snapshot builder moved in (2026-09-28, comp-ops A4).**
+The JIRA, static-docs and SSO-login downloaders and the download manifest moved
+from okg-deployments `cms/scripts` into `archi.downloaders`; they import nothing
+from okg. `python -m archi.snapshot build` packs existing caches into one
+checksummed, email-free `tar.zst` per group plus `snapshot.lock.yaml` (collection
+date, SHA-256, file and record counts per group); `verify` checks archives
+against the lock. Each group is validated by running its own archi reader. No
+real snapshot is built yet. See [cache snapshots](cache-snapshot.md). No okg
+import was added, so the import block below is unchanged.
+
 **Comp-ops readers can now be run by okg (2026-09-27).** CRIC, CRIC core, DQM,
 GOCDB downtimes, CondDB global tags, DBS datasets, WMStats workflows and GitHub
 repositories each gain a registry adapter (`CRICAdapter`, `CRICCoreAdapter`,
