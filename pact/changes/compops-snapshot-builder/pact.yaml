@@ -381,4 +381,23 @@ evidence:
   head: 6cfeca4dabd2fb27ea6bec34e376187d954b1db4
   at: '2026-09-28T16:22:13+00:00'
   note: 13 passed at this head inside the 884-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 63160e5020ba6461e431c5c91d2b188fdfa505fd
+  at: '2026-09-28T20:59:31+00:00'
+  note: '896 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 217 snapshot tests. Fifth-review fixes: a control character inside the local
+    part (jdoe<DEL>x@example.org, jdoe<0x01>.x@example.org, jdoe<DEL>x[at]example.org, j<DEL>doe.x(at)example(dot)org)
+    refuses the group in JSON and TWiki; jdoe<ESC>(B@example.org after a CSI and jdoe<U+009B>32m@example.org
+    lose the whole address, the sequences stripped and counted. At 51bb241 the same 12 tests
+    failed: 8 did not refuse, 4 stored jdoe<ESC>( or jdoe<U+009B>.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 63160e5020ba6461e431c5c91d2b188fdfa505fd
+  at: '2026-09-28T20:59:31+00:00'
+  note: 13 passed at this head inside the 896-test suite; downloaders unchanged since 96a34d6.
 decisions: []
