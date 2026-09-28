@@ -147,6 +147,7 @@ accompany ``output_signature``; (3) add the standard ``sync:`` block. ::
         # (archi/schemas/operations.yaml + bridges/operations.yaml).
         # sites_path: data/cric/sites.json
         # releases_path: data/cmssw-releases/records.json
+        # releases_map_path: data/cmssw-releases/releases.map
         # jira_records_path: data/jira/records.json
         # services_path: data/cric-core/services.json
       sync:
@@ -208,6 +209,7 @@ accompany ``output_signature``; (3) add the standard ``sync:`` block. ::
         # Optional reference-target caches: same warning as twiki_eos.
         # sites_path: data/cric/sites.json
         # releases_path: data/cmssw-releases/records.json
+        # releases_map_path: data/cmssw-releases/releases.map
         # jira_records_path: data/jira/records.json
         # services_path: data/cric-core/services.json
       sync:
@@ -342,6 +344,7 @@ class TwikiEOSSource:
         max_depth: int = 1,
         sites_path: str | None = None,
         releases_path: str | None = None,
+        releases_map_path: str | None = None,
         jira_records_path: str | None = None,
         services_path: str | None = None,
         datasets_path: str | None = None,
@@ -381,6 +384,7 @@ class TwikiEOSSource:
         self.max_depth = max_depth
         self.sites_path = sites_path
         self.releases_path = releases_path
+        self.releases_map_path = releases_map_path
         self.jira_records_path = jira_records_path
         self.services_path = services_path
         self.datasets_path = datasets_path
@@ -411,6 +415,7 @@ class TwikiEOSSource:
                 "physics_filter": self.physics_filter,
                 "sites_path": self.sites_path,
                 "releases_path": self.releases_path,
+                "releases_map_path": self.releases_map_path,
                 "jira_records_path": self.jira_records_path,
                 "services_path": self.services_path,
                 "datasets_path": self.datasets_path,
@@ -444,6 +449,7 @@ class TwikiEOSSource:
         for raw in (
             self.sites_path,
             self.releases_path,
+            self.releases_map_path,
             self.jira_records_path,
             self.services_path,
         ):
@@ -549,6 +555,7 @@ class TwikiEOSSource:
         targets = _reference_targets(
             sites_path=self.sites_path,
             releases_path=self.releases_path,
+            releases_map_path=self.releases_map_path,
             jira_records_path=self.jira_records_path,
             services_path=self.services_path,
             datasets_path=self.datasets_path,
@@ -773,6 +780,7 @@ class TwikiCrawlSource:
         timeout: int = 30,
         sites_path: str | None = None,
         releases_path: str | None = None,
+        releases_map_path: str | None = None,
         jira_records_path: str | None = None,
         services_path: str | None = None,
         chunker_name: str = DEFAULT_CRAWL_CHUNKER_NAME,
@@ -806,6 +814,7 @@ class TwikiCrawlSource:
         self.timeout = timeout
         self.sites_path = sites_path
         self.releases_path = releases_path
+        self.releases_map_path = releases_map_path
         self.jira_records_path = jira_records_path
         self.services_path = services_path
         self.chunker_name = chunker_name
@@ -915,6 +924,7 @@ class TwikiCrawlSource:
         targets = _reference_targets(
             sites_path=self.sites_path,
             releases_path=self.releases_path,
+            releases_map_path=self.releases_map_path,
             jira_records_path=self.jira_records_path,
             services_path=self.services_path,
             base=self.base,

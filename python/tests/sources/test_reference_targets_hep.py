@@ -156,3 +156,53 @@ def test_sources_accept_the_new_paths():
         cookie_file_env="X", datasets_path="d.json",
     )
     assert sso.datasets_path == "d.json"
+
+
+def test_twiki_sources_accept_releases_map_path(tmp_path):
+    """`releases_map_path` has to reach the TWiki sources too.
+
+    `_reference_targets` and the docs sources have accepted it since the
+    live CMSSW connector started writing cms-bot's `releases.map`
+    instead of a `records.json` nobody produces. The TWiki sources did
+    not, so a manifest that set it got `TypeError: got an unexpected
+    keyword argument` — but only once the ingest reached construct,
+    after the connector had already read the whole snapshot.
+    """
+    from archi.sources.twiki import TwikiCrawlSource, TwikiEOSSource
+
+    eos = TwikiEOSSource(eos_root="/tmp", releases_map_path="r.map")
+    assert eos.releases_map_path == "r.map"
+    crawl = TwikiCrawlSource(
+        base_url="https://twiki.example.org",
+        seed_topics=["CMS/SeedTopic"],
+        max_depth=1,
+        releases_map_path="r.map",
+    )
+    assert crawl.releases_map_path == "r.map"
+
+
+def test_releases_map_path_is_in_the_twiki_change_probe(tmp_path):
+    """Swapping the release spine has to invalidate cached state, the
+    same as swapping any other reference cache."""
+    from archi.sources.twiki import TwikiEOSSource
+
+    a = TwikiEOSSource(eos_root="/tmp", releases_map_path="a.map")
+    b = TwikiEOSSource(eos_root="/tmp", releases_map_path="b.map")
+    assert a.change_probe._config_hash != b.change_probe._config_hash
+
+
+def test_releases_map_reaches_the_release_target_set(tmp_path):
+    """End to end: a map on disk becomes the `release` target set the
+    chunk scanner intersects against."""
+    from archi.sources.docs import _reference_targets
+
+    path = tmp_path / "releases.map"
+    path.write_text(
+        "label=CMSSW_10_6_30;state=Announced;type=Production;prodarch=1;\n",
+        encoding="utf-8",
+    )
+    targets = _reference_targets(releases_map_path=str(path))
+    assert "CMSSW_10_6_30" in targets["release"]
+
+    with pytest.raises(FileNotFoundError):
+        _reference_targets(releases_map_path=str(tmp_path / "absent.map"))
