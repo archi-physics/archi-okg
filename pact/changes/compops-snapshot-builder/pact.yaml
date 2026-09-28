@@ -120,11 +120,12 @@ requirements:
     counts one of each; the CMSSW group reads records.json when releases.map is absent and
     prefers the map when both exist. [evidence: executed_test]
 
-    - acc.compops-snapshot-builder.wrong-export: a CRIC responsibilities.json shaped like the
-    sites-compat export (other column names, or five fields per row), a CRIC or CRIC-core file
-    swapped for a sibling export, and JIRA, Indico, CondDB, DBS or CMSSW records from another
-    export each refuse the group by name; --tmp-dir receives every reader-check copy, and it
-    and the system temp dir are empty after a build and after a refusal. [evidence: executed_test]
+    - acc.compops-snapshot-builder.wrong-export: a CRIC responsibilities.json shaped like
+    the sites-compat export (other column names, or five fields per row), a CRIC or CRIC-core
+    file swapped for a sibling export, and JIRA, Indico, CondDB, DBS or CMSSW records from
+    another export each refuse the group by name; --tmp-dir receives every reader-check copy,
+    and it and the system temp dir are empty after a build and after a refusal. [evidence:
+    executed_test]
 
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
     UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an
@@ -230,4 +231,28 @@ evidence:
   head: be4bc38a1061e344d481df529d4c060fda14c513
   at: '2026-09-28T07:04:51+00:00'
   note: 13 passed at this head inside the 607-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: cde0859d64cb80cc0dbfef3525399f0925d863cb
+  at: '2026-09-28T12:04:18+00:00'
+  note: '630 passed at this head (okg origin/dev 9ad926c3d1 exported source, Python 3.12,
+    zstd v1.5.7, hatchling on the path), 107 snapshot tests. New: a sites-compat-shaped responsibilities.json
+    (its real column header, 5 fields per row) refuses cric by name; header-less rows of 5,
+    2 or dict fields, a numeric site or a null username refuse it; a null site title is accepted
+    (51 real June rows have one); 7 CRIC/CRIC-core files swapped for a sibling export, and
+    JIRA, Indico, CondDB, DBS and CMSSW records from another export, each refuse their group;
+    --tmp-dir receives every reader-check copy and it and the system temp dir are empty after
+    a build and after a refusal. Signatures checked against the real Aug 31 and June caches
+    (key names and counts only): every record carries them; DBS not checked. Mutations: no
+    column-header check 1 failed, no row field-count check 2, no key signatures 9, no pattern
+    signatures 4, tmp_dir ignored 1.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: cde0859d64cb80cc0dbfef3525399f0925d863cb
+  at: '2026-09-28T12:04:18+00:00'
+  note: 13 passed at this head inside the 630-test suite; downloaders unchanged since 96a34d6.
 decisions: []
