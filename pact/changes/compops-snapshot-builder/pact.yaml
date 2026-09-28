@@ -107,7 +107,11 @@ requirements:
     while free prose (john.doe at cern.ch) is kept; a git@ host remote is kept in JIRA and
     TWiki and an address after it is removed; after merging main (#13), redact_email_addresses
     and redact_obfuscated_email_addresses equal main 6193edd0ca on random strings including
-    git@ variants. [evidence: executed_test]
+    git@ variants; the final review''s gaps are closed for spelled-out forms too: a control
+    character inside one (jdoe<DEL>[at]cern.ch) refuses the group, a stray byte next to or inside
+    one (jdoe<0x93>[at]cern.ch, jdoe[at]<0x93>cern.ch, jdoe<0x93>(at)cern(dot)ch,
+    john.doe<0x93>_at_cern.ch) stores the page without its invalid bytes, and ANSI sequences are
+    stripped from JSON strings as well as text files. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.jira-facts: the archi JIRA reader emits the same facts
     from a raw JIRA fixture and from the snapshot''s redacted copy. [evidence: executed_test]

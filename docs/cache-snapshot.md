@@ -85,17 +85,20 @@ For every group the build:
    intact. A printable fallback character next to or inside an address
    (`jean.dupont` + a stray `0x93` + `@cern.ch`) would hide it from the
    redactor, so the page is also read with its invalid bytes left out; if
-   any character of an address found that way would survive redaction of
+   any character that redaction removes from that reading (an address or a
+   spelled-out address such as `jdoe[at]cern.ch`) would survive redaction of
    the fallback reading, the page is stored without its invalid bytes
    instead. The lock records `text_pages`, `pages_valid_utf8`,
    `pages_with_fallback_runs`, `pages_bytes_dropped`, `fallback_bytes` (per
-   decoding) and `ansi_sequences_stripped`. ANSI colour sequences
-   (`ESC[32m`) are removed from text files before redaction, since they
-   can sit inside an address. A text file with more than 1% control
+   decoding). ANSI colour sequences (`ESC[32m`) are removed from text files
+   and from every JSON string before redaction, since they can sit inside an
+   address; the lock counts them as `ansi_sequences_stripped` for every
+   group. A text file with more than 1% control
    characters, and at least 16 of them, is refused as binary; tab, newline,
-   vertical tab, form feed and carriage return do not count. Any JSON string
-   in which a control character splits an address (`a.b@c<control>d.ch`)
-   is refused, because the redactor would not see that address.
+   vertical tab, form feed and carriage return do not count. Any string in which
+   a control character splits an address or a spelled-out address
+   (`a.b@c<control>d.ch`, `jdoe<DEL>[at]cern.ch`) is refused, because the
+   redactors would not see it.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC

@@ -573,19 +573,73 @@ def redact_obfuscated_email_addresses(text: str) -> str:
 
 def redact_obfuscated_email_addresses_with_count(text: str) -> tuple[str, int]:
     """:func:`redact_obfuscated_email_addresses`, plus how many tokens it removed."""
-    out, removed = _OBF_STRONG_RE.subn("", text)
-    for pattern in (_OBF_SPACED_BRACKET_DOT_RE, _OBF_GLUED_MAIL_RE, _OBF_GLUED_RE):
-        out, count = pattern.subn("", out)
-        removed += count
-    nospam = [0]
+    spans, removed = _obfuscated_spans_and_count(text)
+    if not spans:
+        return text, 0
+    pieces: list[str] = []
+    kept = 0
+    for start, end in spans:
+        pieces.append(text[kept:start])
+        kept = end
+    pieces.append(text[kept:])
+    return "".join(pieces), removed
 
-    def token(match: re.Match) -> str:
-        kept = _nospam_token(match)
-        if not kept:
-            nospam[0] += 1
-        return kept
 
-    return _OBF_NOSPAM_RE.sub(token, out), removed + nospam[0]
+def obfuscated_email_address_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` ranges of ``text`` that
+    :func:`redact_obfuscated_email_addresses` removes, in order and merged
+    where they touch."""
+    return _obfuscated_spans_and_count(text)[0]
+
+
+def _obfuscated_spans_and_count(text: str) -> tuple[list[tuple[int, int]], int]:
+    """Run the obfuscated-address passes in order, each over the text the
+    previous ones left, and map every removed range back to ``text``.
+
+    ``positions[i]`` is the index in ``text`` of character ``i`` of the
+    current text, so a later match that closes over an earlier removal maps
+    to one range covering both.
+    """
+    current = text
+    positions = list(range(len(text)))
+    removed_mask = bytearray(len(text))
+    count = 0
+    passes: tuple[tuple[re.Pattern, bool], ...] = (
+        (_OBF_STRONG_RE, False),
+        (_OBF_SPACED_BRACKET_DOT_RE, False),
+        (_OBF_GLUED_MAIL_RE, False),
+        (_OBF_GLUED_RE, False),
+        (_OBF_NOSPAM_RE, True),
+    )
+    for pattern, conditional in passes:
+        matches = [
+            match
+            for match in pattern.finditer(current)
+            if not conditional or not _nospam_token(match)
+        ]
+        if not matches:
+            continue
+        count += len(matches)
+        drop = bytearray(len(current))
+        for match in matches:
+            if match.end() > match.start():
+                first = positions[match.start()]
+                last = positions[match.end() - 1]
+                removed_mask[first : last + 1] = b"\x01" * (last + 1 - first)
+                drop[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
+        current = "".join(c for c, d in zip(current, drop, strict=True) if not d)
+        positions = [p for p, d in zip(positions, drop, strict=True) if not d]
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(removed_mask):
+        if removed_mask[index]:
+            start = index
+            while index < len(removed_mask) and removed_mask[index]:
+                index += 1
+            spans.append((start, index))
+        else:
+            index += 1
+    return spans, count
 
 
 # Text-level HTML character references decoded before redaction. The

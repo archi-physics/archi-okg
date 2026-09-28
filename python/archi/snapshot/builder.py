@@ -51,6 +51,7 @@ import yaml
 
 from archi.enrichment.anonymizer import (
     email_address_spans,
+    obfuscated_email_address_spans,
     redact_email_addresses,
     redact_email_addresses_with_count,
     redact_obfuscated_email_addresses,
@@ -264,6 +265,7 @@ class PreparedGroup:
     record_count: int
     addresses_removed: int
     obfuscated_removed: int
+    ansi_stripped: int
     dropped_fields: tuple[str, ...]
     kept_fields: tuple[str, ...]
     deep_dropped_keys: tuple[str, ...] = ()
@@ -307,6 +309,12 @@ class _Counter:
     def __init__(self) -> None:
         self.removed = 0
         self.obfuscated = 0
+        self.ansi = 0
+
+    def strip_ansi(self, text: str) -> str:
+        clean, count = _CSI_RE.subn("", text)
+        self.ansi += count
+        return clean
 
     def redact(self, text: str) -> str:
         """Remove addresses, then spelled-out addresses (``jdoe[at]cern.ch``),
@@ -384,14 +392,13 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                 "pages_with_fallback_runs": 0,
                 "pages_bytes_dropped": 0,
                 "fallback_bytes": {"cp1252": 0, "latin-1": 0},
-                "ansi_sequences_stripped": 0,
             }
         for rel, path in _text_files(spec, source):
             page = _read_text(group.name, rel, path, fallback=fallback)
             text = page.text
+            counter.ansi += page.ansi_stripped
             if text_stats is not None:
                 text_stats["text_pages"] += 1
-                text_stats["ansi_sequences_stripped"] += page.ansi_stripped
                 if page.fallback_bytes:
                     text_stats["pages_with_fallback_runs"] += 1
                     for kind, count in page.fallback_bytes.items():
@@ -429,6 +436,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         record_count=record_count,
         addresses_removed=counter.removed,
         obfuscated_removed=counter.obfuscated,
+        ansi_stripped=counter.ansi,
         dropped_fields=tuple(sorted(drop - deep)),
         kept_fields=tuple(sorted(keep)),
         deep_dropped_keys=tuple(sorted(deep)),
@@ -538,13 +546,13 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
 
 def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
     if isinstance(value, str):
-        return counter.redact(value)
+        return counter.redact(counter.strip_ansi(value))
     if isinstance(value, list):
         return [_redact_json(group, file_name, item, counter) for item in value]
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            clean_key = counter.redact(key)
+            clean_key = counter.redact(counter.strip_ansi(key))
             if clean_key in out:
                 raise GroupRefused(
                     group,
@@ -640,6 +648,35 @@ def _fallback_char(byte: int) -> tuple[str, str]:
         return chr(byte), "latin-1"
 
 
+def _redaction_mask(text: str) -> bytearray:
+    """Which characters of ``text`` the builder's redaction removes.
+
+    The same steps as :meth:`_Counter.redact` (addresses, then spelled-out
+    addresses, repeated until neither changes the text), tracked back to
+    positions in ``text``.
+    """
+    mask = bytearray(len(text))
+    current = text
+    positions = list(range(len(text)))
+    for _ in range(_REDACTION_ROUNDS):
+        changed = False
+        for spans_of in (email_address_spans, obfuscated_email_address_spans):
+            spans = spans_of(current)
+            if not spans:
+                continue
+            changed = True
+            drop = bytearray(len(current))
+            for start, end in spans:
+                drop[start:end] = b"\x01" * (end - start)
+                for index in range(start, end):
+                    mask[positions[index]] = 1
+            current = "".join(c for c, d in zip(current, drop, strict=True) if not d)
+            positions = [p for p, d in zip(positions, drop, strict=True) if not d]
+        if not changed:
+            break
+    return mask
+
+
 def _decode_with_fallback(data: bytes) -> _Page:
     """Decode UTF-8, falling back per invalid byte; drop them if that hides
     an address.
@@ -652,8 +689,9 @@ def _decode_with_fallback(data: bytes) -> _Page:
     - the dropped view, where invalid bytes are simply left out.
 
     A printable fallback character next to or inside an address (``jean.dupont``,
-    a stray 0x93, ``@cern.ch``) can hide it from the redactor. So when any
-    character of an address found in the dropped view would survive redaction
+    a stray 0x93, ``@cern.ch``, or ``jdoe``, 0x93, ``[at]cern.ch``) can hide it
+    from the redactor. So when any character that redaction removes from the
+    dropped view (addresses and spelled-out addresses) would survive redaction
     of the fallback view, the page uses the dropped view instead.
     """
     raw = data.decode("utf-8", errors="surrogateescape")
@@ -673,13 +711,10 @@ def _decode_with_fallback(data: bytes) -> _Page:
         return _Page(raw, {}, ansi_stripped=ansi)
     fallback_view = "".join(fallback_chars)
     dropped_view = "".join(raw[i] for i in kept_positions)
-    removed = bytearray(len(fallback_view))
-    for start, end in email_address_spans(fallback_view):
-        removed[start:end] = b"\x01" * (end - start)
+    removed = _redaction_mask(fallback_view)
+    found = _redaction_mask(dropped_view)
     survives = any(
-        not removed[kept_positions[i]]
-        for start, end in email_address_spans(dropped_view)
-        for i in range(start, end)
+        flag and not removed[kept_positions[i]] for i, flag in enumerate(found)
     )
     if survives:
         return _Page(dropped_view, counts, bytes_dropped=True, ansi_stripped=ansi)
@@ -751,7 +786,10 @@ def _check_string(group: str, where: str, value: str) -> None:
         )
     if _CONTROL_RE.search(value):
         bare = _CONTROL_RE.sub("", value)
-        if redact_email_addresses(bare) != bare:
+        if (
+            redact_email_addresses(bare) != bare
+            or redact_obfuscated_email_addresses(bare) != bare
+        ):
             raise GroupRefused(
                 group, f"{where}: an address is split by a control character"
             )
@@ -995,6 +1033,7 @@ def build(
                 "record_count": group.record_count,
                 "addresses_removed": group.addresses_removed,
                 "obfuscated_addresses_removed": group.obfuscated_removed,
+                "ansi_sequences_stripped": group.ansi_stripped,
                 "contents_sha256": contents_digest(group.files),
                 "archive_dir": GROUPS[group.name].archive_dir,
                 "dropped_fields": list(group.dropped_fields),

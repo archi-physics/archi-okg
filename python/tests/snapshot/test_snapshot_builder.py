@@ -1753,3 +1753,114 @@ def test_obfuscated_counting_matches_the_plain_function():
         clean, removed = redact_obfuscated_email_addresses_with_count(text)
         assert clean == redact_obfuscated_email_addresses(text)
         assert removed == count, text
+
+
+# --- final review: spelled-out forms get the same defences as @ addresses -----------
+
+
+@pytest.mark.parametrize("value", ["jdoe\x7f[at]cern.ch ok", "jdoe[at]cern\x7f.ch"])
+def test_a_control_character_inside_a_spelled_out_address_refuses_the_group(
+    tmp_path, sources, value
+):
+    path = sources["dqm"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["filename"] = value
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+
+
+def test_a_control_character_inside_a_spelled_out_address_in_twiki_refuses(tmp_path, sources):
+    (sources["twiki-eos"] / "Del.txt").write_bytes(b"---+ Page\nAsk jdoe\x7f[at]cern.ch ok.\n" + PADDING)
+    with pytest.raises(BuildRefused, match="Del.txt: an address is split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"jdoe\x93[at]cern.ch",
+        b"jdoe[at]\x93cern.ch",
+        b"jdoe\x93(at)cern(dot)ch",
+        b"john.doe\x93_at_cern.ch",
+    ],
+    ids=["quote-before-at", "quote-after-at", "quote-before-parenthesised", "quote-before-glued"],
+)
+def test_a_stray_byte_does_not_hide_a_spelled_out_address(tmp_path, sources, raw):
+    (sources["twiki-eos"] / "Spelled.txt").write_bytes(
+        b"---+ Page\nAsk " + raw + b" today.\n" + PADDING
+    )
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Spelled.txt"].decode("utf-8")
+    assert "Ask  today." in page
+    for fragment in ("jdoe", "john", "cern", "at]", "(at)", "_at_"):
+        assert fragment not in page
+    row = lock["groups"]["twiki-eos"]
+    assert row["pages_bytes_dropped"] == 1 and row["obfuscated_addresses_removed"] >= 1
+
+
+def test_fuzz_no_spelled_out_address_from_the_dropped_view_survives():
+    """2,000 random pages with a spelled-out address and 1-3 stray bytes."""
+    import random
+
+    from archi.snapshot.builder import _decode_with_fallback, _redaction_mask
+
+    rng = random.Random(1409)
+    address_letters = "qxzkjvy"
+    word_letters = "bfilmnoprsuw"  # no a, t, d, c, h: they spell the separators
+    separators = ["[at]", "[AT]", "(at)", "{at}", "<at>", "_at_"]
+    dots = [".", "(dot)", "[DOT]"]
+    checked = 0
+    for case in range(2000):
+        local = "".join(rng.choice(address_letters) for _ in range(rng.randint(3, 10)))
+        sep = rng.choice(separators)
+        if sep == "_at_":
+            domain = rng.choice(["cern.ch", "fnal.gov", "gmail.com"])
+        else:
+            domain = (
+                "".join(rng.choice(address_letters) for _ in range(rng.randint(2, 6)))
+                + rng.choice(dots)
+                + rng.choice(["qz", "kj", "yx"])
+            )
+        chunks = [bytes([b]) for b in f"{local}{sep}{domain}".encode()]
+        for _ in range(rng.randint(1, 3)):
+            chunks.insert(rng.randint(0, len(chunks)), bytes([rng.randint(0x80, 0xFF)]))
+        words = [
+            "".join(rng.choice(word_letters) for _ in range(rng.randint(1, 8)))
+            for _ in range(rng.randint(0, 6))
+        ]
+        data = (
+            " ".join(words[: len(words) // 2]).encode()
+            + b" " + b"".join(chunks) + b" "
+            + " ".join(words[len(words) // 2 :]).encode() + b"\n"
+        )
+        page = _decode_with_fallback(data)
+        output = redact(page.text)
+        from archi.enrichment.anonymizer import redact_obfuscated_email_addresses
+
+        output = redact_obfuscated_email_addresses(output)
+        dropped = data.decode("utf-8", errors="ignore")
+        mask = _redaction_mask(dropped)
+        if not any(mask):
+            continue
+        checked += 1
+        removed_text = "".join(c for c, m in zip(dropped, mask, strict=True) if m)
+        assert local not in output, (case, data, output)
+        # Stray bytes that cannot pair into a valid UTF-8 character leave no
+        # letter of the address behind.
+        if dropped.isascii():
+            assert not set(address_letters) & set(output), (case, data, output, removed_text)
+    assert checked >= 1000
+
+
+def test_ansi_codes_are_stripped_from_json_strings(tmp_path, sources):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = "Logged by \x1b[32mjdoe\x1b[0m@cern.ch in \x1b[1mbold\x1b[0m."
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert stored[0]["description"] == "Logged by  in bold."
+    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 4
