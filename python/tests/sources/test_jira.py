@@ -664,10 +664,10 @@ def test_git_account_kept_and_next_address_still_removed(tmp_path):
         **FLAT_ISSUE,
         "key": "CMSPROD-305",
         "summary": "Clone git@gitlab.cern.ch:cms/y.git",
-        "description": (
-            "git clone git@github.com:x/y.git by gitnextaddr@cern.ch\n"
-            "then ssh sshloginaddr@lxplus.cern.ch"
-        ),
+        "description": "\n".join([
+            "git clone git@github.com:x/y.git by gitnextaddr@cern.ch",
+            "then ssh sshloginaddr@lxplus.cern.ch",
+        ]),
         "recent_comments": [],
     }
     source = _write_caches(tmp_path, [issue])

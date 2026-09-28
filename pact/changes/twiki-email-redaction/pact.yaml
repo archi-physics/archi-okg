@@ -78,12 +78,15 @@ requirements:
 
     - redact_email_addresses (from #5): @, fullwidth @, %40, &#64; and the other forms its
     PACT jira-email-redaction lists, with one change (operator rule item 3, shared with JIRA):
-    a token whose separator is a literal @ and whose local part is exactly git, or ends in
-    git after a character that cannot be in a name (quote, backtick, |, =, {), is kept whole:
-    git@github.com:org/x.git, ssh://git@gitlab.cern.ch:7999/x.git, `git@host:x`. The kept
-    token neither hides nor absorbs an address after it (git@github.com:x/y.git by jdoe@cern.ch
-    loses only jdoe@cern.ch). john.git@, my-git@, GIT@, git&#64; and git%40 are still removed.
-    ssh user@host logins are still removed (rule item 4).
+    a token whose separator is a literal @ and whose local part is exactly git, or git behind
+    only wrapping characters (backtick, '', |, {), is kept whole: git@github.com:org/x.git,
+    ssh://git@gitlab.cern.ch:7999/x.git, `git@host:x`, ''git@host:x''. The kept token neither
+    hides nor absorbs an address after it (git@github.com:x/y.git by jdoe@cern.ch loses only
+    jdoe@cern.ch), and a git@ token whose raw domain run ends at another separator (@, fullwidth
+    @, % or &, e.g. git@github.com.jdoe@cern.ch or git@github.com.jdoe.1@cern.ch) is not kept
+    and is removed whole with what follows it. john.git@, my-git@, jdoe''git@, url=git@, GIT@,
+    git&#64; and git%40 are still removed. ssh user@host logins are still removed (rule item
+    4).
 
     - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
     any case, before a dotted domain (., a bracketed (dot) / [DOT], or a spaced dot) whose
@@ -132,7 +135,15 @@ requirements:
     jdoe@lxplus.cern.ch becomes "ssh ", scp f jdoe@lxplus.cern.ch:~/x becomes "scp f :~/x".
     Only the git@ account is exempt.
 
-    - Code shaped like f(at)obj.attr or f(at)x dot product goes.
+    - Code shaped like f(at)obj.attr goes. Because a spaced dot now counts after a bracketed
+    (at) (so jdoe[at]cern dot ch goes, per rule item 1), some prose that cb610275 kept goes
+    too: f(at)x dot product, "Meeting (at) 3 dot pm", "Run2 [at] 13 dot TeV". The real-data
+    receipt counts how often the bracketed rule matches on the snapshot before and after.
+
+    - url=git@github.com:x/y.git loses url=git@github.com, and url=''git@github.com:x'' loses
+    url=''git@github.com (a word before git in the scanned local part is not a wrapper, so
+    a name before git cannot hide an address). git config usually writes url =
+    git@... with spaces, which is kept.
 
     - Table pipes and the TWiki ! escape directly before an address go with it (|x@cern.ch|).
 
@@ -143,9 +154,8 @@ requirements:
     at cern.ch and jdoe AT cern DOT ch reach the chat. On the snapshot this is the largest
     remaining group (see the real-data receipt).
 
-    - The git@ exemption keeps a real mailbox literally named git@ (git@cern.ch). A git@ token
-    whose domain run ends right at another separator (git@github.com.jdoe@cern.ch) is not
-    kept, so it gives the #5 result (@cern.ch left).
+    - The git@ exemption keeps a real mailbox literally named git@ (git@cern.ch), and one written
+    behind a wrapper character (`git@cern.ch`).
 
     - Glued separators before a domain other than cern.ch, fnal.gov, gmail.com, .edu or .gov
     (jdoe_at_infn.it), a bracketed form with doubled spaces or a line break inside it, the

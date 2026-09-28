@@ -292,26 +292,48 @@ def _domain_end(text: str, start: int) -> int | None:
     return None
 
 
-# Characters that can start another separator right after a domain.
+# Characters that can start another separator right after a domain run.
 _GIT_UNSAFE_NEXT = frozenset("@＠﹫%&")
+# Wrapping characters that may sit directly before a kept ``git@`` inside
+# the scanned local part (```git@host```, ``'git@host'``, ``|git@host|``).
+_GIT_WRAPPERS = frozenset("`'|{")
 
 
-def _is_git_account(text: str, sep: int, local: int) -> bool:
-    """Whether ``text[local:sep]`` ends in the literal ``git`` account of ``git@``.
+def _domain_run_end(text: str, start: int) -> int:
+    """End of the raw run of domain characters from ``start``, untrimmed."""
+    i, size = start, len(text)
+    while i < size:
+        char = text[i]
+        if char in _DOTS or _is_word(char) or char == "-" or char in _INVISIBLE:
+            i += 1
+        elif char == "&":
+            token = _DOT_TOKEN_RE.match(text, i)
+            if token is None:
+                break
+            i = token.end()
+        else:
+            break
+    return i
 
-    The separator must be a literal ``@`` and the local part must be exactly
-    ``git``, or end in ``git`` after a character that cannot be part of a
-    name (a quote, backtick, ``|``, ``=``, ``{`` ...). So ``git@github.com``,
-    ``ssh://git@host``, ```git@host``` and ``url=git@host`` qualify, while
-    ``john.git@cern.ch``, ``my-git@cern.ch`` and ``git%40host`` do not.
+
+def _is_git_account(text: str, sep: int, local: int, end: int) -> bool:
+    """Whether the token ``text[local:end]`` is the literal ``git@`` account.
+
+    The separator at ``sep`` must be a literal ``@``; the local part must be
+    exactly ``git``, or ``git`` behind only wrapping characters (a backtick,
+    ``'``, ``|`` or ``{``). So ``git@github.com``, ``ssh://git@host`` and
+    ```git@host``` qualify, while ``john.git@cern.ch``, ``my-git@cern.ch``,
+    ``jdoe'git@cern.ch``, ``url=git@host``, ``GIT@host`` and ``git%40host``
+    do not. The domain run must not end at another separator
+    (``git@host.jdoe@cern.ch``, ``git@host.jdoe.1@cern.ch``): it may have
+    absorbed a local part, so such a token is not kept (fail closed).
     """
     if text[sep] != "@" or sep - 3 < local or text[sep - 3:sep] != "git":
         return False
-    before = sep - 4
-    if before < local:
-        return True
-    char = text[before]
-    return not (_is_word(char) or char in ".-+" or char in _INVISIBLE)
+    if any(char not in _GIT_WRAPPERS for char in text[local:sep - 3]):
+        return False
+    run_end = _domain_run_end(text, end)
+    return run_end == len(text) or text[run_end] not in _GIT_UNSAFE_NEXT
 
 
 def redact_email_addresses(text: str) -> str:
@@ -351,13 +373,8 @@ def redact_email_addresses(text: str) -> str:
         if end is None or local == sep:
             bound = domain_start
             continue
-        if _is_git_account(text, sep, local) and (
-            end == len(text) or text[end] not in _GIT_UNSAFE_NEXT
-        ):
-            # Kept in place; no later local part may start inside it. A
-            # domain run that ends right at another separator
-            # (git@host.jdoe@cern.ch) may have absorbed a local part, so it
-            # is not kept (fail closed).
+        if _is_git_account(text, sep, local, end):
+            # Kept in place; no later local part may start inside it.
             bound = end
             continue
         pieces.append(text[kept:local])

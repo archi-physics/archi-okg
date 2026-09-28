@@ -427,7 +427,8 @@ def test_redact_email_addresses_address_shaped_tokens(text, expected):
         "git@gitlab.cern.ch:7999/group/y.git",
         "git remote add origin ssh://git@gitlab.cern.ch:7999/cms/z.git",
         "url = `git@github.com:cms-sw/cmssw.git`",
-        "url='git@github.com:x/y.git' and |git@github.com:a/b|",
+        "url: 'git@github.com:x/y.git' and |git@github.com:a/b|",
+        "{git@github.com:x/y.git}",
     ],
 )
 def test_redact_email_addresses_keeps_the_git_account(text):
@@ -454,6 +455,22 @@ def test_redact_email_addresses_keeps_the_git_account(text):
         # A git@ domain run that ends at another separator may hold a
         # local part, so it is not kept (the #5 result).
         ("git@github.com.jdoe@cern.ch", "@cern.ch"),
+        # ... also when the domain's trimmed tail hides that separator
+        # (review finding on 4ec37e51).
+        ("git@github.com.jdoe.1@cern.ch", ""),
+        ("git@github.com.jdoe-@cern.ch", ""),
+        ("git@github.com.jdoe­@cern.ch", ""),
+        ("git@github.com.jdoe.1&amp;#64;cern.ch", ""),
+        ("git@github.com.jdoe.1%40cern.ch", ""),
+        ("git@github.com.jdoe.1＠cern.ch", ""),
+        # A name before "git" in the local part is not a wrapper.
+        ("mail jdoe'git@cern.ch now", "mail  now"),
+        ("mail jdoe=git@cern.ch now", "mail  now"),
+        ("mail jdoe|git@cern.ch now", "mail  now"),
+        ("mail jdoe`git@cern.ch now", "mail  now"),
+        ("mail jdoe!git@cern.ch now", "mail  now"),
+        ("mail jdoe&amp;amp;git@cern.ch now", "mail  now"),
+        ("cfg url=git@github.com:x/y.git", "cfg :x/y.git"),
         # Only the literal "git" account with a literal "@" is kept.
         ("mail john.git@cern.ch now", "mail  now"),
         ("mail my-git@cern.ch now", "mail  now"),
