@@ -107,12 +107,19 @@ For every group the build:
 
    - **Word rule.** The value is split into words at whitespace (space,
      tab, newline, carriage return, vertical tab, form feed, no-break
-     space, U+2028, U+2029). A word that has a hidden character and, once
-     its hidden characters are removed, an `@` (or full-width or small
-     `@`) or a bracketed `at` or `dot` (`[at]`, `(at)`, `{at}`, `[dot]`,
-     `(dot)`, `{dot}`, any case) is refused. This rule needs no knowledge
-     of terminal sequences: `jdoe<ESC>(é@example.org` and
-     `jdoe[<U+200E>at]laptop` are refused by it.
+     space, U+2028, U+2029). From each word, the hidden characters and
+     also the five invisible characters the redactor reads (soft hyphen,
+     zero-width space, zero-width non-joiner, zero-width joiner, word
+     joiner) are removed, and NFKC is applied, which turns full-width
+     forms into ASCII. If the result has an `@` or a bracketed `at` or
+     `dot` (`[at]`, `(at)`, `{at}`, `[dot]`, `(dot)`, `{dot}`, any case),
+     and the word had one of those removed characters or NFKC changed it
+     beyond plain NFC composition, the group is refused. This rule needs
+     no knowledge of terminal sequences. It refuses
+     `jdoe<ESC>(é@example.org`, `jdoe[<U+200E>at]laptop`,
+     `jdoe<U+200B>[at]example.org`, `jdoe(<U+200B>at)example(dot)org`,
+     `jdoe［at］example.org` and `jdoe＠example.org`. Plain ASCII words, and
+     accented words in composed or decomposed form, are not affected.
    - **Match rule.** Both redactors match three copies of the value: one
      with its hidden characters removed; one that also drops the character
      after each `ESC` that starts a terminal sequence (the `[` of `ESC [`);
@@ -134,9 +141,12 @@ For every group the build:
    address wrapped directly in colour codes (`ESC[31mjdoe@example.org
    ESC[0m`) is refused rather than cleaned; so is a string where a control
    character only joins a word to an address
-   (`word<control>jdoe@example.org`), and any word that mixes a hidden
-   character with an `@`, such as a coloured shell prompt
-   (`ESC[32mjdoe@laptop ESC[0m:~$`), even when it is not an address. A
+   (`word<control>jdoe@example.org`); so is any word that mixes a hidden
+   or invisible character with an `@`, such as a coloured shell prompt
+   (`ESC[32mjdoe@laptop ESC[0m:~$`), even when it is not an address; and
+   an address with a soft hyphen or zero-width character in it
+   (`jdoe<U+200B>x@example.org`) or written in full-width characters
+   (`jdoe＠example.org`), which the redactor alone would have removed. A
    hidden character in a word with no `@` or bracketed `at`/`dot` is left
    to the match rule and otherwise kept (or stripped, for a CSI colour
    code). Tab, newline, vertical tab, form feed, carriage return and the

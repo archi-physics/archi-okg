@@ -659,7 +659,15 @@ _SEQUENCE_RE = re.compile(
     r"|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c)"
     r"|\x1b[\x20-\x2f]*[\x30-\x7e]"
 )
-#: What separates words for the piece rule of the hidden-address check.
+#: What the word rule of the hidden-address check removes from a word: the
+#: hidden characters and also the invisible characters the redactor reads
+#: (``jdoe<U+200B>[at]example.org`` and ``(<U+200B>at)`` must not pass).
+_WORD_HIDDEN_RE = re.compile(
+    _HIDDEN_RE.pattern[:-1]
+    + "".join(re.escape(char) for char in sorted(_REDACTOR_INVISIBLE))
+    + "]"
+)
+#: What separates words for the word rule of the hidden-address check.
 _WORD_BREAK_RE = re.compile("[ \t\n\r\x0b\x0c\u00a0\u2028\u2029]+")
 #: An address separator in a word: ``@`` (also full-width and small), or a
 #: bracketed ``at`` or ``dot`` (``[at]``, ``(at)``, ``{at}``, ``[dot]``, ...).
@@ -717,10 +725,12 @@ def _refuse_hidden_address(group: str, where: str, text: str) -> None:
 
     Runs on the input, before terminal sequences are stripped. First, without
     any grammar: the text is split into words at whitespace (space, tab, LF,
-    CR, VT, FF, no-break space, U+2028, U+2029), and a word that has a
-    hidden character (:data:`_HIDDEN_RE`) and, with its hidden characters
-    removed, an ``@`` or a bracketed ``at`` or ``dot`` (:data:`_SEPARATOR_RE`)
-    refuses the group. Then both
+    CR, VT, FF, no-break space, U+2028, U+2029). A word refuses the group
+    when, with its hidden and invisible characters (:data:`_WORD_HIDDEN_RE`)
+    removed and NFKC applied, it has an ``@`` or a bracketed ``at`` or
+    ``dot`` (:data:`_SEPARATOR_RE`), and it had such a character or NFKC
+    changed it beyond NFC (full-width ``<U+FF3B>at<U+FF3D>`` or
+    ``<U+FF20>``). Then both
     redactors (addresses, then spelled-out addresses, repeated) match three
     copies of the text:
 
@@ -737,18 +747,24 @@ def _refuse_hidden_address(group: str, where: str, text: str) -> None:
     ``<ESC>[31mjdoe@example.org<ESC>[0m`` all refuse: nothing that sits in
     or next to an address is stripped and re-matched.
     """
+    if text.isascii() and not _HIDDEN_RE.search(text):
+        return
+    for word in _WORD_BREAK_RE.split(text):
+        bare = _WORD_HIDDEN_RE.sub("", word)
+        folded = unicodedata.normalize("NFKC", bare)
+        full_width = folded != unicodedata.normalize("NFC", bare)
+        if (bare != word or full_width) and _SEPARATOR_RE.search(folded):
+            raise GroupRefused(
+                group,
+                f"{where}: an address is split by a control character (a word "
+                "with a hidden or full-width character has an @ or a "
+                "spelled-out separator)",
+            )
     hidden = bytearray(len(text))
     for match in _HIDDEN_RE.finditer(text):
         hidden[match.start()] = 1
     if not any(hidden):
         return
-    for word in _WORD_BREAK_RE.split(text):
-        if _HIDDEN_RE.search(word) and _SEPARATOR_RE.search(_HIDDEN_RE.sub("", word)):
-            raise GroupRefused(
-                group,
-                f"{where}: an address is split by a control character (a word "
-                "with a hidden character has an @ or a spelled-out separator)",
-            )
     suspect = bytearray(hidden)
     introducers = bytearray(hidden)
     for match in _SEQUENCE_RE.finditer(text):

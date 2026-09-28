@@ -661,13 +661,15 @@ PADDING = b"Ordinary page text. " * 10 + b"\n"
 
 REVIEWER_MIXED_PAGE = (
     "---+ Contacts\nCaf\u00e9 team: j\u00e9r\u00f4me.dupont@cern.ch, jdoe@c\u00e9rn.ch "
-    "and jdoe\uff20cern\uff0ech.\n"
+    "and jdoe@example.org.\n"
 ).encode("utf-8") + b"A stray Windows quote: \x93quoted.\n"
 
 
 def test_a_stray_byte_does_not_garble_the_valid_utf8_around_it(tmp_path, sources):
     # The second review's page: mostly UTF-8, three addresses, one stray
     # cp1252 byte. Decoding the whole page as cp1252 leaked "j\u00c3\u00a9r\u00c3\u00b4".
+    # (Its full-width jdoe\uff20cern\uff0ech now refuses the group by the
+    # word rule, so the third address is a plain one here.)
     (sources["twiki-eos"] / "Mixed.txt").write_bytes(REVIEWER_MIXED_PAGE)
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
@@ -1901,8 +1903,8 @@ HIDDEN_IN_ADDRESS = [
     "jdoe@example\x9b.org",
     "jdoe\x9b@example.org",
     "jdoe\x1b[@example.org",
-    "⁨jdoe⁩@example.org",
-    "jdoe‎x@example.org",
+    "\u2068jdoe\u2069@example.org",
+    "jdoe\u200ex@example.org",
     "\x1b[31mjdoe@example.org\x1b[0m",
 ]
 
@@ -1945,9 +1947,9 @@ def test_a_hidden_character_in_an_address_in_a_json_key_refuses(tmp_path, source
 #: Format characters (Unicode category Cf) the redactor does not read as part
 #: of an address; each kept "jdoe" out of jdoe<char>x@example.org.
 FORMAT_CHARACTERS = [
-    "﻿", "‎", "‏", "‪", "‫", "‬", "‭", "‮",
-    "⁦", "⁧", "⁨", "⁩", "⁡", "⁢", "⁣", "⁤",
-    "᠎", "؀", "؁", "؂", "؃", "؄", "؅",
+    "\ufeff", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+    "\u2066", "\u2067", "\u2068", "\u2069", "\u2061", "\u2062", "\u2063", "\u2064",
+    "\u180e", "\u0600", "\u0601", "\u0602", "\u0603", "\u0604", "\u0605",
 ]
 
 
@@ -1957,18 +1959,30 @@ def test_a_format_character_in_the_local_part_refuses(char):
         _refuse_hidden_address("g", "f", f"Ask jdoe{char}x@example.org today.")
 
 
-@pytest.mark.parametrize("char", ["­", "​", "‌", "‍", "⁠"])
-def test_invisible_characters_the_redactor_reads_are_still_redacted(
+@pytest.mark.parametrize("char", ["\u00ad", "\u200b", "\u200c", "\u200d", "\u2060"])
+def test_invisible_characters_the_redactor_reads_now_refuse_next_to_an_at(
     tmp_path, sources, char
 ):
+    # Until the seventh review these were redacted whole; the word rule now
+    # counts them too, so a word with one and an @ refuses instead.
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by jdoe{char}x@example.org today."
     path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize("char", ["\u00ad", "\u200b"])
+def test_invisible_characters_in_words_without_an_at_are_kept(tmp_path, sources, char):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"hyphen{char}ated text, mail jdoe@example.org"
+    path.write_text(json.dumps(records))
     out = tmp_path / "out"
     build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
-    assert stored[0]["description"] == "Logged by  today."
+    assert stored[0]["description"] == f"hyphen{char}ated text, mail "
 
 
 #: A lone ESC or U+009B that starts no CSI sequence is left in place: d45838f
@@ -2011,7 +2025,7 @@ SHORT_AND_STRING_ESCAPES = [
 #: Forms no sequence grammar reads: ESC ( followed by a non-ASCII letter, and
 #: a format character inside [at] before a host with no dot. The word rule
 #: refuses them: a word with a hidden character and an @ or [at].
-WORD_RULE_ONLY = ["jdoe\x1b(é@example.org", "jdoe[‎at]laptop"]
+WORD_RULE_ONLY = ["jdoe\x1b(\u00e9@example.org", "jdoe[\u200eat]laptop"]
 
 
 @pytest.mark.parametrize("value", SHORT_AND_STRING_ESCAPES + WORD_RULE_ONLY)
@@ -2038,7 +2052,7 @@ def test_a_short_or_string_escape_in_an_address_on_a_text_page_refuses(
 
 
 def test_a_hidden_character_in_an_address_in_a_file_path_refuses(tmp_path, sources):
-    (sources["twiki-eos"] / "jdoe‎@example.org.txt").write_bytes(
+    (sources["twiki-eos"] / "jdoe\u200e@example.org.txt").write_bytes(
         b"---+ Page\nPlain text.\n" + PADDING
     )
     with pytest.raises(BuildRefused, match="file path .*split by a control character"):
@@ -2061,3 +2075,46 @@ def test_a_hidden_character_in_a_word_without_a_separator_is_kept_or_stripped(
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
     assert stored[0]["description"] == "See bold, price\x1b 5, mail  (at) noon."
     assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 2
+
+
+#: Issue #17: invisible characters the redactor reads, and full-width forms.
+INVISIBLE_AND_FULL_WIDTH = [
+    "jdoe\u200b[at]example.org",
+    "jdoe(\u200bat)example(dot)org",
+    "jdoe\uff3bat\uff3dexample.org",
+    "jdoe\uff20example.org",
+    "jdoe(at)example\uff08dot\uff09org",
+]
+
+
+@pytest.mark.parametrize("value", INVISIBLE_AND_FULL_WIDTH)
+def test_an_invisible_or_full_width_separator_in_json_refuses(tmp_path, sources, value):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"Logged by {value} today."
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="hidden or full-width character"):
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize("value", INVISIBLE_AND_FULL_WIDTH)
+def test_an_invisible_or_full_width_separator_on_a_text_page_refuses(
+    tmp_path, sources, value
+):
+    (sources["twiki-eos"] / "Wide.txt").write_bytes(
+        f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
+    )
+    with pytest.raises(BuildRefused, match="Wide.txt: .*hidden or full-width character"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_accented_and_decomposed_addresses_are_still_redacted(tmp_path, sources):
+    # NFKC is compared with NFC, so a decomposed accent is not "full width".
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = "By je\u0301ro\u0302me@example.org and ren\u00e9@example.org."
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert stored[0]["description"] == "By  and ."
