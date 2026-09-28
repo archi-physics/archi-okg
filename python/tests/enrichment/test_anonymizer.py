@@ -6,7 +6,11 @@ emission hook (jira/docs ``anonymize_data``) deterministically.
 """
 import pytest
 
-from archi.enrichment.anonymizer import Anonymizer, redact_email_addresses
+from archi.enrichment.anonymizer import (
+    Anonymizer,
+    redact_email_addresses,
+    redact_obfuscated_email_addresses,
+)
 
 
 def _anonymizer(**kwargs):
@@ -404,7 +408,6 @@ def test_redact_email_addresses_keeps_version_pins(text):
     [
         # Address-shaped but not mail: removed (fail closed).
         ("logo image@2x.png end", "logo  end"),
-        ("clone git@github.com:org/x", "clone :org/x"),
         ("see https://user@host.org/x", "see https:///x"),
         # A trailing numeric label is left; the address before it goes.
         ("v bob@cern.ch.123", "v .123"),
@@ -412,6 +415,364 @@ def test_redact_email_addresses_keeps_version_pins(text):
 )
 def test_redact_email_addresses_address_shaped_tokens(text, expected):
     assert redact_email_addresses(text) == expected
+
+
+# The literal git@ account of a git host is kept (operator decision,
+# 2026-09-28): copy-paste clone instructions must survive.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git clone git@github.com:org/x.git",
+        "git clone git@gitlab.cern.ch:group/y.git",
+        "git@gitlab.cern.ch:7999/group/y.git",
+        "git remote add origin ssh://git@gitlab.cern.ch:7999/cms/z.git",
+        "url = `git@github.com:cms-sw/cmssw.git`",
+        "url: 'git@github.com:x/y.git' and |git@github.com:a/b|",
+        "{git@github.com:x/y.git}",
+    ],
+)
+def test_redact_email_addresses_keeps_the_git_account(text):
+    assert redact_email_addresses(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A kept git@ token neither hides nor absorbs a real address after
+        # it, on the same line or directly adjacent.
+        (
+            "git@github.com:x/y.git by jdoe@cern.ch",
+            "git@github.com:x/y.git by ",
+        ),
+        (
+            "git@github.com:x/y.git,jdoe@cern.ch",
+            "git@github.com:x/y.git,",
+        ),
+        (
+            "jdoe@cern.ch pushed to git@gitlab.cern.ch:g/y.git",
+            " pushed to git@gitlab.cern.ch:g/y.git",
+        ),
+        # A git@ domain run that ends at another separator may hold a
+        # local part, so it is not kept (the #5 result).
+        ("git@github.com.jdoe@cern.ch", "@cern.ch"),
+        # ... also when the domain's trimmed tail hides that separator
+        # (review finding on 4ec37e51).
+        ("git@github.com.jdoe.1@cern.ch", ""),
+        ("git@github.com.jdoe-@cern.ch", ""),
+        ("git@github.com.jdoe­@cern.ch", ""),
+        ("git@github.com.jdoe.1&amp;#64;cern.ch", ""),
+        ("git@github.com.jdoe.1%40cern.ch", ""),
+        ("git@github.com.jdoe.1＠cern.ch", ""),
+        # A name before "git" in the local part is not a wrapper.
+        ("mail jdoe'git@cern.ch now", "mail  now"),
+        ("mail jdoe=git@cern.ch now", "mail  now"),
+        ("mail jdoe|git@cern.ch now", "mail  now"),
+        ("mail jdoe`git@cern.ch now", "mail  now"),
+        ("mail jdoe!git@cern.ch now", "mail  now"),
+        ("mail jdoe&amp;amp;git@cern.ch now", "mail  now"),
+        ("cfg url=git@github.com:x/y.git", "cfg :x/y.git"),
+        # Only the literal "git" account with a literal "@" is kept.
+        ("mail john.git@cern.ch now", "mail  now"),
+        ("mail my-git@cern.ch now", "mail  now"),
+        ("mail GIT@cern.ch now", "mail  now"),
+        ("mail git&#64;cern.ch now", "mail  now"),
+        ("mail git%40cern.ch now", "mail  now"),
+        # ssh user@host logins are still removed (fail closed).
+        ("ssh jdoe@lxplus.cern.ch", "ssh "),
+        ("ssh -Y jdoe@lxplus.cern.ch -L 8080:host", "ssh -Y  -L 8080:host"),
+        ("scp f jdoe@lxplus.cern.ch:~/x", "scp f :~/x"),
+    ],
+)
+def test_redact_email_addresses_git_account_and_logins(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def test_redact_email_addresses_git_account_is_linear():
+    import time
+
+    crowded = [
+        "git@" * 10000,
+        "git@a.b " * 5000,
+        "git@a.b" * 5000,
+        " git@x.org:y jdoe@cern.ch" * 2000,
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_email_addresses(text)
+    assert time.perf_counter() - started < 1.0
+
+
+# Review finding on bfbadbf2: the git@ guard refused only a domain run that
+# ran straight into a separator, so any other local-part character between
+# the host and the next separator kept the git@ token and with it the first
+# part of the next address's username. Every case below is removed whole
+# without the exemption, and must be removed whole with it.
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("clone git@github.com.jdoe.1+x@cern.ch now", "clone  now"),
+        ("git@host.cern.ch.jdoe+ops@cern.ch", ""),
+        ("git@gitlab.cern.ch.o'brien@cern.ch", ""),
+        ("git@github.com.john_doe~x@cern.ch", ""),
+        ("git@github.com.jdoé+x@cern.ch", ""),
+        ('git@github.com.jdoe"x"@cern.ch', ""),
+        ("'git@github.com.jdoe'@cern.ch", ""),
+        # Quoted strings that close or open right after the host.
+        ('git@github.com.jdoe" x y"@cern.ch', ""),
+        ('"git@github.com.jdoe"@cern.ch', '""@cern.ch'),
+        ('git@github.com.jdoe"@cern.ch', '"@cern.ch'),
+        # Wrappers around the kept token.
+        ("`git@github.com.jdoe`x@cern.ch", ""),
+        ("`git@github.com.jdoe+x`@cern.ch", ""),
+        ("|git@github.com.jdoe|x@cern.ch", ""),
+        ("{git@github.com.jdoe}x@cern.ch", ""),
+        ("{git@github.com.jdoe+x}@cern.ch", ""),
+        # Encoded separators after a +x.
+        ("git@github.com.jdoe+x%40cern.ch", ""),
+        ("git@github.com.jdoe+x%2540cern.ch", ""),
+        ("git@github.com.jdoe+x&#64;cern.ch", ""),
+        ("git@github.com.jdoe+x&#x40;cern.ch", ""),
+        ("git@github.com.jdoe+x&commat;cern.ch", ""),
+        ("git@github.com.jdoe+x&amp;#64;cern.ch", ""),
+        ("git@github.com.jdoe+x＠cern.ch", ""),
+        ("git@github.com.jdoe+x﹫cern.ch", ""),
+        # Local-part tokens between the host and the separator.
+        ("git@github.com.jdoe&amp;x@cern.ch", ""),
+        # (An encoded dot is a domain dot, so the git@ domain runs up to
+        # the "@" and the token goes the #5 way.)
+        ("git@github.com.jdoe&#46;x@cern.ch", "@cern.ch"),
+        ("git@github.com.jdoe%2ex@cern.ch", ""),
+        # Double-escaped encoded dots are one token, as the leftward scan
+        # reads them (review finding on b657568d).
+        ("see git@john.doe+&amp;#46;x@cern.ch now", "see  now"),
+        ("clone git@github.com&amp;#46;1@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;#46;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;#x2e;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;period;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&amp;amp;#46;x@cern.ch now", "clone  now"),
+        ("clone git@github.com+&AMP;#X2E;x@cern.ch now", "clone  now"),
+        # A token inside a quoted local part goes as it would with no
+        # exemption (found by fuzzing b657568d). The rest of the quoted
+        # part stays either way: a local part never starts inside an
+        # earlier token (the #5 behavior for any address in quotes).
+        ('"x git@github.com:y z"@cern.ch', '"x :y z"@cern.ch'),
+        ('"git@github.com##]"@cern.ch', '"##]"@cern.ch'),
+        ('"git@h.cern.cha:com"&commat;cern.ch', '":com"&commat;cern.ch'),
+        ('say "hi git@github.com:x"@cern.ch', 'say "hi :x"@cern.ch'),
+        (
+            'url: "git@github.com:x/y.git" and jdoe@cern.ch',
+            'url: "git@github.com:x/y.git" and ',
+        ),
+        # Uppercase.
+        ("git@GITHUB.COM.JDOE+X@CERN.CH", ""),
+        ("git@github.com.JDOE+x&#X40;CERN.CH", ""),
+        ("git@github.com.jdoe+x%40CERN.CH", ""),
+    ],
+)
+def test_redact_email_addresses_git_token_never_keeps_a_local_part(
+    text, expected
+):
+    assert redact_email_addresses(text) == expected
+
+
+# Every character that can sit inside a local part, between the host and
+# the next address's separator.
+@pytest.mark.parametrize("char", list("+=!#$*^`{|}~'"))
+def test_redact_email_addresses_git_token_local_part_characters(char):
+    assert redact_email_addresses(f"git@github.com.jdoe{char}x@cern.ch") == ""
+    assert redact_email_addresses(f"git@github.com.jdoe{char}@cern.ch") == ""
+    assert redact_email_addresses(
+        f"see git@github.com.jdoe.1{char}ops@cern.ch now"
+    ) == "see  now"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git@github.com:org/x.git",
+        "'git@host:x'",
+        "`git@host:path`",
+        "ssh://git@host/x/y.git",
+        "git@github.com.jdoe",
+        "git@github.com.jdoe now",
+        'say "git@github.com:x/y.git" here',
+        'say "hi" to git@github.com:x/y.git and "q" there',
+    ],
+)
+def test_redact_email_addresses_git_token_positives_still_kept(text):
+    assert redact_email_addresses(text) == text
+
+
+def _address_spans(text):
+    # The spans redact_email_addresses removes with no git@ exemption,
+    # built from the module's own grammar helpers (not from the exemption
+    # code under test).
+    from archi.enrichment import anonymizer
+
+    spans, bound = [], 0
+    for core in anonymizer._SEP_CORE_RE.finditer(text):
+        if core.start() < bound:
+            continue
+        sep = anonymizer._separator_start(text, core, bound)
+        if sep is None:
+            continue
+        end = anonymizer._domain_end(text, core.end())
+        local = anonymizer._local_start(text, sep, bound)
+        if end is None or local == sep:
+            bound = core.end()
+            continue
+        spans.append((local, end))
+        bound = end
+    return spans
+
+
+def _remove_spans(text, spans):
+    out, kept = [], 0
+    for start, end in spans:
+        out.append(text[kept:start])
+        kept = end
+    out.append(text[kept:])
+    return "".join(out)
+
+
+def _git_exemption_inputs():
+    import itertools
+    import random
+
+    rng = random.Random(20260928)
+    prefixes = [
+        "", "clone ", "'", "`", "|", "{", '"', "ssh://", "x ", '"x ', "x@",
+        '"a" ', "&#64;", '"\n',
+    ]
+    hosts = ["github.com", "gitlab.cern.ch", "GITHUB.COM", "h.cern．ch"]
+    tails = ["", ".jdoe", ".jdoe.1", ".jdoe-", ".jdoé", ".JDOE", ".o"]
+    joiners = list("+=!#$*^`{|}~'\"") + [
+        "", ".", "-", "_", "%", "&", ":", "/", " ", ";", ",", "\n",
+        "&amp;", "&#46;", "%2e", "­", "​", "．", '"x y"', '"x"',
+        "&#x2e;", "&period;", "&amp;#46;", "&amp;#x2e;", "&amp;period;",
+        "&amp;amp;#46;", "&AMP;#X2E;", "&#0046", "⁠", "́",
+    ]
+    locals_ = ["", "x", "ops", "1", "brien", '"q"', ' y"', ':y z"']
+    seps = [
+        "@", "＠", "﹫", "%40", "%2540", "&#64;", "&#064", "&#x40;",
+        "&commat;", "&amp;#64;", "&amp;amp;#x0040;", "",
+    ]
+    domains = ["cern.ch", "CERN.CH", "cern．ch", "1.2", "", " now"]
+    # Every joiner meets every separator; the other parts are drawn.
+    for joiner, sep in itertools.product(joiners, seps):
+        for _ in range(3):
+            yield "".join(
+                (
+                    rng.choice(prefixes),
+                    "git@",
+                    rng.choice(hosts),
+                    rng.choice(tails),
+                    joiner,
+                    rng.choice(locals_),
+                    sep,
+                    rng.choice(domains),
+                )
+            )
+    # Random fuzz over the same pieces, with more than one git@ token.
+    pieces = (
+        ["git@", "git", "a.b", ".c", "jdoe", "cern.ch", "x", "1", "é"]
+        + joiners
+        + seps
+    )
+    for _ in range(20000):
+        yield "".join(rng.choice(pieces) for _ in range(rng.randint(1, 10)))
+
+
+def test_redact_email_addresses_git_exemption_never_keeps_part_of_an_address(
+    monkeypatch,
+):
+    """Differential property test: shipped function vs no exemption.
+
+    Invariant: the only characters the exemption keeps that the function
+    without it removes are standalone git@ tokens, whose wrappers and host
+    are not part of any address-shaped span once "git@" is taken out.
+    """
+    import re
+    import time
+
+    from archi.enrichment import anonymizer
+
+    state = {"off": False, "kept": []}
+    original = anonymizer._is_git_account
+
+    def patched(text, sep, local, end, *rest):
+        if state["off"]:
+            return False
+        keep = original(text, sep, local, end, *rest)
+        if keep:
+            state["kept"].append((local, sep, end))
+        return keep
+
+    monkeypatch.setattr(anonymizer, "_is_git_account", patched)
+    started = time.perf_counter()
+    checked = kept_tokens = 0
+    for text in _git_exemption_inputs():
+        state["off"], state["kept"] = True, []
+        without = redact_email_addresses(text)
+        state["off"] = False
+        shipped = redact_email_addresses(text)
+        kept = state["kept"]
+        spans = _address_spans(text)
+        assert _remove_spans(text, spans) == without, text
+        # The exemption only puts whole git@ tokens back, nothing else.
+        kept_spans = {(local, end) for local, _, end in kept}
+        assert kept_spans <= set(spans), text
+        assert shipped == _remove_spans(
+            text, [span for span in spans if span not in kept_spans]
+        ), text
+        for local, sep, end in kept:
+            assert re.fullmatch(r"[`'|{]*git", text[local:sep]), text
+            # Take "git@" out: the wrappers and host must not be part of
+            # any address-shaped span of what remains. Of the text before
+            # the token only quotes can join a local part (_local_start
+            # stopped at everything else), so the prefix keeps its quotes
+            # and line breaks and every other character becomes a space,
+            # rather than gluing an earlier separator to the host.
+            lead = "".join(
+                char if char in '"\n' else " " for char in text[:local]
+            )
+            probe = lead + text[local:sep - 3] + text[sep + 1:]
+            region = (local, local + (sep - 3 - local) + (end - sep - 1))
+            for start, stop in _address_spans(probe):
+                assert stop <= region[0] or start >= region[1], (
+                    text, probe[start:stop]
+                )
+        checked += 1
+        kept_tokens += len(kept)
+    # The generated set is wide and does exercise the exemption.
+    assert checked > 20000
+    assert kept_tokens > 300
+    assert time.perf_counter() - started < 2.0
+
+
+def test_redact_email_addresses_git_scan_is_linear():
+    import time
+
+    crowded = [
+        "git@a.b" + "+x" * 50000,
+        "git@a.b." + "x" * 100000,
+        ("git@a.b" + "+" * 50) * 2000,
+        "git@a.b" + "&amp;" * 20000,
+        "git@a.b" + "&" * 100000,
+        "git@a.b" + "%25" * 30000,
+        "git@a.b" + "&#000" * 20000,
+        'git@a.b"' + "x " * 50000,
+        ('git@a.b"' + "x" * 20 + " ") * 5000,
+        ('git@a.b"x"') * 10000,
+        "git@a.b\"" + "git@a.b " * 20000,
+        '"' + "git@a.b " * 10000 + '"@x.yz',
+        '"' + "git@a.b " * 10000,
+        ('"q" git@a.b ') * 10000 + '"@x.yz',
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_email_addresses(text)
+    assert time.perf_counter() - started < 1.0
 
 
 def _reference_redact(text):
@@ -436,3 +797,145 @@ def test_redact_email_addresses_matches_reference_on_random_text():
             rng.choice(alphabet) for _ in range(rng.randint(0, 18))
         )
         assert redact_email_addresses(text) == _reference_redact(text), text
+
+
+# --- redact_obfuscated_email_addresses: spelled-out TWiki forms --------------
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Bracketed separators: any case, optional spaces, any domain.
+        ("mail jdoe[AT]cern.ch now", "mail  now"),
+        ("mail j-d-o-e(AT)cern.ch now", "mail  now"),
+        ("mail jdoe+ops[at]phys.cern.ch now", "mail  now"),
+        ("mail john.doe [at] cern.ch now", "mail  now"),
+        ("mail jdoe (at) univ.edu now", "mail  now"),
+        ("mail jdoe{at}fnal.gov now", "mail  now"),
+        ("mail j-doe(at)cern(dot)ch now", "mail  now"),
+        ("end jdoe[AT]cern.ch. Next", "end . Next"),
+        # Bracketed dots, any case, with any kind of "at" before them
+        # (operator rule, 2026-09-28: bracketed and parenthesised forms go).
+        ("mail JDOE [At] CERN [DOT] CH now", "mail  now"),
+        ("mail jdoe[at]cern dot ch now", "mail  now"),
+        ("mail jdoe at cern(dot)ch now", "mail  now"),
+        ("mail jdoe AT cern [DOT] ch now", "mail  now"),
+        # Glued word separators (not covered by the rule; kept removed).
+        ("mail john.doe_at_cern.ch now", "mail  now"),
+        ("mail john-doe-at-cern.ch now", "mail  now"),
+        ("mail john.doe_at_physics.ucsd.edu now", "mail  now"),
+        ("mail jdoe-at-fnal.gov now", "mail  now"),
+        ("mail jdoe.x_NOSPAM_AT_cern.ch now", "mail  now"),
+        # NOSPAM insertions.
+        ("mail jdoeNOSPAM.cern.ch now", "mail  now"),
+        ("mail jdoe.cernNOSPAMch now", "mail  now"),
+        ("mail jdoeATfnalDOTeduNOSPAM now", "mail  now"),
+    ],
+)
+def test_redact_obfuscated_email_addresses_forms(text, expected):
+    assert redact_obfuscated_email_addresses(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Prose and file names that use "at" as a word, and hosts.
+        "run at 13.6 TeV and at 8 TeV",
+        "served at cmsweb.cern.ch and at lxplus.cern.ch",
+        "file Zmm_2016_at_13TeV.root and x-at-2.3",
+        "at cern.chip and at cern.ch.example",
+        "remove NOSPAM and _NOSPAM_ markers",
+        "Main.JohnDoe (John Doe) at CERN",
+        "AT&amp;T &commat; ops, &#64; alone",
+        "",
+        # Hosts and paths after a word separator (review finding 3).
+        "files are served at xrootd.t2.ucsd.edu for T2",
+        "log in at login.hep.wisc.edu",
+        "SE at srm.unl.edu:8443",
+        "see the page at cern.ch/cms",
+        "Tier2 at T2_US_UCSD.edu",
+        # Bracketed separators before a number or a path.
+        "Run2 [at] 13.6TeV",
+        "mirror [at] host.org/path",
+        # Names and words that merely contain NOSPAM.
+        "NoSpamFilter enabled",
+        "TWiki.NOSPAMPlugin and nospam-policy",
+    ],
+)
+def test_redact_obfuscated_email_addresses_leaves_other_text_identical(text):
+    assert redact_obfuscated_email_addresses(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Known gap (recorded in the PACT): a glued separator before a
+        # domain that is not cern.ch / fnal.gov / gmail.com, .edu or .gov.
+        "jdoe_at_infn.it",
+    ],
+)
+def test_redact_obfuscated_email_addresses_known_gaps(text):
+    assert redact_obfuscated_email_addresses(text) == text
+
+
+# Operator rule (2026-09-28): free-prose "at ... dot" forms stay byte for
+# byte, even when they spell out an address.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mail john.doe at cern.ch now",
+        "mail john.doe AT CERN.CH now",
+        "mail jdoe AT cern DOT ch now",
+        "mail jdoe at cern dot ch now",
+        "mail jdoe at fnal.gov now",
+        "mail jdoe AT gmail.com now",
+        "mail jdoe at cern.ch.",
+        "jdoe at physics.ucsd.edu",
+        "jdoe AT host.cern.ch",
+        "based at cern.ch.",
+        "Main.JohnDoe at cern.ch",
+    ],
+)
+def test_redact_obfuscated_email_addresses_keeps_free_prose_forms(text):
+    assert redact_obfuscated_email_addresses(text) == text
+    assert redact_email_addresses(text) == text
+
+
+def test_redact_obfuscated_email_addresses_accepted_over_removal():
+    # Code-like text after a bracketed "(at)" goes with it.
+    assert redact_obfuscated_email_addresses("f(at)obj.attr") == ""
+    assert redact_obfuscated_email_addresses("f(at)x dot product") == ""
+
+
+def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
+    import time
+
+    crowded = [
+        "a" * 50000,
+        "a[at]" * 10000,
+        "a[at]b." + "1" * 50000,
+        "a at " * 10000,
+        "a_at_" * 10000,
+        "NOSPAM" * 10000,
+        "a." * 25000 + "[at]",
+        # Dot-word chains: the first version backtracked exponentially on
+        # these (126 characters ran for minutes; review finding 1).
+        "x_at_" + "a_dot_" * 5000 + "1",
+        "x at " + "a dot " * 5000 + "1",
+        "x AT " + "a DOT " * 5000 + "1",
+        "x[at]" + "a(dot)" * 5000 + "1",
+        "x[at]" + "a." * 20000 + "1",
+        "x_NOSPAM_AT_" + "a_dot_" * 5000,
+        "x_at_" + "a." * 20000 + "1",
+        "x_at_" * 10000 + "a.edu",
+        # The bracketed-dot and spelled-dot rules added for the
+        # operator's rule.
+        "x at " + "a(dot)" * 5000 + "1",
+        "x at " + "a." * 20000 + "(dot)1",
+        "x at a(dot)" + "a dot " * 5000 + "1",
+        "x[at]" + "a dot " * 5000 + "1",
+        "a at " * 10000 + "b(dot)",
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_obfuscated_email_addresses(text)
+    assert time.perf_counter() - started < 1.0

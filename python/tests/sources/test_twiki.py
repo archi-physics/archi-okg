@@ -1037,3 +1037,250 @@ def test_crawl_probe_declarations():
     first = source.change_probe.build_token()
     time.sleep(0.002)
     assert source.change_probe.build_token() != first
+
+
+# --- email redaction (names kept; operator decision for cms-kb, 2026-09-28) --
+
+# One address per field or markup form, each with a distinct local part so
+# a leak names where it came from. Names (Main.JohnDoe, John Doe, Jane Roe,
+# the link label) must survive.
+EMAIL_TOPIC = (
+    '%META:TOPICINFO{author="authoraddr@cern.ch" date="1700000000" '
+    'version="3 versionaddr@cern.ch"}%\n'
+    '%META:TOPICPARENT{name="parentaddr@cern.ch"}%\n'
+    "---++ Contacts\n"
+    "Contact Main.JohnDoe (John Doe, plainaddr@cern.ch) or "
+    "[[mailto:linkaddr@cern.ch][Jane Roe]].\n"
+    "Bare link [[mailto:barelinkaddr@cern.ch]], url pctaddr%40cern.ch, "
+    "entity entityaddr&#64;cern.ch, tagged plus.tag+ops@fnal.gov.\n"
+    '<a href="mailto:hrefaddr@cern.ch">Mail Alice Smith</a>\n'
+    "| Contact | tableaddr@cern.ch |\n"
+    "Spelled: bracketaddr[AT]cern.ch, parenaddr(at)cern(dot)ch, "
+    "word.addr at cern.ch, glued.addr_at_cern.ch, "
+    "spaced AT cern DOT ch, nospam.addr_NOSPAM_AT_cern.ch.\n"
+)
+EMAIL_TOPIC_LOCAL_PARTS = (
+    "authoraddr",
+    "versionaddr",
+    "parentaddr",
+    "plainaddr",
+    "linkaddr",
+    "barelinkaddr",
+    "pctaddr",
+    "entityaddr",
+    "plus.tag",
+    "hrefaddr",
+    "tableaddr",
+    "bracketaddr",
+    "parenaddr",
+    "glued.addr",
+    "nospam.addr",
+)
+
+
+def _emitted(facts):
+    return json.dumps(
+        [
+            {
+                "id": getattr(f, "node_id", None),
+                "attrs": f.attrs,
+                "record": f.source_record_id,
+            }
+            for f in facts
+        ],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def _assert_no_address(emitted, local_parts):
+    folded = emitted.casefold()
+    assert [part for part in local_parts if part in folded] == []
+    assert "@" not in emitted
+    assert "%40" not in emitted
+    assert "&#64;" not in emitted
+
+
+def test_eos_email_addresses_removed_from_every_emitted_field(tmp_path):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "ContactsTopic.txt").write_text(EMAIL_TOPIC)
+    run = TwikiEOSSource(eos_root=str(root)).run("r", mode="scope_complete")
+    facts = list(run.facts)
+    _assert_no_address(_emitted(facts), EMAIL_TOPIC_LOCAL_PARTS)
+
+    (page,) = _nodes(facts, "documentation_page")
+    # A field that held only an address is left empty, as in the JIRA source.
+    assert page.attrs["author"] == ""
+    assert page.attrs["parent_topic"] == ""
+    assert page.attrs["version"] == "3 "
+    assert page.attrs["title"] == "ContactsTopic"
+    (chunk,) = _nodes(facts, "document_chunk")
+    text = chunk.attrs["text"]
+    # Names are kept; only the addresses go.
+    assert "Contact Main.JohnDoe (John Doe, )" in text
+    assert "or Jane Roe." in text
+    assert "Mail Alice Smith" in text
+    assert "Bare link mailto:, url , entity , tagged ." in text
+    assert "| Contact |  |" in text
+    # Bracketed, glued and NOSPAM forms go; the two free-prose forms stay
+    # (operator rule, 2026-09-28).
+    assert text.endswith(
+        "Spelled: , , word.addr at cern.ch, , spaced AT cern DOT ch, ."
+    )
+    assert run.health.status == "ok"
+
+
+def test_eos_email_redaction_covers_the_title_of_fixture_records():
+    record = twiki_mod.TwikiRecord(
+        page_id="CMS/OwnerPage",
+        web_name="CMS",
+        web_root="CMS",
+        title="Owner titleaddr@cern.ch page",
+        url="https://twiki.cern.ch/twiki/bin/view/CMS/OwnerPage",
+        source_path="OwnerPage.txt",
+        body="Ask bodyaddr@cern.ch or Main.AliceSmith.",
+        author="AliceSmith",
+        parent_topic="WebHome",
+    )
+    facts = list(TwikiEOSSource(records=[record]).run("r").facts)
+    _assert_no_address(_emitted(facts), ("titleaddr", "bodyaddr"))
+    (page,) = _nodes(facts, "documentation_page")
+    assert page.attrs["title"] == "Owner  page"
+    assert page.attrs["label"] == "Owner  page"
+    assert page.attrs["author"] == "AliceSmith"
+    assert page.attrs["text"] == "Owner  page WebHome CMS"
+    (chunk,) = _nodes(facts, "document_chunk")
+    assert chunk.attrs["heading_path"] == "Owner  page"
+    assert chunk.attrs["text"] == "Owner  page Ask  or Main.AliceSmith."
+
+
+def test_eos_address_free_topic_is_emitted_byte_identical(tmp_path):
+    # Redaction decodes nothing: a topic with entities, names, a version
+    # pin and "AT"-words but no address keeps its exact text, so its chunk
+    # text and chunk id are the ones the parser alone would give.
+    raw = (
+        '%META:TOPICINFO{author="JohnDoe" date="1700000000" version="4"}%\n'
+        "---++ Plain\n"
+        "Main.JohnDoe and Jane Roe at CERN: AT&amp;T, R&amp;D &commat; ops, "
+        "&#64; alone, pip install numpy@1.26.4, 100% done, served at "
+        "cmsweb.cern.ch, run at 13.6 TeV, file x_2016_at_13TeV.root, "
+        "remove NOSPAM.\n"
+    )
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "PlainTopic.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    (page,) = _nodes(facts, "documentation_page")
+    assert page.attrs["author"] == "JohnDoe"
+    (chunk,) = _nodes(facts, "document_chunk")
+    expected_text = "PlainTopic " + strip_twiki(raw)
+    assert chunk.attrs["text"] == expected_text
+    seed = f"twiki:CMS:PlainTopic\\0{0}\\0{expected_text}"
+    expected_id = "chunk:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    assert chunk.node_id == expected_id
+
+
+def test_eos_address_across_a_chunk_boundary_leaves_no_fragment(tmp_path):
+    # Redaction runs before chunking, so an address that the 4,000-char
+    # window would split is still removed whole from both chunks.
+    # "LongTopic " + 1,990 "x " pairs puts the address at chars 3990-4020.
+    raw = "x " * 1990 + "boundaryaddr.longlocal@cern.ch " + "tail text " * 30
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "LongTopic.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    chunks = _nodes(facts, "document_chunk")
+    assert len(chunks) == 2
+    joined = " ".join(c.attrs["text"] for c in chunks)
+    assert "boundaryaddr" not in joined
+    assert "longlocal" not in joined
+    assert "@" not in joined
+    assert "tail text" in joined
+
+
+def test_change_probes_fingerprint_the_emission_and_redaction_code():
+    # The class body alone does not hold the fact-building functions or
+    # the redaction, so a change to them must still change the probe
+    # token; otherwise an unchanged snapshot is skipped and already
+    # stored text keeps its addresses.
+    import sys
+
+    from archi.enrichment import anonymizer
+
+    for source_class in (TwikiEOSSource, TwikiCrawlSource):
+        targets = twiki_mod._emit_targets(source_class)
+        assert source_class in targets
+        assert sys.modules["archi.sources.twiki"] in targets
+        assert anonymizer in targets
+
+
+def test_crawl_email_addresses_removed_and_names_kept(monkeypatch):
+    raw = (
+        '%META:TOPICINFO{author="crawlauthor@cern.ch" date="1700000000" '
+        'version="2"}%\n'
+        "---++ Owners\n"
+        "Owner Main.JaneRoe (crawlbody@cern.ch).\n"
+        "<table><tr><td>Jane Roe</td><td>crawlcell&#64;cern.ch</td></tr>"
+        "</table>\n"
+    )
+    responses = {_raw_url("Ops/StartTopic"): _ok("Ops/StartTopic", raw)}
+    _fake_sessions(monkeypatch, responses)
+    run = _crawl_source(max_depth=0).run("r", mode="scope_complete")
+    facts = list(run.facts)
+    _assert_no_address(
+        _emitted(facts), ("crawlauthor", "crawlbody", "crawlcell")
+    )
+    (chunk,) = _nodes(facts, "document_chunk")
+    assert "Owner Main.JaneRoe ()." in chunk.attrs["text"]
+    assert "| Jane Roe |  |" in chunk.attrs["text"]
+
+
+# --- operator rule for spelled-out forms and git@ (Jason, 2026-09-28) -------
+
+
+def _single_chunk_text(tmp_path, name, raw):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / f"{name}.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    (chunk,) = _nodes(facts, "document_chunk")
+    return chunk
+
+
+def test_eos_prose_forms_and_git_account_are_emitted_byte_identical(tmp_path):
+    # Free-prose "at ... dot" forms and the git@ account are not removed,
+    # so a topic holding only those keeps the parser's exact text and the
+    # chunk id computed from it.
+    raw = (
+        '%META:TOPICINFO{author="JohnDoe" date="1700000000" version="2"}%\n'
+        "---++ Setup\n"
+        "Write to john.doe at cern.ch or jdoe AT cern DOT ch; the group is "
+        "based at cern.ch.\n"
+        "<verbatim>\ngit clone git@github.com:cms-sw/cmssw.git\n"
+        "git remote add up git@gitlab.cern.ch:cms/y.git\n</verbatim>\n"
+    )
+    chunk = _single_chunk_text(tmp_path, "SetupTopic", raw)
+    expected_text = "SetupTopic " + strip_twiki(raw)
+    assert "john.doe at cern.ch" in expected_text
+    assert "git clone git@github.com:cms-sw/cmssw.git" in expected_text
+    assert chunk.attrs["text"] == expected_text
+    seed = f"twiki:CMS:SetupTopic\\0{0}\\0{expected_text}"
+    expected_id = "chunk:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    assert chunk.node_id == expected_id
+
+
+def test_eos_bracketed_forms_and_ssh_logins_removed_git_kept(tmp_path):
+    raw = (
+        "---++ Access\n"
+        "Mail bracketone[AT]cern.ch or brackettwo(at)cern(dot)ch or "
+        "bracketthree at cern[DOT]ch.\n"
+        "Log in with ssh sshuser@lxplus.cern.ch then run "
+        "git clone git@github.com:x/y.git by gitnext@cern.ch today.\n"
+    )
+    chunk = _single_chunk_text(tmp_path, "AccessTopic", raw)
+    text = chunk.attrs["text"]
+    for part in ("bracketone", "brackettwo", "bracketthree", "sshuser", "gitnext"):
+        assert part not in text
+    assert "Mail  or  or ." in text
+    assert "ssh  then run git clone git@github.com:x/y.git by  today." in text
