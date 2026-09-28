@@ -23,17 +23,17 @@ why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (Twik
 
 
   The change probes of both TWiki sources fingerprinted only the source class, not the module-level
-  functions that build the facts nor the anonymizer, so this change alone would not have
-  changed the probe token and an unchanged snapshot would have been skipped, keeping stored
-  addresses. The probes now fingerprint the twiki module and the anonymizer module too (_emit_targets),
+  functions that build the facts nor the anonymizer, so this change alone would not have changed
+  the probe token and an unchanged snapshot would have been skipped, keeping stored addresses.
+  The probes now fingerprint the twiki module and the anonymizer module too (_emit_targets),
   so this change, and any later change to either module, re-emits once.
 
 
   CARRIED SIDE EFFECT, as in #5: on the next ingest, chunks whose text held an address get
   new chunk ids (the chunk id hashes the chunk text), and a page whose author, parent topic
   or version held an address gets new attrs. Chunks and pages without an address keep their
-  ids and text byte for byte. The probe change above also means the next ingest of every
-  TWiki deployment re-emits all topics once, whatever its snapshot.'
+  ids and text byte for byte. The probe change above also means the next ingest of every TWiki
+  deployment re-emits all topics once, whatever its snapshot.'
 affected_code:
 - python/archi/sources/twiki.py
 - python/archi/enrichment/anonymizer.py
@@ -108,8 +108,8 @@ requirements:
     host.cern.ch: one seen on the snapshot), glued ones before a domain other than .edu/.gov
     (jdoe_at_infn.it), doubled spaces or a line break around " at " (the EOS parser collapses
     whitespace; the crawl parser keeps line breaks), the entity form &lt;at&gt;, spaced dots
-    (cern . ch), fullwidth brackets, and the gaps PACT jira-email-redaction lists for the @
-    pass (including a spaced " &#64; ").
+    (cern . ch), fullwidth brackets, and the gaps PACT jira-email-redaction lists for the
+    @ pass (including a spaced " &#64; ").
 
 
     Acceptance:
@@ -180,4 +180,35 @@ evidence:
     before a mail-like domain: 30, all hosts or subdomains (at cmsweb.cern.ch, at lxplus.cern.ch)
     plus one jdoe AT host.cern.ch form. No file name holds @ or %40. No address printed; examples
     shown with <removed>.'
+- kind: executed_test
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 4de69415cff7225cdc051e535c4d91085eae90d7
+  at: '2026-09-28T07:58:34+00:00'
+  note: '560 passed at 4de6941 after the adversarial-review fixes (okg origin/dev 9ad926c3d1,
+    Python 3.12, hatchling for the wheel tests). New since main: 6 TWiki tests (every field
+    and form on the snapshot path, fixture-record title, chunk-boundary address, address-free
+    topic byte-identical with its chunk id, change probes fingerprint the twiki and anonymizer
+    modules, crawl source with an HTML table) and 44 redact_obfuscated_email_addresses cases
+    (22 forms removed, 17 texts kept byte-identical including .edu hosts, cern.ch/path, host:port,
+    Run2 [at] 13.6TeV and NoSpamFilter, 3 known gaps, accepted over-removal, linear time including
+    dot-word chains that the first version backtracked on exponentially). Against main (b4dac901):
+    test_twiki.py 5 failed, 48 passed; test_anonymizer.py fails at import.'
+- kind: manual
+  requirement: req.twiki-email-redaction.main
+  status: pass
+  command: nice -n 19 python3 measure.py; python3 spelled.py < candidates.txt (submit75, /work/submit/mohoney/lane-a/tmp/twiki-email,
+    anonymizer.py from 4de6941 and _twiki_parse.py, Python 3.9)
+  head: 4de69415cff7225cdc051e535c4d91085eae90d7
+  at: '2026-09-28T07:58:39+00:00'
+  note: 'Rerun after the review fixes on the cms-kb TWiki snapshot (43,888 topic pages, read-only),
+    EOS parser defaults. Random 200 pages: 38 address-shaped tokens in 10 pages before, 0
+    after. 200 address-bearing pages: 586 before, 0 after (551 strict mail, 35 with a pipe,
+    ! or query key attached, 91 login or git host tokens: accepted over-removal). Spelled-out
+    forms over 1,261 grep candidates: obfuscated pass removed 37 bracketed, 123 spaced word-separator,
+    6 glued and 8 NOSPAM tokens; bracketed left 2 (numeric last label, not addresses); of
+    the 123 spaced removals 101 had a dotted or hyphenated name-shaped local part, 21 a single
+    word, 1 the prose word and. Word separators left before a mail-like domain: 33, all hosts,
+    subdomains or cern.ch/path URLs, plus one jdoe AT host.cern.ch form. No address printed.'
 decisions: []
