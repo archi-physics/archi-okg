@@ -54,7 +54,7 @@ and ``schemas/bridges/``; ``output_scope_summary`` must accompany
             - site contains storage_endpoint
             - operator responsible_for site
       source_class: discovery_crawl
-      record_identity_kind: remote_id
+      record_identity_kind: scoped_locator
       record_identity_fields: [name, kind]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope
@@ -98,7 +98,7 @@ and ``schemas/bridges/``; ``output_scope_summary`` must accompany
             - site contains infrastructure_service
             - site member_of federation
       source_class: discovery_crawl
-      record_identity_kind: remote_id
+      record_identity_kind: scoped_locator
       record_identity_fields: [name, kind]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope

@@ -47,7 +47,7 @@ Registry-entry template — same three prerequisites as
       source_class: mutable_api
       record_identity_kind: remote_id
       record_identity_fields: [workflow]
-      source_revision_kind: content_hash
+      source_revision_kind: updated_at
       deletion_semantics: missing_from_completed_scope
       publication_mode: published_generation
       required_for_baseline: false

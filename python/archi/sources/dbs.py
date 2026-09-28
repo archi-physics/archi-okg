@@ -39,7 +39,7 @@ from a substrate module (the cms deployment composed it), not from
           edges:
             - dataset derives_from dataset
       source_class: reference_catalog
-      record_identity_kind: remote_id
+      record_identity_kind: domain_key
       record_identity_fields: [dataset]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope
