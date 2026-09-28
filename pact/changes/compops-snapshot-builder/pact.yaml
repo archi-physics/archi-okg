@@ -103,11 +103,11 @@ requirements:
 
     - acc.compops-snapshot-builder.addresses: a planted address in each of the 12 text-bearing
     groups is absent from every archive; so is a spelled-out address (jdoe[AT]cern(dot)ch),
-    removed with archi-okg #13''s redact_obfuscated_email_addresses and counted as
-    obfuscated_addresses_removed, while free prose (john.doe at cern.ch) is kept; a git@ host
-    remote is kept in JIRA and TWiki and an address after it is removed; after merging main
-    (#13), redact_email_addresses and redact_obfuscated_email_addresses equal main 6193edd0ca on
-    random strings including git@ variants. [evidence: executed_test]
+    removed with archi-okg #13''s redact_obfuscated_email_addresses and counted as obfuscated_addresses_removed,
+    while free prose (john.doe at cern.ch) is kept; a git@ host remote is kept in JIRA and
+    TWiki and an address after it is removed; after merging main (#13), redact_email_addresses
+    and redact_obfuscated_email_addresses equal main 6193edd0ca on random strings including
+    git@ variants. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.jira-facts: the archi JIRA reader emits the same facts
     from a raw JIRA fixture and from the snapshot''s redacted copy. [evidence: executed_test]
@@ -328,4 +328,30 @@ evidence:
   head: a9df45561705c51ff539721e973fbdf6513214a8
   at: '2026-09-28T14:23:15+00:00'
   note: 13 passed at this head inside the 702-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 092cca7d9c66d569d6943fe01bfe09a7728cdf81
+  at: '2026-09-28T15:29:54+00:00'
+  note: '875 passed at this head (main 6193edd0ca merged in; okg origin/dev 435ab285ac exported
+    source, Python 3.12, zstd v1.5.7, hatchling on the path), 196 snapshot tests, all of #13''s
+    enrichment and source tests unchanged. The anonymizer merge keeps main''s redact_email_addresses
+    loop, with its git@ exemption, forward scan, layered entities and quoted local parts,
+    in email_address_spans; redact_email_addresses equals main''s on 30,000 random strings
+    with git@ variants (17,593 changed by redaction), and both it and redact_obfuscated_email_addresses
+    equal main''s on a further 20,000 (1,610 changed by the spelled-out redactor), 0 differences.
+    New tests: JIRA and TWiki keep git@gitlab.cern.ch:cmsdmops/Documentation.git and lose
+    only jdoe@cern.ch after git@github.com:org/tools.git; a spelled-out address is removed
+    in each of the 12 text-bearing groups (counted as obfuscated_addresses_removed) while
+    john.doe at cern.ch is kept; glued and NOSPAM forms are removed; a spelled-out address
+    in a note refuses the group. Mutations: spelled-out redaction not wired 13 failed, no
+    spelled-out post-check 1.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 092cca7d9c66d569d6943fe01bfe09a7728cdf81
+  at: '2026-09-28T15:29:54+00:00'
+  note: 13 passed at this head inside the 875-test suite; downloaders unchanged since 96a34d6.
 decisions: []
