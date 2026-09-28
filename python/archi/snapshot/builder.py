@@ -72,7 +72,7 @@ DEFAULT_ZSTD_LEVEL = 19
 VALIDATION_RUN_ID = "snapshot-validate"
 _DATE = r"\d{4}-\d{2}-\d{2}"
 _COLLECTED_RE = re.compile(rf"^({_DATE})(?:\.\.({_DATE}))?$")
-_GROUP_KEYS = {"path", "collected", "drop_fields", "keep_fields"}
+_GROUP_KEYS = {"path", "collected", "file_dates", "drop_fields", "keep_fields"}
 _CONFIG_KEYS = {"snapshot", "zstd_level", "groups"}
 
 
@@ -110,6 +110,10 @@ class GroupConfig:
     collected: str
     drop_fields: tuple[str, ...] = ()
     keep_fields: tuple[str, ...] = ()
+    #: Dates of single files that differ from ``collected`` (for example a
+    #: file fetched earlier than the rest), by file name in the group
+    #: directory. Carried into the lock.
+    file_dates: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +182,22 @@ def _parse_group(name: str, raw: Any, base: Path) -> GroupConfig:
         collected=collected,
         drop_fields=_field_list(name, raw, "drop_fields"),
         keep_fields=_field_list(name, raw, "keep_fields"),
+        file_dates=_file_dates(name, raw.get("file_dates")),
+    )
+
+
+def _file_dates(name: str, value: Any) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict) or not value:
+        raise SnapshotError(
+            f"group {name!r}: 'file_dates' must map file names to dates"
+        )
+    return tuple(
+        sorted(
+            (str(file), _parse_collected(f"{name}/{file}", date))
+            for file, date in value.items()
+        )
     )
 
 
@@ -227,6 +247,7 @@ class PreparedGroup:
     #: For groups whose text may fall back on invalid bytes (TWiki):
     #: pages, pages with fallback runs, and fallback bytes per decoding.
     text_stats: Optional[dict[str, Any]] = None
+    file_dates: tuple[tuple[str, str], ...] = ()
 
 
 def prepare_group(
@@ -345,6 +366,12 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
             raise GroupRefused(
                 group.name, f"a file path contains an email address: {archive_path}"
             )
+    for file_name, _date in group.file_dates:
+        if f"{spec.archive_dir}/{file_name}" not in final:
+            raise GroupRefused(
+                group.name,
+                f"file_dates names {file_name}, which the group does not archive",
+            )
     _check_no_addresses(group.name, final)
     record_count = _reader_check(spec, redacted, final, tmp_dir)
     return PreparedGroup(
@@ -358,6 +385,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         deep_dropped_keys=tuple(sorted(deep)),
         input_file=spec.primary_input,
         text_stats=text_stats,
+        file_dates=group.file_dates,
     )
 
 
@@ -868,6 +896,7 @@ def build(
             write_archive(group.files, archive, level=config.zstd_level)
             row: dict[str, Any] = {
                 "collected": group.collected,
+                **({"file_dates": dict(group.file_dates)} if group.file_dates else {}),
                 "archive": archive.name,
                 "sha256": _sha256_file(archive),
                 "bytes": archive.stat().st_size,

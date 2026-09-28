@@ -28,6 +28,11 @@ groups:
   jira:
     path: /data/cms-20260831/jira   # relative paths resolve against this file
     collected: 2026-08-31           # required: YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD
+  cric:
+    path: /data/cms-202606/cric
+    collected: 2026-06-12
+    file_dates:                     # optional: a file dated apart from the rest
+      facilities.json: 2026-04-09
   indico:
     path: /data/cms-202606/indico
     collected: 2026-06-12..2026-06-16
@@ -124,7 +129,7 @@ deterministic: members sorted by path, mtime fixed at 2000-01-01, owner 0,
 mode 0644, PAX tar, `zstd -T1` at the configured level. Two builds from the
 same input with the same zstd version give byte-identical archives.
 
-The lock records, per group: `collected`, `archive`, `sha256`, `bytes`,
+The lock records, per group: `collected`, `file_dates` (when configured), `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
 `addresses_removed`, `input_file` (for CMSSW, which input was used),
 `text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs` and

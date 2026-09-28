@@ -1354,3 +1354,41 @@ def test_cli_tmp_dir_must_exist(tmp_path, sources, capsys):
     )
     assert code == 2
     assert "is not a directory" in capsys.readouterr().err
+
+
+# --- per-file dates ---------------------------------------------------------------
+
+
+def test_file_dates_are_carried_into_the_lock(tmp_path, sources):
+    # Jason, 2026-09-28: the June CRIC set, files dated 06-12, facilities
+    # fetched 04-09; the lock records both.
+    config = write_config(
+        tmp_path,
+        sources,
+        only=["cric"],
+        extra={"cric": {"collected": "2026-06-12", "file_dates": {"facilities.json": "2026-04-09"}}},
+    )
+    lock = build(load_config(config), tmp_path / "out")
+    row = lock["groups"]["cric"]
+    assert row["collected"] == "2026-06-12"
+    assert row["file_dates"] == {"facilities.json": "2026-04-09"}
+    on_disk = yaml.safe_load((tmp_path / "out" / LOCK_NAME).read_text())
+    assert on_disk["groups"]["cric"]["file_dates"] == {"facilities.json": "2026-04-09"}
+
+
+def test_file_dates_must_name_a_file_the_group_archives(tmp_path, sources):
+    config = write_config(
+        tmp_path, sources, only=["cric"], extra={"cric": {"file_dates": {"meta.json": "2026-04-09"}}}
+    )
+    with pytest.raises(BuildRefused, match="file_dates names meta.json"):
+        build(load_config(config), tmp_path / "out")
+
+
+@pytest.mark.parametrize("value", [{"facilities.json": "April 9"}, [], {}])
+def test_file_dates_must_be_dates(value):
+    with pytest.raises(SnapshotError, match="file_dates|YYYY-MM-DD"):
+        parse_config(
+            {"snapshot": "s", "groups": {"cric": {"path": "x", "collected": "2026-06-12",
+                                                    "file_dates": value}}},
+            base=Path("/tmp"),
+        )
