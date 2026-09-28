@@ -531,4 +531,26 @@ evidence:
   head: 8c2fdd819be290d7190f6b2bba3114b21dc1043c
   at: '2026-09-28T22:51:27+00:00'
   note: 13 passed at this head inside the 1059-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 3f7a02657bc2afe9e627d2425ba6d238f26f8d8e
+  at: '2026-09-28T23:15:08+00:00'
+  note: '1059 passed at this head (Python 3.12, okg editable), 380 snapshot tests. Eleventh
+    round: the line rule is removed (Jason''s decision); span rule, remove-whole, backslash-escaped
+    @, surrogate refusal, ESC 7/8 stripping, ideographic dots and file/line/rule messages
+    kept. Display tricks (RLO, backspace, lone CR overwrite) are stored and pinned as a known
+    limit; a colour code on an address line, CR CR LF, and the round-9 not-an-address values
+    are stored again. The same test file on 53a57df: 92 failed, 288 passed (refusal wording
+    and the restored stored cases). Reviewer fuzz.py 56,252 cases and fuzzfw.py 257 cases,
+    0 leaks; own reading fuzz 120,000 cases, 0 leaks; display fuzz 40,000 cases, 0 reading
+    leaks, 12,459 display-only leaks (RLO, backspace, CR; expected by design), 0 via ESC 7/8.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 3f7a02657bc2afe9e627d2425ba6d238f26f8d8e
+  at: '2026-09-28T23:15:08+00:00'
+  note: 13 passed at this head inside the 1059-test suite; downloaders unchanged since 96a34d6.
 decisions: []
