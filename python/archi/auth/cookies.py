@@ -21,7 +21,8 @@ Cookie files are Netscape/Mozilla format, produced out-of-band:
       auth-get-sso-cookie -u <protected-url> -o <cookie-file>
 
 - or the interactive Kerberos+TOTP flow in
-  ``okg-deployments/cms/scripts/sso-login.py``, which drives CERN
+  :mod:`archi.downloaders.sso_login` (moved from okg-deployments
+  ``cms/scripts/sso-login.py``), which drives CERN
   Keycloak once per session and saves per-service cookie files.
 
 Modules here only ever *read* cookie files; the file paths arrive via

@@ -181,7 +181,9 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 #
 # - SEP: ``@``, fullwidth or small ``@`` (U+FF20, U+FE6B), URL ``%40`` or
 #   ``%2540``, or ``&commat;`` / ``&#64;`` / ``&#x40;`` (any leading zeros,
-#   ``;`` optional) behind any number of ``&amp;`` layers.
+#   ``;`` optional) behind any number of ``&amp;`` layers. A backslash
+#   before ``@`` belongs to the separator: ``jdoe\@cern.ch`` is how Perl,
+#   Doxygen and shell text escape an address.
 # - LOCAL: a quoted string on one line, or a run of Unicode word
 #   characters, combining marks, invisible characters (soft hyphen,
 #   zero-width space/joiners, word joiner), ``.!#$%&'*+^`{|}~-=``,
@@ -189,8 +191,9 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 #   URL path is not swallowed; ``=`` is included, so ``mail=`` before an
 #   address in a query string goes with it.
 # - DOMAIN: word characters, marks, invisible characters, ``-``, and dots
-#   (``.``, fullwidth ``.`` U+FF0E, or an encoded ``&#46;`` / ``&#x2e;`` /
-#   ``&period;``), with at least one dot, ending in a label that contains
+#   (``.``, fullwidth ``.`` U+FF0E, a backslash-escaped ``\.`` as in Perl
+#   regex text, or an encoded ``&#46;`` / ``&#x2e;`` / ``&period;``), with
+#   at least one dot, ending in a label that contains
 #   a letter. So ``numpy@1.26.4`` is a version pin, not an address.
 #
 # Matching runs in linear time. Separators are found by one regex pass;
@@ -227,6 +230,8 @@ def _is_local(char: str) -> bool:
 def _separator_start(text: str, match: re.Match, bound: int) -> int | None:
     """Start of the separator whose core ``match`` found, or None."""
     start = match.start()
+    if text[start] == "@" and start - 1 >= bound and text[start - 1] == "\\":
+        return start - 1
     if text[start] in "@\uff20\ufe6b%":
         return start
     # An entity core (``commat;``, ``#64;``) needs its ``&``, possibly
@@ -268,6 +273,9 @@ def _domain_end(text: str, start: int) -> int | None:
         if char in _DOTS:
             dots.append((i, i + 1))
             i += 1
+        elif char == "\\" and i + 1 < size and text[i + 1] in _DOTS and i > start:
+            dots.append((i, i + 2))
+            i += 2
         elif _is_word(char) or char == "-" or char in _INVISIBLE:
             i += 1
         elif char == "&":
@@ -299,7 +307,7 @@ _GIT_WRAPPERS = frozenset("`'|{")
 # A whole separator (core plus any leading ``&`` / ``&amp;`` layers)
 # starting at a given position.
 _SEP_AT_RE = re.compile(
-    r"[@＠﹫]|%(?:25)*40|&(?:amp;)*(?:commat;|#0*64;?|#x0*40;?)",
+    r"\\?@|[＠﹫]|%(?:25)*40|&(?:amp;)*(?:commat;|#0*64;?|#x0*40;?)",
     re.IGNORECASE,
 )
 
@@ -415,8 +423,28 @@ def redact_email_addresses(text: str) -> str:
     intact (see :func:`_is_git_account` for the exact form). A kept ``git@``
     token neither hides nor absorbs an address after it.
     """
+    return redact_email_addresses_with_count(text)[0]
+
+
+def redact_email_addresses_with_count(text: str) -> tuple[str, int]:
+    """:func:`redact_email_addresses`, plus how many addresses it removed."""
+    spans = email_address_spans(text)
+    if not spans:
+        return text, 0
     pieces: list[str] = []
     kept = 0  # text[kept:] is not yet copied to pieces
+    for start, end in spans:
+        pieces.append(text[kept:start])
+        kept = end
+    pieces.append(text[kept:])
+    return "".join(pieces), len(spans)
+
+
+def email_address_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` of every address :func:`redact_email_addresses`
+    removes, in order and non-overlapping. Kept ``git@`` tokens are not
+    spans (see :func:`_is_git_account`)."""
+    spans: list[tuple[int, int]] = []
     bound = 0  # no local part may start before this
     quotes: list[int] | None = None  # every '"' position, built on first use
     for core in _SEP_CORE_RE.finditer(text):
@@ -437,12 +465,9 @@ def redact_email_addresses(text: str) -> str:
             # Kept in place; no later local part may start inside it.
             bound = end
             continue
-        pieces.append(text[kept:local])
-        kept = bound = end
-    if not pieces:
-        return text
-    pieces.append(text[kept:])
-    return "".join(pieces)
+        spans.append((local, end))
+        bound = end
+    return spans
 
 
 # Spelled-out ("anti-spam") address forms, which have no ``@`` at all and
@@ -488,9 +513,10 @@ _OBF_END = r"(?![\w-]|[./:@(][\w-])"
 # After a bracketed ``[at]`` any dot counts, bracketed or spelled out
 # (``jdoe[at]cern dot ch``): the brackets already mark the token.
 _OBF_ANY_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| dot )"
+_OBF_BRACKET_AT = r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
 _OBF_STRONG_RE = re.compile(
     _OBF_LOCAL
-    + r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
+    + _OBF_BRACKET_AT
     + r"[\w-]+(?:" + _OBF_ANY_DOT + r"[\w-]+)*"
     + _OBF_ANY_DOT + r"[^\W\d_]{2,}"
     + _OBF_END,
@@ -551,11 +577,78 @@ def redact_obfuscated_email_addresses(text: str) -> str:
     Run it after :func:`redact_email_addresses`; it only removes matched
     tokens, so text without one is returned byte-identical.
     """
-    out = _OBF_STRONG_RE.sub("", text)
-    out = _OBF_SPACED_BRACKET_DOT_RE.sub("", out)
-    out = _OBF_GLUED_MAIL_RE.sub("", out)
-    out = _OBF_GLUED_RE.sub("", out)
-    return _OBF_NOSPAM_RE.sub(_nospam_token, out)
+    return redact_obfuscated_email_addresses_with_count(text)[0]
+
+
+def redact_obfuscated_email_addresses_with_count(text: str) -> tuple[str, int]:
+    """:func:`redact_obfuscated_email_addresses`, plus how many tokens it removed."""
+    spans, removed = _obfuscated_spans_and_count(text)
+    if not spans:
+        return text, 0
+    pieces: list[str] = []
+    kept = 0
+    for start, end in spans:
+        pieces.append(text[kept:start])
+        kept = end
+    pieces.append(text[kept:])
+    return "".join(pieces), removed
+
+
+def obfuscated_email_address_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` ranges of ``text`` that
+    :func:`redact_obfuscated_email_addresses` removes, in order and merged
+    where they touch."""
+    return _obfuscated_spans_and_count(text)[0]
+
+
+def _obfuscated_spans_and_count(text: str) -> tuple[list[tuple[int, int]], int]:
+    """Run the obfuscated-address passes in order, each over the text the
+    previous ones left, and map every removed range back to ``text``.
+
+    ``positions[i]`` is the index in ``text`` of character ``i`` of the
+    current text, so a later match that closes over an earlier removal maps
+    to one range covering both.
+    """
+    current = text
+    positions = list(range(len(text)))
+    removed_mask = bytearray(len(text))
+    count = 0
+    passes: tuple[tuple[re.Pattern, bool], ...] = (
+        (_OBF_STRONG_RE, False),
+        (_OBF_SPACED_BRACKET_DOT_RE, False),
+        (_OBF_GLUED_MAIL_RE, False),
+        (_OBF_GLUED_RE, False),
+        (_OBF_NOSPAM_RE, True),
+    )
+    for pattern, conditional in passes:
+        matches = [
+            match
+            for match in pattern.finditer(current)
+            if not conditional or not _nospam_token(match)
+        ]
+        if not matches:
+            continue
+        count += len(matches)
+        drop = bytearray(len(current))
+        for match in matches:
+            if match.end() > match.start():
+                first = positions[match.start()]
+                last = positions[match.end() - 1]
+                removed_mask[first : last + 1] = b"\x01" * (last + 1 - first)
+                drop[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
+        current = "".join(c for c, d in zip(current, drop, strict=True) if not d)
+        positions = [p for p, d in zip(positions, drop, strict=True) if not d]
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(removed_mask):
+        if removed_mask[index]:
+            start = index
+            while index < len(removed_mask) and removed_mask[index]:
+                index += 1
+            spans.append((start, index))
+        else:
+            index += 1
+    return spans, count
 
 
 # Text-level HTML character references decoded before redaction. The
