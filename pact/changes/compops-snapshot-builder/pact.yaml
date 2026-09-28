@@ -400,4 +400,27 @@ evidence:
   head: 63160e5020ba6461e431c5c91d2b188fdfa505fd
   at: '2026-09-28T20:59:31+00:00'
   note: 13 passed at this head inside the 896-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 17ffb2824b386935c987c1ac724cd769ef14f07a
+  at: '2026-09-28T21:17:37+00:00'
+  note: '947 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 268 snapshot tests. Sixth-review fixes: hidden characters (C0/C1 controls,
+    Cf format characters) are detected on the raw value before any strip; jdoe@example<ESC>.org,
+    jdoe@example<U+009B>.org, jdoe<U+009B>@example.org, jdoe<ESC>[@example.org, <U+2068>jdoe<U+2069>@example.org,
+    jdoe<U+200E>x@example.org, a colour-wrapped address and the six fifth-review inputs refuse
+    in JSON and TWiki; 23 Cf characters refuse in jdoe<ch>x@example.org; a JSON key with U+200E
+    refuses; price <ESC> 5 x, Home <U+009B> Projects and <U+009B>2023 jdoe are stored unchanged.
+    The same test file on d45838f: 49 failed, 219 passed. A 120,000-case fuzz of addresses
+    with hidden characters and terminal sequences inserted left no local-part letter of a
+    terminal-visible address in any accepted output.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 17ffb2824b386935c987c1ac724cd769ef14f07a
+  at: '2026-09-28T21:17:37+00:00'
+  note: 13 passed at this head inside the 947-test suite; downloaders unchanged since 96a34d6.
 decisions: []
