@@ -115,9 +115,14 @@ For every group the build:
    with a message naming the file and the record. A group is never packed in
    part.
 3. **Removes every email address** from every string, JSON keys included, and
-   from whole text files, with `archi.enrichment.anonymizer.redact_email_addresses`.
-   It then checks that no string still changes under the redactor, and
-   records how many addresses it removed (a count only) in the lock.
+   from whole text files, with `archi.enrichment.anonymizer.redact_email_addresses`
+   (which keeps a literal `git@` host account such as
+   `git@gitlab.cern.ch:group/repo.git`), then every spelled-out address
+   (`jdoe[AT]cern.ch`, `jdoe(at)cern(dot)ch`, `jdoe_at_cern.ch`, `NOSPAM`
+   forms) with `redact_obfuscated_email_addresses`; free prose such as
+   `john.doe at cern.ch` is kept. It repeats both until neither changes the
+   text, checks that no string still changes under either, and records the
+   counts (`addresses_removed`, `obfuscated_addresses_removed`) in the lock.
 4. **Drops every field the reader does not read**, plus the group's
    `drop_fields`. For example Indico chairs and speakers keep only their name
    fields, JIRA people keep only `displayName`/`name`/`key`, and a
@@ -144,7 +149,7 @@ same input with the same zstd version give byte-identical archives.
 The lock records, per group: `collected`, `file_dates` and `note` (when
 configured), `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
-`addresses_removed`, `input_file` (for CMSSW, which input was used),
+`addresses_removed`, `obfuscated_addresses_removed`, `input_file` (for CMSSW, which input was used),
 `text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs` and
 `fallback_bytes` (TWiki),
 `contents_sha256` (a digest of the unpacked files), `archive_dir`, and the

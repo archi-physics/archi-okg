@@ -1645,3 +1645,111 @@ def test_file_dates_errors_name_the_file_date_not_collected():
     message = str(info.value)
     assert "\"file_dates['facilities.json']\" must be YYYY-MM-DD" in message
     assert "'collected'" not in message
+
+
+# --- git@ exemption and spelled-out addresses (archi-okg #13) -----------------------
+
+GIT_REMOTE = "git@gitlab.cern.ch:cmsdmops/Documentation.git"
+ADJACENT = "git@github.com:org/tools.git by jdoe@cern.ch"
+
+
+def test_jira_keeps_a_git_remote_through_the_snapshot(tmp_path, sources):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"Clone {GIT_REMOTE} first. Pushed {ADJACENT}."
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert stored[0]["description"] == (
+        f"Clone {GIT_REMOTE} first. Pushed git@github.com:org/tools.git by ."
+    )
+
+
+def test_twiki_keeps_a_git_remote_and_loses_the_address_after_it(tmp_path, sources):
+    (sources["twiki-eos"] / "Git.txt").write_bytes(
+        f"---+ Git\nClone {GIT_REMOTE}. Pushed {ADJACENT} today.\n".encode() + PADDING
+    )
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Git.txt"].decode()
+    assert f"Clone {GIT_REMOTE}. Pushed git@github.com:org/tools.git by  today." in page
+    assert "jdoe" not in page
+
+
+OBFUSCATED = {
+    "cric": ("facilities.json", ["MIT", "fullname"]),
+    "cric-core": ("federations.json", ["US-MIT", "accounting_name"]),
+    "jira": ("records.json", [0, "description"]),
+    "indico": ("records.json", [0, "_contributions_text"]),
+    "dqm": ("records.json", [0, "filename"]),
+    "gocdb-downtimes": ("records.json", [0, "description"]),
+    "gitlab-docs": ("records.json", [0, "body"]),
+    "docsite": ("records.json", [0, "body"]),
+    "conddb-global-tags": ("records.json", [0, "description"]),
+    "wmstats": ("records.json", [0, "Campaign"]),
+    "dbs": ("records.json", [0, "physics_group_name"]),
+    "twiki-eos": ("CompOpsGuide.txt", None),
+}
+
+
+@pytest.mark.parametrize("group", sorted(OBFUSCATED))
+def test_a_spelled_out_address_is_removed_in_every_text_group(tmp_path, sources, group):
+    file_name, field = OBFUSCATED[group]
+    spelled = "ob.person[AT]cern(dot)ch"
+    path = sources[group] / file_name
+    if field is None:
+        path.write_text(path.read_text() + f"Ask {spelled} or john.doe at cern.ch.\n")
+    else:
+        payload = json.loads(path.read_text())
+        holder = payload
+        for key in field[:-1]:
+            holder = holder[key]
+        holder[field[-1]] = f"{holder[field[-1]]} ask {spelled} or john.doe at cern.ch"
+        path.write_text(json.dumps(payload))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=[group])), out)
+    data = _all_bytes(out, group)
+    assert b"ob.person" not in data and b"[AT]" not in data
+    # Free prose is kept (operator rule, 2026-09-28).
+    assert b"john.doe at cern.ch" in data
+    assert lock["groups"][group]["obfuscated_addresses_removed"] == 1
+
+
+def test_a_nospam_token_and_a_glued_form_are_removed(tmp_path, sources):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = "Mail jdoe_at_cern.ch or jdoeNOSPAM@cernNOSPAM.ch today."
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert "jdoe" not in stored[0]["description"]
+    assert lock["groups"]["jira"]["obfuscated_addresses_removed"] >= 1
+
+
+def test_a_spelled_out_address_in_a_note_refuses_the_group(tmp_path, sources):
+    config = write_config(
+        tmp_path, sources, only=["dqm"], extra={"dqm": {"note": "ask ob.person[at]cern.ch"}}
+    )
+    with pytest.raises(BuildRefused, match="note: a spelled-out address survived redaction"):
+        build(load_config(config), tmp_path / "out")
+
+
+def test_obfuscated_counting_matches_the_plain_function():
+    from archi.enrichment.anonymizer import (
+        redact_obfuscated_email_addresses,
+        redact_obfuscated_email_addresses_with_count,
+    )
+
+    for text, count in (
+        ("plain text, no address", 0),
+        ("ob.person[AT]cern(dot)ch and a.b(at)fnal.gov", 2),
+        ("john.doe at cern.ch stays", 0),
+        ("jdoe_at_cern.ch", 1),
+        ("jdoeNOSPAM@cernNOSPAM.ch", 1),
+        ("NoSpamFilter stays", 0),
+    ):
+        clean, removed = redact_obfuscated_email_addresses_with_count(text)
+        assert clean == redact_obfuscated_email_addresses(text)
+        assert removed == count, text

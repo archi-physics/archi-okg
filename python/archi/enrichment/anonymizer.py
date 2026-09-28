@@ -568,11 +568,24 @@ def redact_obfuscated_email_addresses(text: str) -> str:
     Run it after :func:`redact_email_addresses`; it only removes matched
     tokens, so text without one is returned byte-identical.
     """
-    out = _OBF_STRONG_RE.sub("", text)
-    out = _OBF_SPACED_BRACKET_DOT_RE.sub("", out)
-    out = _OBF_GLUED_MAIL_RE.sub("", out)
-    out = _OBF_GLUED_RE.sub("", out)
-    return _OBF_NOSPAM_RE.sub(_nospam_token, out)
+    return redact_obfuscated_email_addresses_with_count(text)[0]
+
+
+def redact_obfuscated_email_addresses_with_count(text: str) -> tuple[str, int]:
+    """:func:`redact_obfuscated_email_addresses`, plus how many tokens it removed."""
+    out, removed = _OBF_STRONG_RE.subn("", text)
+    for pattern in (_OBF_SPACED_BRACKET_DOT_RE, _OBF_GLUED_MAIL_RE, _OBF_GLUED_RE):
+        out, count = pattern.subn("", out)
+        removed += count
+    nospam = [0]
+
+    def token(match: re.Match) -> str:
+        kept = _nospam_token(match)
+        if not kept:
+            nospam[0] += 1
+        return kept
+
+    return _OBF_NOSPAM_RE.sub(token, out), removed + nospam[0]
 
 
 # Text-level HTML character references decoded before redaction. The

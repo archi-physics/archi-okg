@@ -53,6 +53,8 @@ from archi.enrichment.anonymizer import (
     email_address_spans,
     redact_email_addresses,
     redact_email_addresses_with_count,
+    redact_obfuscated_email_addresses,
+    redact_obfuscated_email_addresses_with_count,
 )
 from archi.snapshot.groups import (
     GROUPS,
@@ -261,6 +263,7 @@ class PreparedGroup:
     files: dict[str, bytes]
     record_count: int
     addresses_removed: int
+    obfuscated_removed: int
     dropped_fields: tuple[str, ...]
     kept_fields: tuple[str, ...]
     deep_dropped_keys: tuple[str, ...] = ()
@@ -295,14 +298,29 @@ def prepare_group(
         ) from exc
 
 
+#: Rounds of (addresses, then spelled-out addresses) before a string must
+#: be a fixed point of both; removing one token can join text into another.
+_REDACTION_ROUNDS = 4
+
+
 class _Counter:
     def __init__(self) -> None:
         self.removed = 0
+        self.obfuscated = 0
 
     def redact(self, text: str) -> str:
-        clean, removed = redact_email_addresses_with_count(text)
-        self.removed += removed
-        return clean
+        """Remove addresses, then spelled-out addresses (``jdoe[at]cern.ch``),
+        repeating until neither changes the text (the post-check refuses a
+        string that is still not clean)."""
+        for _ in range(_REDACTION_ROUNDS):
+            clean, removed = redact_email_addresses_with_count(text)
+            clean, obfuscated = redact_obfuscated_email_addresses_with_count(clean)
+            self.removed += removed
+            self.obfuscated += obfuscated
+            if clean == text:
+                break
+            text = clean
+        return text
 
 
 def _select_variant(spec: GroupSpec, source: Path) -> GroupSpec:
@@ -410,6 +428,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         files=final,
         record_count=record_count,
         addresses_removed=counter.removed,
+        obfuscated_removed=counter.obfuscated,
         dropped_fields=tuple(sorted(drop - deep)),
         kept_fields=tuple(sorted(keep)),
         deep_dropped_keys=tuple(sorted(deep)),
@@ -726,6 +745,10 @@ def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
 def _check_string(group: str, where: str, value: str) -> None:
     if redact_email_addresses(value) != value:
         raise GroupRefused(group, f"{where}: an address survived redaction")
+    if redact_obfuscated_email_addresses(value) != value:
+        raise GroupRefused(
+            group, f"{where}: a spelled-out address survived redaction"
+        )
     if _CONTROL_RE.search(value):
         bare = _CONTROL_RE.sub("", value)
         if redact_email_addresses(bare) != bare:
@@ -971,6 +994,7 @@ def build(
                 "file_count": len(group.files),
                 "record_count": group.record_count,
                 "addresses_removed": group.addresses_removed,
+                "obfuscated_addresses_removed": group.obfuscated_removed,
                 "contents_sha256": contents_digest(group.files),
                 "archive_dir": GROUPS[group.name].archive_dir,
                 "dropped_fields": list(group.dropped_fields),

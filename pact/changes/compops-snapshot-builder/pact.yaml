@@ -102,7 +102,12 @@ requirements:
     refuses exactly that group and writes nothing. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.addresses: a planted address in each of the 12 text-bearing
-    groups is absent from every archive. [evidence: executed_test]
+    groups is absent from every archive; so is a spelled-out address (jdoe[AT]cern(dot)ch),
+    removed with archi-okg #13''s redact_obfuscated_email_addresses and counted as
+    obfuscated_addresses_removed, while free prose (john.doe at cern.ch) is kept; a git@ host
+    remote is kept in JIRA and TWiki and an address after it is removed; after merging main
+    (#13), redact_email_addresses and redact_obfuscated_email_addresses equal main 6193edd0ca on
+    random strings including git@ variants. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.jira-facts: the archi JIRA reader emits the same facts
     from a raw JIRA fixture and from the snapshot''s redacted copy. [evidence: executed_test]
