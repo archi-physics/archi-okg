@@ -22,13 +22,13 @@ why: 'In a skills benchmark run on 2026-09-28, a question named one specific TWi
   minimum-evidence rules from closed pull request #12 are not included.
 
 
-  Known limit: the text read needs okg with mitdbg/okg#2697 (merged 2026-09-28, okg dev
-  00424f3e9d). archi CI pins okg at ac078aabd5, which predates it, so on that okg the call
-  is refused ("inspect target kind must be one of ..."). Each skill therefore says to fall
-  back to the existing ordered-chunk SQL recipe (Parent To Ordered Chunks). Bumping the CI
-  pin is a separate CI-config change for Jason and is not part of this change. For archi
-  pages coverage reports "unknown" (archi chunks carry char_offset but no chunk_ordinal,
-  chunk_total or char_end) and overlapping chunk text can repeat; okg_traversal.md says so.'
+  Known limit: the text read needs okg with mitdbg/okg#2697 (merged 2026-09-28, okg dev 00424f3e9d).
+  archi CI pins okg at ac078aabd5, which predates it, so on that okg the call is refused ("inspect
+  target kind must be one of ..."). Each skill therefore says to fall back to the existing
+  ordered-chunk SQL recipe (Parent To Ordered Chunks). Bumping the CI pin is a separate CI-config
+  change for Jason and is not part of this change. For archi pages coverage reports "unknown"
+  (archi chunks carry char_offset but no chunk_ordinal, chunk_total or char_end) and overlapping
+  chunk text can repeat; okg_traversal.md says so.'
 affected_code:
 - skills/okg_traversal.md
 - skills/okg_retrieval_planner.md
@@ -38,8 +38,8 @@ affected_code:
 requirements:
 - id: req.skills-read-page-text.main
   statement: 'okg_traversal.md, okg_retrieval_planner.md, agentic_benchmark.md and source_document_exploration.md
-    each tell the agent: when the question names a specific page, document, or ticket, or search
-    surfaces one as the likely source, read its text with inspect(target={"kind": "text",
+    each tell the agent: when the question names a specific page, document, or ticket, or
+    search surfaces one as the likely source, read its text with inspect(target={"kind": "text",
     "node_id": ...}) before answering or concluding the answer is absent; inspect with kind
     "node" gives metadata only; while complete is false, follow the continuation_token; and
     the read needs okg with mitdbg/okg#2697, so on an older okg that refuses it, fall back
@@ -73,4 +73,16 @@ evidence:
     gave 666 passed. python/tests/test_skills.py: 6 passed, including the new test_retrieval_skills_teach_named_record_text_read.
     The same test file run against main''s skills/ tree fails that test with 15 missing phrases
     (5 in each of the 3 skills).'
+- kind: executed_test
+  requirement: req.skills-read-page-text.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: af5623e387b2384f78fde2070bbc55d8eb923dc8
+  at: '2026-09-28T23:03:17+00:00'
+  note: '667 passed at af5623e (Python 3.12, okg editable source at ce7edd85ff). python/tests/test_skills.py:
+    6 passed; test_retrieval_skills_teach_named_record_text_read now covers 4 skills (adds
+    source_document_exploration), the mitdbg/okg#2697 requirement, the Parent To Ordered Chunks
+    fallback, and the kind-node-is-metadata-only clause. Against the skills at a1b2d26 the
+    test fails with 13 missing items (2 in each of the first 3 skills, 7 in source_document_exploration);
+    removing the metadata-only clause from agentic_benchmark.md fails it too.'
 decisions: []
