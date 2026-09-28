@@ -2,9 +2,9 @@ pact_version: 5
 id: compops-skill-retrieval-contract
 title: Port the minimum-evidence retrieval contract into the CMS skills
 tier: 2
-why: 'okg-deployments PR #111 ("CMS: harden agent retrieval UX", head 8e0e1a67e8) changed three
-  CMS skills so an agent takes the minimum sufficient evidence path instead of a fixed call
-  count: no graph call for a clearly out-of-scope question, one call for a decisive exact
+why: 'okg-deployments PR #111 ("CMS: harden agent retrieval UX", head 8e0e1a67e8) changed
+  three CMS skills so an agent takes the minimum sufficient evidence path instead of a fixed
+  call count: no graph call for a clearly out-of-scope question, one call for a decisive exact
   inspect or complete bounded aggregate, follow-up only when evidence is chunk-only, ambiguous,
   historical, conflicting or multi-hop. The skills it edits now live in archi-okg (skills/,
   symlinked into bundles/cern-team/skills/), and the comp-ops deployment uses archi''s skills,
@@ -14,8 +14,8 @@ why: 'okg-deployments PR #111 ("CMS: harden agent retrieval UX", head 8e0e1a67e8
 
   archi-okg changed two of the three files after porting them from the cms base (47ed15c139,
   #111''s merge base): the planner''s search-method line and the traversal opening line were
-  de-site-ified, and python/tests/test_skills.py forbids the old cms wording. This change keeps
-  archi''s text for both and applies #111''s retrieval guidance around it.'
+  de-site-ified, and python/tests/test_skills.py forbids the old cms wording. This change
+  keeps archi''s text for both and applies #111''s retrieval guidance around it.'
 affected_code:
 - skills/agentic_benchmark.md
 - skills/okg_retrieval_planner.md
@@ -23,8 +23,8 @@ affected_code:
 - python/tests/test_skills.py
 requirements:
 - id: req.compops-skill-retrieval-contract.main
-  statement: 'The three skills teach okg-deployments #111''s retrieval contract, reconciled with
-    archi-okg''s own edits.
+  statement: 'The three skills teach okg-deployments #111''s retrieval contract, reconciled
+    with archi-okg''s own edits.
 
 
     - okg_traversal.md "Minimum Evidence" is #111''s text: minimum sufficient path, no graph
@@ -53,22 +53,22 @@ requirements:
     attrs. No skill passes conditions through search''s filter.
 
 
-    Not covered: the MCP instructions doc, the Codex agent profile and benchmark_replay.py from
-    #111 (they go to okg-deployments cms/), and teaching inspect kind "text" for whole-record
+    Not covered: the MCP instructions doc, the Codex agent profile and benchmark_replay.py
+    from #111 (they go to okg-deployments cms/), and teaching inspect kind "text" for whole-record
     reads (okg #2697, not merged).
 
 
     Acceptance:
 
-    - acc.compops-skill-retrieval-contract.skills: test_skills.py rejects every fixed-count phrase
-    in any skill and requires the new rules in each of the three skills; both new tests fail
-    against main''s skills and pass with the change, and the archi suite passes. [evidence:
+    - acc.compops-skill-retrieval-contract.skills: test_skills.py rejects every fixed-count
+    phrase in any skill and requires the new rules in each of the three skills; both new tests
+    fail against main''s skills and pass with the change, and the archi suite passes. [evidence:
     executed_test]'
 tasks:
 - id: task.compops-skill-retrieval-contract.deliver
   requirement: req.compops-skill-retrieval-contract.main
-  verification: 'Apply #111''s skill hunks with the reconciliations above and add the two contract
-    tests.
+  verification: 'Apply #111''s skill hunks with the reconciliations above and add the two
+    contract tests.
 
 
     Proof: the new tests fail against main''s skills and pass with the change, and the full
@@ -78,5 +78,17 @@ tasks:
     Test plan:
 
     - python/tests [evidence: pytest]'
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.compops-skill-retrieval-contract.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 2a5df43ee0f6cdcc82f759756a6d107e1cc31069
+  at: '2026-09-28T06:28:46+00:00'
+  note: '512 passed at 2a5df43 (okg origin/dev ef4121e62f exported source, Python 3.12, hatchling
+    on the path for the wheel tests), including 2 new tests: no skill teaches a fixed call
+    count, and each of the three skills carries the minimum-evidence rules. The same test_skills.py
+    against main''s skills (b4dac90): both new tests fail (5 earlier skill tests pass). The
+    three skill bodies match okg-deployments #111 head 8e0e1a67e8 except the three reconciliations
+    named in the requirement.'
 decisions: []
