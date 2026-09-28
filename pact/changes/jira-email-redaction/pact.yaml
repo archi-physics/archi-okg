@@ -10,11 +10,21 @@ why: 'The comp-ops JIRA source moves from okg-deployments (cms/cms_sources/jira.
   and document_chunk text. archi''s Anonymizer exists but no source calls it.
 
 
-  This is a parity fix. It adds redact_email_addresses to archi.enrichment.anonymizer, with
-  the Anonymizer''s own address pattern (identical to the cms one) and the cms helper''s narrow
-  decoding (&amp;, &commat;, &#64;, &#x40;), and calls it from _pg_text. It does not call
-  Anonymizer.anonymize, which also deletes greeting and sign-off lines, [~user] mentions and
-  names -- the cms source never did that.
+  This is a parity fix. It adds redact_email_addresses to archi.enrichment.anonymizer and
+  calls it from _pg_text. It does not call Anonymizer.anonymize, which also deletes greeting
+  and sign-off lines, [~user] mentions and names -- the cms source never did that.
+
+
+  It deliberately differs from the cms helper in one way. The cms helper decodes &amp;,
+  &commat;, &#64; and &#x40; in the whole string before matching, so it also rewrites text
+  that holds no address (AT&amp;T becomes AT&T), which changes that chunk''s text, content hash
+  and chunk id; and it lets through a non-ASCII local part (only the last ASCII run was
+  removed, leaving a prefix), zero-padded or semicolon-less &#064; / &#x0040; / &#64, URL
+  %2540, and fullwidth or small @ (U+FF20, U+FE6B). The archi helper decodes nothing: the
+  encoded separators are part of its own pattern, the local part and domain accept Unicode
+  letters and combining marks, and the only change to a string is the removal of each whole
+  address. A match starts only where a run of address characters starts, so a long token with
+  no @ is scanned once rather than once per character. Anonymizer''s own pattern is unchanged.
 
 
   CARRIED SIDE EFFECT, same as cms: a person whose display name is only an address gets no
@@ -36,19 +46,26 @@ requirements:
     status, priority, resolution, issue type, project, dates, assignee and reporter names,
     labels, components, fix versions, comment authors and bodies), in both the flat and the
     JIRA REST record shapes, and so every jira_issue and person attr and every document_chunk
-    text. Address forms: plain, +tag, quoted local part, HTML-encoded and double-encoded @,
-    and URL %40. The address is removed with no placeholder; the surrounding text is kept,
-    and text without an address is returned unchanged.
+    text. Address forms: plain, +tag, quoted local part, non-ASCII local part or domain (NFC
+    and NFD), @ as &commat; or &#64; / &#x40; with any leading zeros and an optional semicolon,
+    any of those behind one or more &amp; layers, URL %40 and %2540, and fullwidth or small @.
+    The whole address is removed with no placeholder; the surrounding text, including any HTML
+    entities around it, is kept byte for byte. No entity is decoded, so text without an address
+    is returned byte-identical and its chunk text and chunk id do not change.
 
 
     Acceptance:
 
     - acc.jira-email-redaction.fields: A cached issue with a distinct address in each field
     emits no fact whose attrs or record id contain any of them; the same test fails on main
-    with all twelve leaked. [evidence: executed_test]
+    with all twelve leaked. An issue whose text holds HTML entities and no address is emitted
+    verbatim, and one whose assignee is only a non-ASCII address gets no person and leaves no
+    fragment of it. [evidence: executed_test]
 
-    - acc.jira-email-redaction.forms: redact_email_addresses removes each address form and
-    leaves address-free text byte-identical. [evidence: executed_test]'
+    - acc.jira-email-redaction.forms: redact_email_addresses removes each address form whole,
+    keeps entities around an address, leaves address-free text (including &amp;, &commat;,
+    &#64; and fullwidth @ on their own) byte-identical, and runs in linear time on a long run
+    of address characters. [evidence: executed_test]'
 tasks:
 - id: task.jira-email-redaction.deliver
   requirement: req.jira-email-redaction.main

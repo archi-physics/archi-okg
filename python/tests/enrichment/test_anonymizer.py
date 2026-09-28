@@ -275,3 +275,62 @@ def test_redact_email_addresses_changes_nothing_else():
     # general entity pass, so text without an address is returned as is.
     text = "Hi,\nJohn Doe &lt;b&gt; run 381000\nThanks"
     assert redact_email_addresses(text) == text
+
+
+# Address forms the first version let through whole or in part. Each one
+# must be removed entirely: no prefix of the local part may survive.
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("non-ascii \u00fcber.m\u00fcller@cern.ch end", "non-ascii  end"),
+        # NFD: "u" followed by a combining diaeresis (U+0308).
+        ("nfd u\u0308ber.mu\u0308ller@cern.ch end", "nfd  end"),
+        ("nfd domain jdoe@ce\u0301rn.ch end", "nfd domain  end"),
+        ("zero-padded jdoe&#064;cern.ch end", "zero-padded  end"),
+        ("hex zero-padded jdoe&#x0040;cern.ch end", "hex zero-padded  end"),
+        ("no semicolon jdoe&#64cern.ch end", "no semicolon  end"),
+        ("hex no semicolon jdoe&#x40cern.ch end", "hex no semicolon  end"),
+        ("url ?mail=john.doe%40cern.ch&x=1", "url ?mail=&x=1"),
+        ("double url ?mail=john.doe%2540cern.ch&x=1", "double url ?mail=&x=1"),
+        ("fullwidth jdoe\uff20cern.ch end", "fullwidth  end"),
+        ("small at jdoe\ufe6bcern.ch end", "small at  end"),
+        ("amp in local jdoe&amp;x@cern.ch end", "amp in local  end"),
+        ("double commat jdoe&amp;commat;cern.ch end", "double commat  end"),
+    ],
+)
+def test_redact_email_addresses_removes_whole_address(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "AT&amp;T ok",
+        "R&amp;D &commat; CERN, ref &#64; and &#x40; alone",
+        "double &amp;amp; stays, run 381000",
+        "Hi,\nJohn Doe &lt;b&gt; 100% done \uff20 home",
+    ],
+)
+def test_redact_email_addresses_leaves_address_free_text_byte_identical(text):
+    # No address, no change: entities are never decoded, so the chunk
+    # text (and its content hash and chunk id) is exactly the input.
+    assert redact_email_addresses(text) == text
+
+
+def test_redact_email_addresses_keeps_entities_around_an_address():
+    # Only the address goes; the surrounding entities stay encoded.
+    text = "R&amp;D &lt;jdoe&#64;cern.ch&gt; ok"
+    assert redact_email_addresses(text) == "R&amp;D &lt;&gt; ok"
+
+
+def test_redact_email_addresses_is_linear_on_long_runs():
+    # A match may start only where a run of address characters starts,
+    # so a long run with no separator is scanned once, not once per
+    # character. The old pattern took seconds here; this takes ms.
+    import time
+
+    run = "a" * 20000 + " " + "&amp;" * 4000 + " " + "b&" * 10000
+    started = time.perf_counter()
+    assert redact_email_addresses(run) == run
+    assert redact_email_addresses(run + " jdoe@cern.ch") == run + " "
+    assert time.perf_counter() - started < 1.0

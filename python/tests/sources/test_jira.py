@@ -594,3 +594,45 @@ def test_email_redaction_covers_rest_api_shaped_comments(tmp_path):
     assert "apiowner" not in emitted
     assert "apicomment" not in emitted
     assert "cc  please" in emitted
+
+
+def test_text_without_an_address_is_emitted_verbatim(tmp_path):
+    # Redaction decodes nothing: an issue with HTML entities and no
+    # address keeps them, so its chunk text and chunk id do not change.
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-302",
+        "summary": "R&amp;D link to AT&amp;T &#64; noon",
+        "description": "Ticket &commat;ops, 100% &amp;amp; done",
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["summary"] == "R&amp;D link to AT&amp;T &#64; noon"
+    (chunk,) = _nodes(facts, "document_chunk")
+    assert "R&amp;D link to AT&amp;T &#64; noon" in chunk.attrs["text"]
+    assert "Ticket &commat;ops, 100% &amp;amp; done" in chunk.attrs["text"]
+
+
+def test_non_ascii_and_padded_addresses_leave_no_fragment(tmp_path):
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-303",
+        "summary": "Ask j\u00fcrgen.k\u00f6nig&#064;cern.ch or fwidthaddr\uff20cern.ch",
+        "assignee": "\u00fcber.m\u00fcller@cern.ch",
+        "reporter": "Grace Hopper",
+        "recent_comments": [],
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps(
+        [f.attrs for f in facts], sort_keys=True, ensure_ascii=False
+    )
+    for fragment in ("j\u00fcrgen", "k\u00f6nig", "\u00fcber", "m\u00fc", "fwidthaddr"):
+        assert fragment not in emitted
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["summary"] == "Ask  or "
+    # An assignee that is only an address yields no person, as in cms.
+    assert [p.attrs["display_name"] for p in _nodes(facts, "person")] == [
+        "Grace Hopper"
+    ]

@@ -166,29 +166,51 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 
 # Email-only redaction for source text, ported from okg-deployments
 # ``cms/cms_sources/anonymizer.py`` (commit b25e36f06c), where the cms
-# JIRA source applied it to every string it read. Same address pattern
-# as the Anonymizer's email pass. The decoding is deliberately narrower
-# than :func:`_normalize_encodings` (only ``&amp;``, ``&commat;`` and the
-# numeric forms of ``@``), so that, like the cms original, nothing in
-# the text changes except the addresses it removes.
-_EMAIL_ADDRESS_RE = re.compile(_DEFAULT_EMAIL_PATTERN, re.IGNORECASE)
-_ENCODED_AT_RE = re.compile(r"&#(?:64|x40);", re.IGNORECASE)
+# JIRA source applied it to every string it read.
+#
+# It decodes nothing. The encoded forms of ``@`` are part of the pattern
+# instead, so the only change to a string is the removal of the addresses
+# it holds: text with no address comes back byte-identical, and entities
+# around an address (``&lt;``, ``&amp;``) stay encoded. A decode-first
+# pass would rewrite ``AT&amp;T`` to ``AT&T`` in every string and so
+# change the text, content hash and chunk id of chunks with no address.
+#
+# Separator: ``@``, fullwidth and small ``@`` (U+FF20, U+FE6B), URL
+# ``%40`` and double-encoded ``%2540``, and ``&commat;`` / ``&#64;`` /
+# ``&#x40;`` with any leading zeros, an optional ``;`` and any number of
+# ``&amp;`` layers (``&amp;#64;``). Local part and domain are Unicode word
+# characters plus combining marks, so ``\u00fcber.m\u00fcller@...`` (in
+# NFC or NFD) is removed whole rather than from its last ASCII run.
+_WORD_CHARS = "\\w\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f"
+# The unquoted local part starts only where a run of local-part characters
+# (and ``&amp;`` layers, whose ``;`` is not one) starts: the two
+# lookbehinds. The run itself is then searched for the
+# separator, so no address is missed, and a long run with no separator is
+# scanned once instead of once per character (quadratic time on long
+# tokens such as pasted base64).
+_LOCAL_CHARS = _WORD_CHARS + ".!#$%&'*+^`{|}~-"
+_AMP = r"&(?:amp;)*"
+_SOURCE_EMAIL_PATTERN = (
+    r"(?:\"[^\"\n]+\""
+    r"|(?<![" + _LOCAL_CHARS + r"])(?<!&amp;)"
+    r"(?:&(?:amp;)+|[" + _LOCAL_CHARS + r"])+)"
+    r"(?:[@\uff20\ufe6b]|%(?:25)*40"
+    r"|" + _AMP + r"(?:commat;|#0*64;?|#x0*40;?))"
+    r"[" + _WORD_CHARS + r".-]+\.[" + _WORD_CHARS + r"]+"
+)
+_EMAIL_ADDRESS_RE = re.compile(_SOURCE_EMAIL_PATTERN, re.IGNORECASE)
 
 
 def redact_email_addresses(text: str) -> str:
     """Remove whole email addresses, including tagged and encoded forms.
 
     ``john.doe+ops@cern.ch``, ``"john doe"@cern.ch``, ``jdoe&#64;cern.ch``
-    and the URL form ``jdoe%40cern.ch`` are removed outright (replaced
-    by nothing, as in the cms source); the surrounding text is kept.
+    (and ``&#064;``, ``&#x0040;``, ``&#64`` without ``;``, ``&amp;#64;``),
+    ``jdoe\uff20cern.ch`` and the URL forms ``jdoe%40cern.ch`` and
+    ``jdoe%2540cern.ch`` are removed outright (replaced by nothing, as in
+    the cms source). Nothing is decoded: the addresses are the only
+    change, so text without an address is returned byte-identical.
     """
-    for _ in range(3):
-        previous = text
-        text = text.replace("&amp;", "&")
-        text = text.replace("&commat;", "@")
-        text = _ENCODED_AT_RE.sub("@", text)
-        if text == previous:
-            break
     return _EMAIL_ADDRESS_RE.sub("", text)
 
 # Text-level HTML character references decoded before redaction. The
