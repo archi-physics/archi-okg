@@ -1198,6 +1198,22 @@ def test_eos_address_across_a_chunk_boundary_leaves_no_fragment(tmp_path):
     assert "tail text" in joined
 
 
+def test_change_probes_fingerprint_the_emission_and_redaction_code():
+    # The class body alone does not hold the fact-building functions or
+    # the redaction, so a change to them must still change the probe
+    # token; otherwise an unchanged snapshot is skipped and already
+    # stored text keeps its addresses.
+    import sys
+
+    from archi.enrichment import anonymizer
+
+    for source_class in (TwikiEOSSource, TwikiCrawlSource):
+        targets = twiki_mod._emit_targets(source_class)
+        assert source_class in targets
+        assert sys.modules["archi.sources.twiki"] in targets
+        assert anonymizer in targets
+
+
 def test_crawl_email_addresses_removed_and_names_kept(monkeypatch):
     raw = (
         '%META:TOPICINFO{author="crawlauthor@cern.ch" date="1700000000" '

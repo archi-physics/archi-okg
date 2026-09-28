@@ -218,6 +218,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from collections import deque
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -237,6 +238,7 @@ from okg.deployment import (
 from okg.deployment import ContentHashProbe
 from okg.deployment import file_preflight
 
+from archi.enrichment import anonymizer as _anonymizer
 from archi.enrichment.anonymizer import (
     redact_email_addresses,
     redact_obfuscated_email_addresses,
@@ -406,7 +408,7 @@ class TwikiEOSSource:
                 "jira_records_path": self.jira_records_path,
                 "services_path": self.services_path,
             },
-            emit_targets=TwikiEOSSource,
+            emit_targets=_emit_targets(TwikiEOSSource),
         )
 
     def _probe_content_items(self) -> list[tuple[str, Any]]:
@@ -814,7 +816,7 @@ class TwikiCrawlSource:
                 "max_pages": self.max_pages,
                 "skip_patterns": list(self.skip_patterns),
             },
-            emit_targets=TwikiCrawlSource,
+            emit_targets=_emit_targets(TwikiCrawlSource),
             base=base,
         )
 
@@ -1122,6 +1124,19 @@ class _TwikiCrawlOutcome:
     missing_link_targets: tuple[str, ...]
     total_topics: int
     truncated_queued: int = 0
+
+
+def _emit_targets(source_class: type) -> list[Any]:
+    """What the change probe fingerprints as this source's emission code.
+
+    The class alone is not enough: the facts are built by module-level
+    functions here (``_facts_for_twiki_records``) and the email redaction
+    lives in :mod:`archi.enrichment.anonymizer`. With only the class, a
+    change to either left the probe token unchanged, so an unchanged
+    snapshot was skipped and text already stored kept its addresses.
+    Fingerprinting both modules makes such a change re-emit once.
+    """
+    return [source_class, sys.modules[__name__], _anonymizer]
 
 
 def _checked_at() -> str:

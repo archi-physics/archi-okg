@@ -463,7 +463,10 @@ def test_redact_email_addresses_matches_reference_on_random_text():
         ("mail john-doe-at-cern.ch now", "mail  now"),
         ("mail jdoe AT cern DOT ch now", "mail  now"),
         ("mail jdoe at fnal.gov now", "mail  now"),
-        ("mail jdoe_at_physics.ucsd.edu now", "mail  now"),
+        ("mail jdoe AT gmail.com now", "mail  now"),
+        ("mail jdoe at cern.ch.", "mail ."),
+        ("mail john.doe_at_physics.ucsd.edu now", "mail  now"),
+        ("mail jdoe-at-fnal.gov now", "mail  now"),
         ("mail jdoe.x_NOSPAM_AT_cern.ch now", "mail  now"),
         # NOSPAM insertions.
         ("mail jdoeNOSPAM.cern.ch now", "mail  now"),
@@ -487,15 +490,44 @@ def test_redact_obfuscated_email_addresses_forms(text, expected):
         "Main.JohnDoe (John Doe) at CERN",
         "AT&amp;T &commat; ops, &#64; alone",
         "",
+        # Hosts and paths after a word separator (review finding 3).
+        "files are served at xrootd.t2.ucsd.edu for T2",
+        "log in at login.hep.wisc.edu",
+        "SE at srm.unl.edu:8443",
+        "see the page at cern.ch/cms",
+        "Tier2 at T2_US_UCSD.edu",
+        # Bracketed separators before a number or a path.
+        "Run2 [at] 13.6TeV",
+        "mirror [at] host.org/path",
+        # Names and words that merely contain NOSPAM.
+        "NoSpamFilter enabled",
+        "TWiki.NOSPAMPlugin and nospam-policy",
     ],
 )
 def test_redact_obfuscated_email_addresses_leaves_other_text_identical(text):
     assert redact_obfuscated_email_addresses(text) == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Known gaps (recorded in the PACT): a spaced word separator before
+        # a domain other than cern.ch / fnal.gov / gmail.com, and a glued
+        # one before a domain that is not .edu or .gov.
+        "jdoe at physics.ucsd.edu",
+        "jdoe_at_infn.it",
+        "jdoe AT host.cern.ch",
+    ],
+)
+def test_redact_obfuscated_email_addresses_known_gaps(text):
+    assert redact_obfuscated_email_addresses(text) == text
+
+
 def test_redact_obfuscated_email_addresses_accepted_over_removal():
     # One word before " at cern.ch" goes even when it is prose.
     assert redact_obfuscated_email_addresses("based at cern.ch.") == "."
+    # A wiki-name directly before " at cern.ch" is taken as the local part.
+    assert redact_obfuscated_email_addresses("Main.JohnDoe at cern.ch") == ""
 
 
 def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
@@ -509,6 +541,16 @@ def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
         "a_at_" * 10000,
         "NOSPAM" * 10000,
         "a." * 25000 + "[at]",
+        # Dot-word chains: the first version backtracked exponentially on
+        # these (126 characters ran for minutes; review finding 1).
+        "x_at_" + "a_dot_" * 5000 + "1",
+        "x at " + "a dot " * 5000 + "1",
+        "x AT " + "a DOT " * 5000 + "1",
+        "x[at]" + "a(dot)" * 5000 + "1",
+        "x[at]" + "a." * 20000 + "1",
+        "x_NOSPAM_AT_" + "a_dot_" * 5000,
+        "x_at_" + "a." * 20000 + "1",
+        "x_at_" * 10000 + "a.edu",
     ]
     started = time.perf_counter()
     for text in crowded:

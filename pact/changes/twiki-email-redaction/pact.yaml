@@ -17,15 +17,23 @@ why: 'The cms-kb public chat answers from TWiki topics. Both TWiki sources (Twik
   TWiki topics also spell addresses out, which redact_email_addresses does not cover because
   they have no @: jdoe[AT]cern.ch, jdoe(at)cern(dot)ch, john.doe at cern.ch, john.doe_at_cern.ch,
   jdoe AT cern DOT ch, and NOSPAM insertions. Over 1,261 candidate topics on the snapshot
-  these were 37 bracketed, about 134 word-separator and 8 NOSPAM addresses that the @ pass
-  left in. This change adds redact_obfuscated_email_addresses next to it in archi.enrichment.anonymizer
+  the @ pass left in 37 bracketed, 123 spaced word-separator, 6 glued word-separator and 8
+  NOSPAM addresses. This change adds redact_obfuscated_email_addresses next to it in archi.enrichment.anonymizer
   and calls it from the TWiki sources only; the JIRA source is unchanged.
+
+
+  The change probes of both TWiki sources fingerprinted only the source class, not the module-level
+  functions that build the facts nor the anonymizer, so this change alone would not have
+  changed the probe token and an unchanged snapshot would have been skipped, keeping stored
+  addresses. The probes now fingerprint the twiki module and the anonymizer module too (_emit_targets),
+  so this change, and any later change to either module, re-emits once.
 
 
   CARRIED SIDE EFFECT, as in #5: on the next ingest, chunks whose text held an address get
   new chunk ids (the chunk id hashes the chunk text), and a page whose author, parent topic
   or version held an address gets new attrs. Chunks and pages without an address keep their
-  ids and text byte for byte.'
+  ids and text byte for byte. The probe change above also means the next ingest of every
+  TWiki deployment re-emits all topics once, whatever its snapshot.'
 affected_code:
 - python/archi/sources/twiki.py
 - python/archi/enrichment/anonymizer.py
@@ -52,17 +60,27 @@ requirements:
     forms its PACT jira-email-redaction lists.
 
     - redact_obfuscated_email_addresses (new): bracketed separators (at) [at] {at} <at> in
-    any case with any dotted domain ending in a label with a letter, and (dot) dots; word
-    separators " at ", " AT ", _at_, -at-, _AT_ and _NOSPAM_AT_ only before a mail domain
-    -- exactly cern.ch, fnal.gov or gmail.com, or a domain ending in .edu, with . or DOT/dot/(dot)
-    as the dot and nothing domain-like after it; and any token that carries NOSPAM plus at
-    least two other letters or digits.
+    any case, before a dotted domain (. or (dot)) whose last label is two or more letters;
+    word separators " at ", " AT ", _at_, -at-, _AT_ and _NOSPAM_AT_ only before exactly cern.ch,
+    fnal.gov or gmail.com (. or DOT/dot/(dot) as the dot); the glued ones (_at_, -at-, _AT_,
+    _NOSPAM_AT_) also before a plain-dotted .edu or .gov domain; and a token carrying NOSPAM
+    that, with NOSPAM taken out, ends like a mail domain (.ch .edu .gov .org .com, DOTch ...,
+    cernch). Every form needs nothing domain- or path-like after it (no letter, digit, - or
+    _, and no . / : @ ( followed by one). Every repetition is bounded or unambiguous, so matching
+    is linear.
 
 
     Kept: names (Main.JohnDoe, John Doe, the %META author WikiName, the label of a mailto
     link), prose and file names that use "at" as a word ("run at 13.6 TeV", "x_2016_at_13TeV.root"),
-    hosts after a word separator ("served at cmsweb.cern.ch"), version pins (numpy@1.26.4)
-    and NOSPAM on its own.
+    hosts and paths after a word separator ("served at cmsweb.cern.ch", "at xrootd.t2.ucsd.edu",
+    "at cern.ch/cms", "at srm.unl.edu:8443"), a bracketed separator before a number or path
+    ("Run2 [at] 13.6TeV"), version pins (numpy@1.26.4), and NOSPAM alone or inside a name
+    (NoSpamFilter, TWiki.NOSPAMPlugin).
+
+
+    Re-emission: both sources'' change probes fingerprint the source class, the twiki module
+    and the anonymizer module, so a change to the redaction or to fact building changes the
+    probe token.
 
 
     Not redacted: the identity fields page_id, source_path, url, web_name and web_root, which
@@ -76,14 +94,22 @@ requirements:
     topics, 91 of 586 removals were ssh user@lxplus..., git@github.com:org/x or similar, so
     "git clone git@github.com:cms-sw/x.git" becomes "git clone :cms-sw/x.git".
 
-    - One word before " at cern.ch" goes even when it is prose ("based at cern.ch").
+    - One word before " at cern.ch" goes even when it is prose or a name ("based at cern.ch",
+    "Main.JohnDoe at cern.ch"). On the snapshot, of 123 spaced word-separator removals, 101
+    had a dotted or hyphenated name-shaped local part, 21 a single word, and 1 a common prose
+    word ("and").
+
+    - Code shaped like f(at)obj.attr goes.
 
     - Table pipes and the TWiki ! escape directly before an address go with it (|x@cern.ch|).
 
 
-    Known gaps: word-separator forms with other domains (jdoe at ucsd.edu is removed, but
-    jdoe at infn.it or jdoe AT jwood.cern.ch are not), and the gaps PACT jira-email-redaction
-    lists for the @ pass.
+    Known gaps: spaced word separators before any other domain (jdoe at ucsd.edu, jdoe AT
+    host.cern.ch: one seen on the snapshot), glued ones before a domain other than .edu/.gov
+    (jdoe_at_infn.it), doubled spaces or a line break around " at " (the EOS parser collapses
+    whitespace; the crawl parser keeps line breaks), the entity form &lt;at&gt;, spaced dots
+    (cern . ch), fullwidth brackets, and the gaps PACT jira-email-redaction lists for the @
+    pass (including a spaced " &#64; ").
 
 
     Acceptance:
@@ -100,14 +126,17 @@ requirements:
     computed from it. [evidence: executed_test]
 
     - acc.twiki-email-redaction.forms: redact_obfuscated_email_addresses removes each spelled-out
-    form, leaves prose, hosts, file names and NOSPAM alone byte-identical, and runs in linear
-    time on long runs. [evidence: executed_test]'
+    form, leaves prose, hosts, paths, file names and NOSPAM alone or in a name byte-identical,
+    and runs in linear time on long runs including dot-word chains. [evidence: executed_test]
+
+    - acc.twiki-email-redaction.reemit: both sources'' change probes fingerprint the twiki
+    and anonymizer modules. [evidence: executed_test]'
 tasks:
 - id: task.twiki-email-redaction.deliver
   requirement: req.twiki-email-redaction.main
   verification: 'Redact the TWiki records in _facts_for_twiki_records before any fact is built,
-    add redact_obfuscated_email_addresses to archi/enrichment/anonymizer.py, and cover each
-    field and form.
+    add redact_obfuscated_email_addresses to archi/enrichment/anonymizer.py, fingerprint both
+    modules in the change probes, and cover each field and form.
 
 
     Proof: the new tests fail against main and pass with the change, the full archi suite

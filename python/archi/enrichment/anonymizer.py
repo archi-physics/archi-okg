@@ -338,30 +338,41 @@ def redact_email_addresses(text: str) -> str:
 # with a bare ``cern.ch`` domain), and ``NOSPAM`` insertions (11).
 #
 # - Bracketed ``(at)`` ``[at]`` ``{at}`` ``<at>`` (any case, optional
-#   spaces) are unambiguous: any domain with a dot (``.`` or a bracketed
-#   ``(dot)``) ending in a label with a letter.
+#   spaces): any domain with a dot (``.`` or a bracketed ``(dot)``) whose
+#   last label is two or more letters, with nothing domain- or path-like
+#   after it (so ``Run2 [at] 13.6TeV`` stays).
 # - Word separators ``" at "``, ``" AT "``, ``_at_``, ``-at-``, ``_AT_``
 #   and ``_NOSPAM_AT_`` are ordinary words too ("run at 13.6 TeV",
-#   "served at cmsweb.cern.ch", file names like ``x_2016_at_13TeV.root``;
-#   885 such matches in the same candidates), so they count only before
-#   a mail domain: exactly ``cern.ch``, ``fnal.gov`` or ``gmail.com``, or
-#   a domain ending in ``.edu``, with ``.`` or ``DOT`` / ``dot`` /
-#   ``(dot)`` as the dot and nothing domain-like after it. A host such as
-#   ``cmsweb.cern.ch`` is not a mail domain and stays.
-# - A token that carries ``NOSPAM`` (any case) plus other text is removed
-#   whole, with a preceding ``name AT`` / ``name_at_`` part.
+#   "served at cmsweb.cern.ch", "at xrootd.t2.ucsd.edu", file names like
+#   ``x_2016_at_13TeV.root``; 885 such matches in the same candidates),
+#   so they count only before one of three mail domains, exactly
+#   ``cern.ch``, ``fnal.gov`` or ``gmail.com`` (``.`` or ``DOT`` /
+#   ``dot`` / ``(dot)`` as the dot), with nothing domain- or path-like
+#   after it. Any host (``cmsweb.cern.ch``, ``cern.ch/cms``, a ``.edu``
+#   host) stays, and so does an address at any other domain. The glued
+#   forms (``_at_``, ``-at-``, ``_AT_``, ``_NOSPAM_AT_``) also count before
+#   a plain-dotted ``.edu`` or ``.gov`` domain.
+# - A token that carries ``NOSPAM`` (any case) and, with it taken out,
+#   ends like a mail domain (``.ch``, ``.edu``, ``.gov``, ``.org``,
+#   ``.com``, ``DOTch`` ... or ``cernch``) is removed whole, with a
+#   preceding ``name AT`` / ``name_at_`` part. ``NOSPAM`` alone, or in a
+#   name such as ``NoSpamFilter``, stays.
 #
+# Every repetition is bounded or unambiguous, so matching is linear.
 # Like redact_email_addresses this decodes nothing and only removes the
 # matched token, so text with no match comes back byte-identical.
 # Accepted over-removal: one word before " at cern.ch" goes even when it
-# is prose ("based at cern.ch" leaves "").
+# is prose or a name ("based at cern.ch", "Main.JohnDoe at cern.ch" both
+# leave ""); ``f(at)obj.attr``-shaped code goes.
 _OBF_LOCAL = r"(?<![\w.+-])[\w.+-]{1,64}"
 _OBF_BRACKET_DOT = r"\s?[(\[{<]\s?dot\s?[)\]}>]\s?"
+_OBF_END = r"(?![\w-]|[./:@(][\w-])"
 _OBF_STRONG_RE = re.compile(
     _OBF_LOCAL
     + r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
     + r"[\w-]+(?:(?:\.|" + _OBF_BRACKET_DOT + r")[\w-]+)*"
-    + r"(?:\.|" + _OBF_BRACKET_DOT + r")[\w-]*[^\W\d_][\w-]*",
+    + r"(?:\.|" + _OBF_BRACKET_DOT + r")[^\W\d_]{2,}"
+    + _OBF_END,
     re.IGNORECASE,
 )
 _OBF_WORD_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| (?:DOT|dot) |_(?:DOT|dot)_)"
@@ -369,20 +380,32 @@ _OBF_WEAK_RE = re.compile(
     _OBF_LOCAL
     + r"(?: at | AT |_at_|-at-|_AT_|_NOSPAM_AT_)"
     + r"(?i:cern" + _OBF_WORD_DOT + r"ch|fnal" + _OBF_WORD_DOT + r"gov"
-    + r"|gmail" + _OBF_WORD_DOT + r"com"
-    + r"|(?:[\w-]+" + _OBF_WORD_DOT + r")+edu)"
-    + r"(?![\w-]|\.[\w-])"
+    + r"|gmail" + _OBF_WORD_DOT + r"com)"
+    + _OBF_END
+)
+# Glued separators are rarer in prose, so they also count before any
+# plain-dotted domain ending in .edu or .gov (john.doe_at_physics.ucsd.edu).
+_OBF_GLUED_RE = re.compile(
+    _OBF_LOCAL
+    + r"(?:_at_|-at-|_AT_|_NOSPAM_AT_)"
+    + r"[\w-]{1,63}(?:\.[\w-]{1,63}){0,5}\.(?i:edu|gov)"
+    + _OBF_END
 )
 _OBF_NOSPAM_RE = re.compile(
     r"(?<![\w.+-])(?:[\w.+-]{1,64}(?: at | AT |_at_|_AT_))?"
     r"[\w.+-]*NOSPAM[\w.+-]*",
     re.IGNORECASE,
 )
+_OBF_NOSPAM_DOMAIN_END_RE = re.compile(
+    r"(?:(?:\.|dot|_)(?:ch|edu|gov|org|com)|cernch)\.?$", re.IGNORECASE
+)
 
 
 def _nospam_token(match: re.Match) -> str:
     rest = re.sub("nospam", "", match.group(0), flags=re.IGNORECASE)
-    return "" if sum(c.isalnum() for c in rest) >= 2 else match.group(0)
+    if _OBF_NOSPAM_DOMAIN_END_RE.search(rest):
+        return ""
+    return match.group(0)
 
 
 def redact_obfuscated_email_addresses(text: str) -> str:
@@ -395,6 +418,7 @@ def redact_obfuscated_email_addresses(text: str) -> str:
     """
     out = _OBF_STRONG_RE.sub("", text)
     out = _OBF_WEAK_RE.sub("", out)
+    out = _OBF_GLUED_RE.sub("", out)
     return _OBF_NOSPAM_RE.sub(_nospam_token, out)
 
 
