@@ -732,7 +732,7 @@ def test_an_address_split_by_a_control_in_json_refuses_the_group(tmp_path, sourc
     records = json.loads(path.read_text())
     records[0]["filename"] = "owner a.b@c\u0001d.ch"
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
 
 
@@ -1468,7 +1468,7 @@ def test_note_must_be_short_text(note, expected):
     "note, expected",
     [
         ("fetched by jdoe@cern.ch", "note: an address survived redaction"),
-        ("fetched by a.b@c\u0081d.ch", "note, line 1: line rule"),
+        ("fetched by a.b@c\u0081d.ch", "note, line 1: stored-text rule"),
     ],
 )
 def test_an_address_in_a_note_refuses_the_group(tmp_path, sources, note, expected):
@@ -1569,7 +1569,6 @@ def redact(text):
 # --- ANSI colour codes ----------------------------------------------------------------
 
 def test_ansi_colour_codes_away_from_an_address_are_stripped(tmp_path, sources):
-    # On its own line: a line with an escape and an @ refuses (the line rule).
     (sources["twiki-eos"] / "Log.txt").write_bytes(
         b"---+ Log\n$ make done \x1b[1;31mERROR\x1b[0m\nmail jdoe@example.org\n" + PADDING
     )
@@ -1580,14 +1579,17 @@ def test_ansi_colour_codes_away_from_an_address_are_stripped(tmp_path, sources):
     assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == 2
 
 
-def test_a_colour_code_on_the_same_line_as_an_address_refuses(tmp_path, sources):
-    # Round 9 stripped this and redacted the address; round 10's line rule
-    # refuses any line with an escape and an address separator.
+def test_a_colour_code_on_the_same_line_as_an_address_is_stripped(tmp_path, sources):
+    # The colour codes do not touch the address: they are stripped and the
+    # address is redacted.
     (sources["twiki-eos"] / "Log.txt").write_bytes(
         b"---+ Log\n$ make done \x1b[1;31mERROR\x1b[0m, mail jdoe@example.org\n" + PADDING
     )
-    with pytest.raises(BuildRefused, match=r"Log.txt, line 2: line rule"):
-        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Log.txt"].decode("utf-8")
+    assert page.startswith("---+ Log\n$ make done ERROR, mail \n")
+    assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == 2
 
 
 def test_ansi_colour_codes_inside_an_address_refuse_the_group(tmp_path, sources):
@@ -1596,7 +1598,7 @@ def test_ansi_colour_codes_inside_an_address_refuse_the_group(tmp_path, sources)
     (sources["twiki-eos"] / "Log.txt").write_bytes(
         b"---+ Log\n$ \x1b[32mjdoe\x1b[0m@laptop.example.org done\n" + PADDING
     )
-    with pytest.raises(BuildRefused, match=r"Log.txt, line 2: (line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"Log.txt, line 2: span rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -1792,13 +1794,13 @@ def test_a_control_character_inside_a_spelled_out_address_refuses_the_group(
     records = json.loads(path.read_text())
     records[0]["filename"] = value
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
 
 
 def test_a_control_character_inside_a_spelled_out_address_in_twiki_refuses(tmp_path, sources):
     (sources["twiki-eos"] / "Del.txt").write_bytes(b"---+ Page\nAsk jdoe\x7f[at]cern.ch ok.\n" + PADDING)
-    with pytest.raises(BuildRefused, match=r"Del.txt, line 2: (line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"Del.txt, line 2: span rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -1883,12 +1885,12 @@ def test_fuzz_no_spelled_out_address_from_the_dropped_view_survives():
 def test_ansi_codes_are_stripped_from_json_strings(tmp_path, sources):
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
-    records[0]["description"] = "Logged by jdoe@example.org\nin \x1b[1mbold\x1b[0m."
+    records[0]["description"] = "Logged by jdoe@example.org in \x1b[1mbold\x1b[0m."
     path.write_text(json.dumps(records))
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
-    assert stored[0]["description"] == "Logged by \nin bold."
+    assert stored[0]["description"] == "Logged by  in bold."
     assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 2
 
 
@@ -1928,7 +1930,7 @@ def test_a_hidden_character_in_an_address_in_a_json_string_refuses(
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} today."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -1940,7 +1942,7 @@ def test_a_hidden_character_in_an_address_on_a_text_page_refuses(
         f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
     )
     with pytest.raises(
-        BuildRefused, match=r"Local.txt, line 2: (line|span) rule"
+        BuildRefused, match=r"Local.txt, line 2: span rule"
     ):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
@@ -1951,7 +1953,7 @@ def test_a_hidden_character_in_an_address_in_a_json_key_refuses(tmp_path, source
     records = json.loads(path.read_text())
     records[0][key] = "owner"
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -1966,7 +1968,7 @@ FORMAT_CHARACTERS = [
 
 @pytest.mark.parametrize("char", FORMAT_CHARACTERS, ids=lambda c: f"U+{ord(c):04X}")
 def test_a_format_character_in_the_local_part_refuses(char):
-    with pytest.raises(GroupRefused, match=r"(line|span) rule"):
+    with pytest.raises(GroupRefused, match=r"span rule"):
         builder_module._clean(
             "g", "f", f"Ask jdoe{char}x@example.org today.", builder_module._Counter()
         )
@@ -2035,24 +2037,31 @@ SHORT_AND_STRING_ESCAPES = [
     "jdoe\x1bPq\x1b\\@example.org",
     "jdoe\x1b>@example.org",
 ]
-#: Round 9 stored these (no reading shows an address); round 10's line rule
-#: refuses them again: each line has an escape or bidi control and an
-#: address separator.
-LINE_RULE_REFUSES = [
-    "jdoe\x1b[@example.org",
-    "jdoe\x1b(\u00e9@example.org",
-    "jdoe[\u200eat]laptop",
+#: Round 8 refused these by its word rule. Round 9 refuses only what the
+#: redactors read as an address in some reading of the value, and none of
+#: these is one: each is stored as its plain-text equivalent would be.
+NOT_AN_ADDRESS_IN_ANY_READING = [
+    # terminal: "jdoeexample.org"; ignoring controls: "jdoe[@example.org"
+    ("jdoe\x1b[@example.org", "jdoeexample.org"),
+    # both readings: "jdoe(\u00e9@example.org", whose address starts after "("
+    ("jdoe\x1b(\u00e9@example.org", "jdoe\x1b("),
+    # both readings: "jdoe[at]laptop", a host with no dot
+    ("jdoe[\u200eat]laptop", "jdoe[\u200eat]laptop"),
 ]
 
 
-@pytest.mark.parametrize("value", LINE_RULE_REFUSES)
-def test_a_line_with_an_escape_and_a_separator_refuses(tmp_path, sources, value):
+@pytest.mark.parametrize(("value", "stored"), NOT_AN_ADDRESS_IN_ANY_READING)
+def test_a_value_no_reading_shows_as_an_address_is_stored(
+    tmp_path, sources, value, stored
+):
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} today."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
-        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    result = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert result[0]["description"] == f"Logged by {stored} today."
 
 
 @pytest.mark.parametrize("value", SHORT_AND_STRING_ESCAPES)
@@ -2061,7 +2070,7 @@ def test_a_short_or_string_escape_in_an_address_in_json_refuses(tmp_path, source
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} today."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2073,7 +2082,7 @@ def test_a_short_or_string_escape_in_an_address_on_a_text_page_refuses(
         f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
     )
     with pytest.raises(
-        BuildRefused, match=r"Short.txt, line 2: (line|span) rule"
+        BuildRefused, match=r"Short.txt, line 2: span rule"
     ):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
@@ -2090,18 +2099,17 @@ def test_a_hidden_character_in_a_word_without_a_separator_is_kept_or_stripped(
     tmp_path, sources
 ):
     # Not new behaviour (it passes on 6adb358 too): a hidden character away
-    # from any address is kept, and a colour code is stripped. (Since round
-    # 10 the address must be on another line.)
+    # from any address is kept, and a colour code is stripped.
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
     records[0]["description"] = (
-        "See \x1b[1mbold\x1b[0m, price\x1b 5,\nmail jdoe@example.org (at) noon."
+        "See \x1b[1mbold\x1b[0m, price\x1b 5, mail jdoe@example.org (at) noon."
     )
     path.write_text(json.dumps(records))
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
-    assert stored[0]["description"] == "See bold, price\x1b 5,\nmail  (at) noon."
+    assert stored[0]["description"] == "See bold, price\x1b 5, mail  (at) noon."
     assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 2
 
 
@@ -2208,7 +2216,7 @@ def test_a_control_character_still_refuses_next_to_a_normalized_address(
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} now."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2236,21 +2244,21 @@ def test_a_compatibility_character_outside_an_address_is_stored(
     assert result[0]["description"] == stored
 
 
-@pytest.mark.parametrize(
-    "value",
-    ["\x1b]0;jdoe@example.org: ~\x07$ ls", "\x1b]0;jdoe\x7fx@example.org\x07"],
-)
-def test_an_address_in_a_window_title_refuses(value):
-    # Round 9 redacted the first; a line with an escape and an @ now refuses.
+def test_an_address_in_a_window_title_is_redacted():
+    # Read with only hidden characters removed, the title's text is checked
+    # and redacted like any other text. (The ESC ] opener is stripped as a
+    # two-character escape.)
     clean, counter = builder_module._clean, builder_module._Counter
-    with pytest.raises(GroupRefused, match=r"(line|span) rule"):
-        clean("g", "f", value, counter())
+    stored = clean("g", "f", "\x1b]0;jdoe@example.org: ~\x07$ ls", counter())
+    assert stored == "0;: ~\x07$ ls"
+    with pytest.raises(GroupRefused, match="span rule"):
+        clean("g", "f", "\x1b]0;jdoe\x7fx@example.org\x07", counter())
 
 
 @pytest.mark.parametrize("opener", ["\x90", "\x9d", "\x1b]", "\x1bP"])
 def test_unterminated_string_sequences_are_checked_in_linear_time(opener):
     # Round 8 scanned to the end of the text from each opener (quadratic).
-    text = (opener + "ab ") * 40_000 + "\njdoe@example.org"
+    text = (opener + "ab ") * 40_000 + "jdoe@example.org"
     started = time.perf_counter()
     builder_module._hidden_address_spans("g", "f", text)
     assert time.perf_counter() - started < 10
@@ -2258,13 +2266,17 @@ def test_unterminated_string_sequences_are_checked_in_linear_time(opener):
 
 # --- ninth review: what a screen shows differs from the bytes -------------------
 
-NINTH_REVIEW_REFUSED = [
-    "\u202egro.elpmaxe@eodj\u202c",
-    "jdoe(\x08@example.org",
-    "\x1b7    @example.org\x1b8jdoe",
-    "    @example.org\rjdoe",
-    "XXXXXXXXXXXX.org\rjdoe@example",
-    "jdoe&lrm;@example.org",
+NINTH_REVIEW_REFUSED = ["jdoe&lrm;@example.org"]
+#: Display tricks: a screen can show an address that no reading of the bytes
+#: holds (right-to-left override, backspace, cursor save and restore, a lone
+#: carriage return). Adversarial-only known limit: no reading has an
+#: address, so they are stored (ESC 7 and ESC 8 stripped), not refused.
+DISPLAY_TRICKS_STORED = [
+    ("\u202egro.elpmaxe@eodj\u202c", "\u202egro.elpmaxe@eodj\u202c"),
+    ("jdoe(\x08@example.org", "jdoe(\x08@example.org"),
+    ("\x1b7    @example.org\x1b8jdoe", "    @example.orgjdoe"),
+    ("    @example.org\rjdoe", "    @example.org\rjdoe"),
+    ("XXXXXXXXXXXX.org\rjdoe@example", "XXXXXXXXXXXX.org\rjdoe@example"),
 ]
 #: HTML character references a browser shows as an invisible character or a
 #: full-width form, and ideographic full stops: removed whole.
@@ -2285,7 +2297,7 @@ def test_a_ninth_review_display_trick_in_json_refuses(tmp_path, sources, value):
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} now"
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"span rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2294,8 +2306,35 @@ def test_a_ninth_review_display_trick_on_a_text_page_refuses(tmp_path, sources, 
     (sources["twiki-eos"] / "Show.txt").write_bytes(
         f"---+ Page\nAsk {value} now\n".encode("utf-8") + PADDING
     )
-    with pytest.raises(BuildRefused, match=r"Show.txt, line 2: (line|span) rule"):
+    with pytest.raises(BuildRefused, match=r"Show.txt, line 2: span rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize(("value", "stored"), DISPLAY_TRICKS_STORED)
+def test_a_display_trick_in_json_is_stored_as_a_known_limit(
+    tmp_path, sources, value, stored
+):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"Logged by {value} now"
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    result = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert result[0]["description"] == f"Logged by {stored} now"
+
+
+@pytest.mark.parametrize(("value", "stored"), DISPLAY_TRICKS_STORED)
+def test_a_display_trick_on_a_text_page_is_stored_as_a_known_limit(
+    tmp_path, sources, value, stored
+):
+    (sources["twiki-eos"] / "Show.txt").write_bytes(
+        f"---+ Page\nAsk {value} now\n".encode("utf-8") + PADDING
+    )
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Show.txt"].decode("utf-8")
+    assert page.startswith(f"---+ Page\nAsk {stored} now\n")
 
 
 @pytest.mark.parametrize("value", NINTH_REVIEW_REMOVED)
@@ -2348,6 +2387,16 @@ def test_crlf_line_ends_do_not_count_as_a_carriage_return(tmp_path, sources):
     assert page.startswith("---+ Page\r\nMail  now.\r\n")
 
 
+def test_a_cr_cr_lf_line_end_is_stored_and_the_address_redacted(tmp_path, sources):
+    (sources["twiki-eos"] / "Dos.txt").write_bytes(
+        b"---+ Page\r\nMail jdoe@example.org now.\r\r\nnext\n" + PADDING
+    )
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Dos.txt"].decode("utf-8")
+    assert page.startswith("---+ Page\r\nMail  now.\r\r\nnext\n")
+
+
 def test_a_lone_surrogate_in_json_refuses_cleanly(tmp_path, sources):
     path = sources["jira"] / "records.json"
     text = path.read_text()
@@ -2397,7 +2446,8 @@ def test_a_backslash_escaped_address_on_a_text_page_is_removed(
 
 
 def test_a_coloured_line_with_a_bare_hash_number_is_stored(tmp_path, sources):
-    # "#642" is not "&#64;": the line rule's separators need their "&".
+    # "#642" is not "&#64;" (that needs its "&"): no address, so the colour
+    # codes are stripped and the text is stored.
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
     records[0]["description"] = "\x1b[32mfixed\x1b[0m in PR #642, see commat; and #x40"
@@ -2411,12 +2461,12 @@ def test_a_coloured_line_with_a_bare_hash_number_is_stored(tmp_path, sources):
 
 def test_a_refusal_names_the_file_line_and_rule(tmp_path, sources):
     (sources["twiki-eos"] / "Show.txt").write_bytes(
-        b"---+ Page\nfirst line\n    @example.org\rjdoe\n" + PADDING
+        b"---+ Page\nfirst line\nAsk jdoe\x7fx@example.org now\n" + PADDING
     )
     with pytest.raises(BuildRefused) as caught:
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
     message = str(caught.value)
-    assert "Show.txt, line 3: line rule: the line has a carriage return" in message
+    assert "Show.txt, line 3: span rule: an address contains or touches a DEL" in message
     assert "an address is split" not in message
     assert "jdoe" not in message
 
@@ -2428,4 +2478,4 @@ def test_a_json_refusal_names_the_record_and_field(tmp_path, sources):
     path.write_text(json.dumps(records))
     with pytest.raises(BuildRefused) as caught:
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
-    assert "records.json [0].description, line 2: line rule" in str(caught.value)
+    assert "records.json [0].description, line 2: span rule" in str(caught.value)

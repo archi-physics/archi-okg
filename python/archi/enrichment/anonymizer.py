@@ -561,27 +561,6 @@ _OBF_NOSPAM_DOMAIN_END_RE = re.compile(
 )
 
 
-#: Every separator either redactor reads, built from the patterns above: the
-#: whole ``@`` forms of redact_email_addresses (``@``, ``\@``, full-width
-#: and small ``@``, ``%40``, and ``&commat;``, ``&#64;``, ``&#x40;`` with
-#: their ``&``, so a bare ``#64`` in "PR #642" is not one), and the bracketed ``at``
-#: and ``dot``, glued ``_at_`` / ``-at-`` / ``_NOSPAM_AT_`` and ``NOSPAM``
-#: of redact_obfuscated_email_addresses. A match marks text that may hold
-#: an address; it is not itself one.
-ADDRESS_SEPARATOR_RE = re.compile(
-    "|".join(
-        (
-            _SEP_AT_RE.pattern,
-            _OBF_BRACKET_AT,
-            _OBF_BRACKET_DOT,
-            _OBF_GLUED_SEP,
-            "nospam",
-        )
-    ),
-    re.IGNORECASE,
-)
-
-
 def _nospam_token(match: re.Match) -> str:
     rest = re.sub("nospam", "", match.group(0), flags=re.IGNORECASE)
     if _OBF_NOSPAM_DOMAIN_END_RE.search(rest):

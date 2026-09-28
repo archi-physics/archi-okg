@@ -104,26 +104,8 @@ For every group the build:
 
    Each refusal names the file (for JSON, also the record and field, such
    as `records.json [3].description`), the line within the text, and the
-   rule that fired: `line rule`, `span rule`, `path rule`, `surrogate
-   rule` or `stored-text rule`. It does not repeat the address.
-
-   **Line rule.** The value is split into lines at LF, a CRLF counting as
-   one line end. A line refuses the group when it both shows differently
-   from its bytes and may hold an address. It shows differently when it
-   has a carriage return not directly before LF (which returns the cursor
-   and overwrites: `____@example.org<CR>jdoe`), a backspace, `ESC`, any C1
-   control, a bidi control (U+202A to U+202E, U+2066 to U+2069, U+200E,
-   U+200F) or any other hidden character except the five invisible ones
-   named below. It may hold an address when either reading below has a
-   separator either redactor reads: `@` (also `\@`, full-width and
-   small), `%40`, `&commat;`, `&#64;` or `&#x40;` with their `&` (a bare
-   `#642` or `commat;` does not count), a bracketed `at` or `dot` (`[at]`,
-   `(dot)`, `<at>` ...), a glued `_at_`, `-at-` or `_NOSPAM_AT_`, or
-   `NOSPAM` (the list is built from the redactors' own patterns). So a colour code on
-   the same line as an address, `ESC 7 ... ESC 8` (save and restore
-   cursor), `<U+202E>gro.elpmaxe@eodj` and `jdoe(<BS>@example.org` refuse,
-   whatever the address looks like. This rule is also checked on the text
-   with HTML character references decoded (below).
+   rule that fired: `span rule`, `path rule`, `surrogate rule` or
+   `stored-text rule`. It does not repeat the address.
 
    **Match rule.** The check reads the value twice, keeping a map from
    every character read back to the raw value:
@@ -188,13 +170,10 @@ For every group the build:
    file cannot be renamed. The check runs on the raw value and again after
    the colour codes are stripped, since stripping can join text. Afterwards
    every stored string, and the configured `note` (which is checked but
-   not redacted), must pass the line rule and be left unchanged by both
-   redactors in every reading, or the group is refused. Tab, newline,
+   not redacted), must be left unchanged by both redactors in every
+   reading, or the group is refused. Tab, newline, carriage return,
    vertical tab, form feed and the Unicode line and paragraph separators
-   (U+2028, U+2029) are not hidden characters. A carriage return is not a
-   hidden character either, but it is not only a break: a lone one can
-   overwrite what came before it on screen, so it counts for the line
-   rule; a CRLF line end does not.
+   (U+2028, U+2029) are not hidden characters.
 
    Only then are ANSI CSI sequences (`ESC [` + parameters + a final byte)
    and two-character escapes (`ESC` + one byte from `0` to `~`, such as

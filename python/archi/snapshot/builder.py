@@ -54,7 +54,6 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 import yaml
 
 from archi.enrichment.anonymizer import (
-    ADDRESS_SEPARATOR_RE,
     email_address_spans,
     obfuscated_email_address_spans,
     redact_email_addresses,
@@ -726,9 +725,6 @@ _HIDDEN_RE = re.compile(
     + "".join(sorted(_SOFT_HIDDEN))
     + "]"
 )
-#: What makes a line display differently from its bytes: a hard hidden
-#: character, or a carriage return that is not part of a CRLF line end.
-_DISPLAY_RE = re.compile(_HARD_HIDDEN_RE.pattern + r"|\r(?!\n|$)")
 #: HTML character references a browser would decode: numeric, hex and
 #: named (with or without the ``;`` where browsers accept that).
 _ENTITY_RE = re.compile(
@@ -881,52 +877,11 @@ def _readings(base: str) -> list[str]:
     return texts
 
 
-def _refuse_display_tricks(group: str, where: str, text: str) -> None:
-    """Refuse ``text`` when a line that shows differently from its bytes
-    may hold an address.
-
-    ``text`` (and, when it has character references that decode, ``text``
-    decoded) is split into lines at LF, a CRLF counting as one line end. A
-    line that has a hard hidden character (:data:`_HARD_HIDDEN_RE`:
-    backspace, ESC, C1, bidi controls ...) or a carriage return not before
-    LF, and whose canonical reading has a separator either redactor reads
-    (:data:`ADDRESS_SEPARATOR_RE`), refuses the group: the line can show an
-    address its bytes spell differently (``____@example.org<CR>jdoe``,
-    ``<U+202E>gro.elpmaxe@eodj``, ``ESC 7 ... ESC 8``, backspace).
-    """
-    for base, decoded in _bases(text):
-        if not _DISPLAY_RE.search(base):
-            continue
-        start = 0
-        for line in base.split("\n"):
-            trick = _DISPLAY_RE.search(line)
-            if trick:
-                separator = next(
-                    (
-                        found
-                        for reading in _readings(line)
-                        if (found := ADDRESS_SEPARATOR_RE.search(reading))
-                    ),
-                    None,
-                )
-                if separator is not None:
-                    raw = start if decoded is None else decoded.raw_start(start)
-                    raise GroupRefused(
-                        group,
-                        f"{where}, line {_line_number(text, raw)}: line rule: "
-                        f"the line has {_describe(trick.group()[0])} and the "
-                        f"address separator {separator.group()!r}, so it may "
-                        "show an address its bytes do not spell",
-                    )
-            start += len(line) + 1
-
-
 def _line_number(text: str, index: int) -> int:
     return text.count("\n", 0, index) + 1
 
 
 _CONTROL_NAMES = {
-    "\r": "a carriage return not before a line feed",
     "\x08": "a backspace",
     "\x1b": "an ESC",
     "\x7f": "a DEL",
@@ -1094,7 +1049,6 @@ def _hidden_address_spans(group: str, where: str, text: str) -> list[tuple[int, 
     A value that reads as itself (:func:`_reads_as_itself`) returns no
     spans at once: the normal redaction sees exactly what the readings see.
     """
-    _refuse_display_tricks(group, where, text)
     if _reads_as_itself(text):
         return []
     spans: list[tuple[int, int]] = []
@@ -1256,7 +1210,6 @@ def _check_string(group: str, where: str, value: str) -> None:
         raise GroupRefused(
             group, f"{where}: a spelled-out address survived redaction"
         )
-    _refuse_display_tricks(group, where, value)
     if _reads_as_itself(value):
         return
     if _address_in_a_reading(value):
