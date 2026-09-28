@@ -5,6 +5,7 @@ every skill file is nonempty, contains no instance-specific site markers
 left over from the okg-deployments CMS deployment (main@f33a9c4), and the
 shipped ``skill-triggers.yaml`` only references skills that exist.
 """
+import re
 from pathlib import Path
 
 import yaml
@@ -101,3 +102,43 @@ def test_skill_triggers_has_no_site_markers():
     text = (SKILLS_DIR / "skill-triggers.yaml").read_text(encoding="utf-8")
     for marker in SITE_MARKERS:
         assert marker not in text, f"site marker {marker!r} in skill-triggers.yaml"
+
+
+# Skills that plan CMS retrieval must teach the one-call text read of a named
+# page, document, or ticket: a page node's `inspect(kind="node")` returns only
+# metadata, so an agent that stops there can wrongly report the answer absent.
+TEXT_READ_SKILLS = [
+    "agentic_benchmark",
+    "okg_retrieval_planner",
+    "okg_traversal",
+    "source_document_exploration",
+]
+
+
+def _normalized(text):
+    """Collapse whitespace and drop double quotes so both call styles match."""
+    return " ".join(text.replace('"', "").split())
+
+
+def test_retrieval_skills_teach_named_record_text_read():
+    missing = []
+    for name in TEXT_READ_SKILLS:
+        text = _normalized((SKILLS_DIR / f"{name}.md").read_text(encoding="utf-8"))
+        for needle in (
+            "inspect(target={kind: text, node_id:",
+            "names a specific page, document, or ticket",
+            "before answering or concluding",
+            "continuation_token",
+            "`complete` is false",
+            # Older okg refuses kind "text"; the skill must name the okg
+            # change it needs and the SQL fallback.
+            "mitdbg/okg#2697",
+            "Parent To Ordered Chunks",
+        ):
+            if needle not in text:
+                missing.append(f"{name}.md lacks {needle!r}")
+        # The `kind: node` inspect must be described as metadata only, so the
+        # agent does not treat it as having read the page.
+        if not re.search(r"kind: node.{0,160}?metadata", text):
+            missing.append(f"{name}.md lacks the kind-node-is-metadata-only clause")
+    assert not missing, "\n".join(missing)

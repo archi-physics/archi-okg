@@ -15,6 +15,16 @@ finds a promising chunk but not enough surrounding context.
 - Do not repeat an identical failed query. Change the terms, subtype filter,
   method, source metadata path, or expansion direction.
 - Expand promising compact hits into broader source context before synthesis.
+- When the question names a specific page, document, or ticket, or search
+  surfaces one as the likely source, read its text with
+  `inspect(target={"kind": "text", "node_id": "<page node id>"})` before
+  answering or concluding the answer is absent. `inspect` with
+  `kind: "node"` gives its metadata (title, URL) only. For a long page,
+  repeat the call with the returned `continuation_token` in the target while
+  `complete` is false. Prefer this read over the ordered-chunk SQL below.
+  It needs okg with mitdbg/okg#2697 (merged 2026-09-28); an older okg refuses
+  it ("inspect target kind must be one of ..."). Then fall back to Parent To
+  Ordered Chunks.
 - Give the best supported CMS operator answer from retrieved evidence, with
   explicit missing fields when the pinned generation lacks the current source.
 
@@ -43,6 +53,9 @@ LIMIT 5
 ```
 
 ### Parent To Ordered Chunks
+
+Fallback for okg without the text read (see Exploration Posture). `LIMIT 12`
+can stop partway through a long page.
 
 ```sql
 SELECT e.src AS parent_id,
@@ -119,7 +132,8 @@ LIMIT 20
 
 ## Answer Discipline
 
-- For runbooks/procedures, retrieve enough surrounding chunks to identify
+- For runbooks/procedures, read the page's text (or, on older okg, enough
+  ordered chunks) to identify
   prerequisites, where to run commands, ordered steps, validation checks,
   warnings, and source date/status.
 - For current-source questions, compare documentation date/status against newer
