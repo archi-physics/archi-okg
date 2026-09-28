@@ -292,6 +292,10 @@ def _domain_end(text: str, start: int) -> int | None:
     return None
 
 
+# Characters that can start another separator right after a domain.
+_GIT_UNSAFE_NEXT = frozenset("@＠﹫%&")
+
+
 def _is_git_account(text: str, sep: int, local: int) -> bool:
     """Whether ``text[local:sep]`` ends in the literal ``git`` account of ``git@``.
 
@@ -347,8 +351,13 @@ def redact_email_addresses(text: str) -> str:
         if end is None or local == sep:
             bound = domain_start
             continue
-        if _is_git_account(text, sep, local):
-            # Kept in place; no later local part may start inside it.
+        if _is_git_account(text, sep, local) and (
+            end == len(text) or text[end] not in _GIT_UNSAFE_NEXT
+        ):
+            # Kept in place; no later local part may start inside it. A
+            # domain run that ends right at another separator
+            # (git@host.jdoe@cern.ch) may have absorbed a local part, so it
+            # is not kept (fail closed).
             bound = end
             continue
         pieces.append(text[kept:local])

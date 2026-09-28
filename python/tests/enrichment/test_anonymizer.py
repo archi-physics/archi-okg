@@ -451,6 +451,9 @@ def test_redact_email_addresses_keeps_the_git_account(text):
             "jdoe@cern.ch pushed to git@gitlab.cern.ch:g/y.git",
             " pushed to git@gitlab.cern.ch:g/y.git",
         ),
+        # A git@ domain run that ends at another separator may hold a
+        # local part, so it is not kept (the #5 result).
+        ("git@github.com.jdoe@cern.ch", "@cern.ch"),
         # Only the literal "git" account with a literal "@" is kept.
         ("mail john.git@cern.ch now", "mail  now"),
         ("mail my-git@cern.ch now", "mail  now"),
