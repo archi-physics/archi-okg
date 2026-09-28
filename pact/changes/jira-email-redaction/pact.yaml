@@ -1,0 +1,78 @@
+pact_version: 5
+id: jira-email-redaction
+title: Restore email-address removal in the JIRA source
+tier: 1
+why: 'The comp-ops JIRA source moves from okg-deployments (cms/cms_sources/jira.py) to archi-okg.
+  The cms source has removed email addresses from every string it reads since okg-deployments
+  commit b25e36f06c: its text helper _pg_text calls redact_email_addresses. The archi port
+  kept the NUL-to-space half of _pg_text and dropped the redaction, so addresses in summaries,
+  descriptions, comments, names, labels and components reached jira_issue and person attrs
+  and document_chunk text. archi''s Anonymizer exists but no source calls it.
+
+
+  This is a parity fix. It adds redact_email_addresses to archi.enrichment.anonymizer, with
+  the Anonymizer''s own address pattern (identical to the cms one) and the cms helper''s narrow
+  decoding (&amp;, &commat;, &#64;, &#x40;), and calls it from _pg_text. It does not call
+  Anonymizer.anonymize, which also deletes greeting and sign-off lines, [~user] mentions and
+  names -- the cms source never did that.
+
+
+  CARRIED SIDE EFFECT, same as cms: a person whose display name is only an address gets no
+  person node or role edge; a display name containing an address changes that person''s node
+  id; chunks whose text held an address get new chunk ids. A graph built from this source
+  re-keys those nodes on its next ingest.'
+affected_code:
+- python/archi/sources/jira.py
+- python/archi/enrichment/anonymizer.py
+- python/tests/sources/test_jira.py
+- python/tests/enrichment/test_anonymizer.py
+requirements:
+- id: req.jira-email-redaction.main
+  statement: 'Every text field the JIRA source emits has email addresses removed, as in the
+    okg-deployments cms source.
+
+
+    Covered: every string read from the records cache (key, summary, description, environment,
+    status, priority, resolution, issue type, project, dates, assignee and reporter names,
+    labels, components, fix versions, comment authors and bodies), in both the flat and the
+    JIRA REST record shapes, and so every jira_issue and person attr and every document_chunk
+    text. Address forms: plain, +tag, quoted local part, HTML-encoded and double-encoded @,
+    and URL %40. The address is removed with no placeholder; the surrounding text is kept,
+    and text without an address is returned unchanged.
+
+
+    Acceptance:
+
+    - acc.jira-email-redaction.fields: A cached issue with a distinct address in each field
+    emits no fact whose attrs or record id contain any of them; the same test fails on main
+    with all twelve leaked. [evidence: executed_test]
+
+    - acc.jira-email-redaction.forms: redact_email_addresses removes each address form and
+    leaves address-free text byte-identical. [evidence: executed_test]'
+tasks:
+- id: task.jira-email-redaction.deliver
+  requirement: req.jira-email-redaction.main
+  verification: 'Add redact_email_addresses to archi/enrichment/anonymizer.py, call it from
+    _pg_text in archi/sources/jira.py, and cover each field and each address form.
+
+
+    Proof: the new tests fail against main and pass with the change, and the full archi suite
+    passes.
+
+
+    Test plan:
+
+    - python/tests [evidence: pytest]'
+evidence:
+- kind: executed_test
+  requirement: req.jira-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: a2bfeb6fa2cd0ab8f8291bcb1853ef52eaa2f03a
+  at: '2026-09-28T02:15:07+00:00'
+  note: '446 passed at a2bfeb6 (okg 5b2fd076c, Python 3.12), including 12 new tests: 2 JIRA
+    emission tests (one address per field, flat and REST shapes) and 10 redact_email_addresses
+    form tests. The same new tests against main''s jira.py and anonymizer.py (7b5b911): both
+    JIRA tests fail with all 12 addresses leaked, and the anonymizer tests fail at import
+    (helper absent).'
+decisions: []
