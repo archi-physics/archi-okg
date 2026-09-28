@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import fnmatch
 import hashlib
 import io
 import json
@@ -41,13 +42,16 @@ import socket
 import subprocess
 import tarfile
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
 import yaml
 
-from archi.enrichment.anonymizer import redact_email_addresses
+from archi.enrichment.anonymizer import (
+    redact_email_addresses,
+    redact_email_addresses_with_count,
+)
 from archi.snapshot.groups import GROUPS, GroupSpec, JsonFile, Schema
 
 LOCK_NAME = "snapshot.lock.yaml"
@@ -206,62 +210,97 @@ class PreparedGroup:
     collected: str
     files: dict[str, bytes]
     record_count: int
+    addresses_removed: int
     dropped_fields: tuple[str, ...]
     kept_fields: tuple[str, ...]
-    replaced_decoding: int = 0
-    notes: list[str] = field(default_factory=list)
+    deep_dropped_keys: tuple[str, ...] = ()
 
 
 def prepare_group(group: GroupConfig) -> PreparedGroup:
-    """Validate, redact, prune and reader-check one group, or raise GroupRefused."""
+    """Validate, redact, prune and reader-check one group, or raise GroupRefused.
+
+    An unreadable file (permission denied, an I/O error) or JSON nested too
+    deeply to check refuses the group like any other defect, instead of
+    ending the build with a traceback.
+    """
+    try:
+        return _prepare_group(group)
+    except GroupRefused:
+        raise
+    except OSError as exc:
+        raise GroupRefused(
+            group.name, f"cannot read its cache: {type(exc).__name__}: {exc}"
+        ) from exc
+    except RecursionError as exc:
+        raise GroupRefused(
+            group.name, "a JSON value is nested too deeply to check"
+        ) from exc
+
+
+class _Counter:
+    def __init__(self) -> None:
+        self.removed = 0
+
+    def redact(self, text: str) -> str:
+        clean, removed = redact_email_addresses_with_count(text)
+        self.removed += removed
+        return clean
+
+
+def _prepare_group(group: GroupConfig) -> PreparedGroup:
     spec = GROUPS[group.name]
-    source = group.path
-    if not source.is_dir():
-        raise GroupRefused(group.name, f"source directory {source} does not exist")
-    drop = set(spec.default_drop_fields) | set(group.drop_fields)
+    if not group.path.is_dir():
+        raise GroupRefused(group.name, f"source directory {group.path} does not exist")
+    # The configured directory may itself be a link; nothing inside it may be.
+    source = group.path.resolve(strict=True)
+    deep = set(spec.deep_drop_keys)
+    drop = set(spec.default_drop_fields) | set(group.drop_fields) | deep
     keep = (set(spec.default_keep_fields) | set(group.keep_fields)) - drop
     if (group.drop_fields or group.keep_fields) and spec.record_file is None:
         raise GroupRefused(
             group.name, "drop_fields/keep_fields need a JSON records file"
         )
 
+    counter = _Counter()
     redacted: dict[str, bytes] = {}
     final: dict[str, bytes] = {}
-    replaced = 0
     for json_file in spec.json_files:
         path = source / json_file.name
-        if not path.is_file():
+        if not (path.exists() or path.is_symlink()):
             if json_file.required:
                 raise GroupRefused(group.name, f"{json_file.name} is missing in {source}")
             continue
-        payload = _load_json(group.name, path)
+        payload = _load_json(group.name, _safe_file(group.name, source, json_file.name))
         _check_shape(group.name, json_file, payload)
-        clean = _redact_json(group.name, json_file.name, payload)
+        clean = _redact_json(group.name, json_file.name, payload, counter)
         # Again after redaction: a record whose identity was only an address
         # is one the reader would now skip or drop.
         _check_shape(group.name, json_file, clean)
         archive_path = f"{spec.archive_dir}/{json_file.name}"
         redacted[archive_path] = _dump_json(clean)
         record_level = json_file is spec.record_file
-        final[archive_path] = _dump_json(
-            _prune_file(
-                json_file,
-                clean,
-                drop=drop if record_level else set(),
-                keep=keep if record_level else set(),
-            )
+        pruned = _prune_file(
+            json_file,
+            clean,
+            drop=drop if record_level else set(),
+            keep=keep if record_level else set(),
         )
+        final[archive_path] = _dump_json(_drop_keys_deep(pruned, deep))
     if spec.text is not None:
         for rel, path in _text_files(spec, source):
-            text, lossy = _read_text(group.name, rel, path, spec.text.errors)
-            replaced += lossy
-            data = redact_email_addresses(text).encode("utf-8")
+            text = _read_text(group.name, rel, path)
+            data = counter.redact(text).encode("utf-8")
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
             final[archive_path] = data
     if not final:
         raise GroupRefused(group.name, f"no cache files found in {source}")
 
+    for archive_path in final:
+        if redact_email_addresses(archive_path) != archive_path:
+            raise GroupRefused(
+                group.name, f"a file path contains an email address: {archive_path}"
+            )
     _check_no_addresses(group.name, final)
     record_count = _reader_check(spec, redacted, final)
     return PreparedGroup(
@@ -269,10 +308,60 @@ def prepare_group(group: GroupConfig) -> PreparedGroup:
         collected=group.collected,
         files=final,
         record_count=record_count,
-        dropped_fields=tuple(sorted(drop)),
+        addresses_removed=counter.removed,
+        dropped_fields=tuple(sorted(drop - deep)),
         kept_fields=tuple(sorted(keep)),
-        replaced_decoding=replaced,
+        deep_dropped_keys=tuple(sorted(deep)),
     )
+
+
+def _safe_file(group: str, root: Path, rel: str) -> Path:
+    """``root/rel`` if it is a regular file reached without links or dot names."""
+    parts = PurePosixPath(rel).parts
+    if any(part.startswith(".") for part in parts):
+        raise GroupRefused(group, f"{rel}: hidden path (a name starts with '.')")
+    current = root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise GroupRefused(group, f"{rel}: symbolic link")
+    resolved = current.resolve(strict=True)
+    if not resolved.is_relative_to(root):
+        raise GroupRefused(group, f"{rel}: resolves outside {root}")
+    if not resolved.is_file():
+        raise GroupRefused(group, f"{rel}: not a regular file")
+    return resolved
+
+
+def _check_tree(group: str, root: Path) -> list[str]:
+    """Every file below ``root``; refuses on any link or dot-named entry."""
+
+    def fail(exc: OSError) -> None:
+        raise exc
+
+    files: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=fail):
+        for name in (*dirnames, *filenames):
+            full = Path(dirpath) / name
+            rel = full.relative_to(root).as_posix()
+            if name.startswith("."):
+                raise GroupRefused(group, f"{rel}: hidden path (a name starts with '.')")
+            if full.is_symlink():
+                raise GroupRefused(group, f"{rel}: symbolic link")
+        files.extend(
+            (Path(dirpath) / name).relative_to(root).as_posix() for name in filenames
+        )
+    return files
+
+
+def _drop_keys_deep(value: Any, keys: set[str]) -> Any:
+    if not keys:
+        return value
+    if isinstance(value, dict):
+        return {k: _drop_keys_deep(v, keys) for k, v in value.items() if k not in keys}
+    if isinstance(value, list):
+        return [_drop_keys_deep(item, keys) for item in value]
+    return value
 
 
 def _load_json(group: str, path: Path) -> Any:
@@ -311,22 +400,22 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
             raise GroupRefused(group, f"{spec.name} {where} is malformed: {reason}")
 
 
-def _redact_json(group: str, file_name: str, value: Any) -> Any:
+def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
     if isinstance(value, str):
-        return redact_email_addresses(value)
+        return counter.redact(value)
     if isinstance(value, list):
-        return [_redact_json(group, file_name, item) for item in value]
+        return [_redact_json(group, file_name, item, counter) for item in value]
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            clean_key = redact_email_addresses(key)
+            clean_key = counter.redact(key)
             if clean_key in out:
                 raise GroupRefused(
                     group,
                     f"{file_name}: removing addresses makes two keys equal "
                     f"({clean_key!r})",
                 )
-            out[clean_key] = _redact_json(group, file_name, item)
+            out[clean_key] = _redact_json(group, file_name, item, counter)
         return out
     return value
 
@@ -372,26 +461,29 @@ def _dump_json(payload: Any) -> bytes:
 def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
     assert spec.text is not None
     if spec.text.recursive:
-        paths = [p for p in source.rglob(spec.text.pattern) if p.is_file()]
+        names = [
+            rel
+            for rel in _check_tree(spec.name, source)
+            if fnmatch.fnmatchcase(PurePosixPath(rel).name, spec.text.pattern)
+        ]
     else:
         candidate = source / spec.text.pattern
-        if not candidate.is_file():
+        if not (candidate.exists() or candidate.is_symlink()):
             raise GroupRefused(spec.name, f"{spec.text.pattern} is missing in {source}")
-        paths = [candidate]
-    return sorted(
-        ((p.relative_to(source).as_posix(), p) for p in paths), key=lambda t: t[0]
-    )
+        names = [spec.text.pattern]
+    return [(rel, _safe_file(spec.name, source, rel)) for rel in sorted(names)]
 
 
-def _read_text(group: str, rel: str, path: Path, errors: str) -> tuple[str, int]:
+def _read_text(group: str, rel: str, path: Path) -> str:
+    """The file as UTF-8. Anything else could hide an address from the redactor
+    (UTF-16 puts a NUL between the letters), so it refuses the group."""
     data = path.read_bytes()
+    if b"\0" in data:
+        raise GroupRefused(group, f"{rel} contains NUL bytes (not UTF-8 text)")
     try:
-        return data.decode("utf-8"), 0
+        return data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        if errors != "replace":
-            raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
-        # The reader decodes with errors="replace"; store what it would read.
-        return data.decode("utf-8", errors="replace"), 1
+        raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
 
 
 def _strings(value: Any) -> Iterator[str]:
@@ -626,13 +718,14 @@ def build(
                 "bytes": archive.stat().st_size,
                 "file_count": len(group.files),
                 "record_count": group.record_count,
+                "addresses_removed": group.addresses_removed,
                 "contents_sha256": contents_digest(group.files),
                 "archive_dir": GROUPS[group.name].archive_dir,
                 "dropped_fields": list(group.dropped_fields),
                 "kept_extra_fields": list(group.kept_fields),
             }
-            if group.replaced_decoding:
-                row["files_decoded_with_replacement"] = group.replaced_decoding
+            if group.deep_dropped_keys:
+                row["dropped_keys_at_any_depth"] = list(group.deep_dropped_keys)
             groups_lock[group.name] = row
         lock = {
             "lock_version": LOCK_VERSION,

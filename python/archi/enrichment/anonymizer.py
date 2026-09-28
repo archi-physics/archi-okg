@@ -307,6 +307,11 @@ def redact_email_addresses(text: str) -> str:
     that are address-shaped but not mail addresses, such as
     ``image@2x.png`` or ``git@github.com``, are removed too (fail closed).
     """
+    return redact_email_addresses_with_count(text)[0]
+
+
+def redact_email_addresses_with_count(text: str) -> tuple[str, int]:
+    """:func:`redact_email_addresses`, plus how many addresses it removed."""
     pieces: list[str] = []
     kept = 0  # text[kept:] is not yet copied to pieces
     bound = 0  # no local part may start before this
@@ -325,9 +330,10 @@ def redact_email_addresses(text: str) -> str:
         pieces.append(text[kept:local])
         kept = bound = end
     if not pieces:
-        return text
+        return text, 0
+    removed = len(pieces)
     pieces.append(text[kept:])
-    return "".join(pieces)
+    return "".join(pieces), removed
 
 # Text-level HTML character references decoded before redaction. The
 # numeric-reference decoder below deliberately keeps &lt;/&gt; (and any

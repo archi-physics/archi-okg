@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -454,7 +455,7 @@ def test_wmstats_requestor_dn_never_appears_and_requestor_is_kept(built, sources
     record = json.loads(read_archive(out / "wmstats.tar.zst")["data/wmstats-workflows/records.json"])[0]
     assert record["Requestor"] == "pdmvserv"
     assert "RequestTransition" not in record
-    assert lock["groups"]["wmstats"]["dropped_fields"] == ["RequestorDN"]
+    assert lock["groups"]["wmstats"]["dropped_keys_at_any_depth"] == ["DN", "RequestorDN"]
     assert lock["groups"]["wmstats"]["kept_extra_fields"] == ["Requestor"]
 
 
@@ -475,7 +476,7 @@ def test_configured_drop_of_an_unread_field(tmp_path, sources):
     lock = build(load_config(config), out)
     record = json.loads(read_archive(out / "wmstats.tar.zst")["data/wmstats-workflows/records.json"])[0]
     assert "Requestor" not in record
-    assert lock["groups"]["wmstats"]["dropped_fields"] == ["Requestor", "RequestorDN"]
+    assert lock["groups"]["wmstats"]["dropped_fields"] == ["Requestor"]
 
 
 def test_configured_drop_of_a_field_the_reader_reads_is_refused(tmp_path, sources):
@@ -604,13 +605,162 @@ def test_a_missing_required_file_refuses_the_group(tmp_path, sources):
         build(load_config(write_config(tmp_path, sources, only=["cric"])), tmp_path / "out")
 
 
-def test_non_utf8_twiki_page_is_stored_as_the_reader_decodes_it(tmp_path, sources):
-    (sources["twiki-eos"] / "Latin.txt").write_bytes(b"---+ Caf\xe9 page\nText.\n")
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"---+ Caf\xe9 page\nText.\n",  # Latin-1
+        "jdoe@cern.ch wrote this".encode("utf-16-le"),  # NUL between letters
+        b"---+ Page\nText\x00with a NUL.\n",
+    ],
+    ids=["latin1", "utf16", "nul"],
+)
+def test_text_that_is_not_clean_utf8_refuses_the_group(tmp_path, sources, content):
+    (sources["twiki-eos"] / "Odd.txt").write_bytes(content)
+    with pytest.raises(BuildRefused) as info:
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+    reason = info.value.refusals[0].reason
+    assert reason.startswith("Odd.txt ")
+    assert "NUL" in reason or "not UTF-8" in reason
+
+
+def test_wmstats_dn_is_removed_at_any_depth_even_when_its_field_is_kept(tmp_path, sources):
+    config = write_config(
+        tmp_path,
+        sources,
+        only=["wmstats"],
+        extra={"wmstats": {"keep_fields": ["RequestTransition", "DN", "RequestorDN"]}},
+    )
     out = tmp_path / "out"
-    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
-    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Latin.txt"]
-    assert page == "---+ Caf� page\nText.\n".encode("utf-8")
-    assert lock["groups"]["twiki-eos"]["files_decoded_with_replacement"] == 1
+    build(load_config(config), out)
+    record = json.loads(
+        read_archive(out / "wmstats.tar.zst")["data/wmstats-workflows/records.json"]
+    )[0]
+    assert record["RequestTransition"] == [{"Status": "new"}]
+    assert "RequestorDN" not in record
+    assert DN.encode() not in _all_bytes(out, "wmstats")
+
+
+# --- what the builder will not read ---------------------------------------------
+
+
+def test_a_symlinked_text_file_refuses_the_group(tmp_path, sources):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret page\n")
+    (sources["twiki-eos"] / "link.txt").symlink_to(outside)
+    with pytest.raises(BuildRefused, match="link.txt: symbolic link"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_a_symlinked_directory_refuses_the_group(tmp_path, sources):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "Page.txt").write_text("page\n")
+    (sources["twiki-eos"] / "Linked").symlink_to(other, target_is_directory=True)
+    with pytest.raises(BuildRefused, match="Linked: symbolic link"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_a_symlink_that_is_not_text_still_refuses_the_group(tmp_path, sources):
+    (sources["twiki-eos"] / "image.png").symlink_to(tmp_path / "missing.png")
+    with pytest.raises(BuildRefused, match="image.png: symbolic link"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "rel", [".cookies/hypernews.txt", ".Hidden.txt", "Sub/.git/HEAD"]
+)
+def test_a_dot_path_refuses_the_group(tmp_path, sources, rel):
+    path = sources["twiki-eos"] / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Netscape HTTP Cookie File\n")
+    with pytest.raises(BuildRefused, match="hidden path"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_a_symlinked_json_file_refuses_the_group(tmp_path, sources):
+    real = tmp_path / "real-records.json"
+    (sources["dqm"] / "records.json").rename(real)
+    (sources["dqm"] / "records.json").symlink_to(real)
+    with pytest.raises(BuildRefused, match="records.json: symbolic link"):
+        build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+
+
+def test_a_dangling_json_symlink_is_refused_not_called_missing(tmp_path, sources):
+    (sources["jira"] / "meta.json").unlink()
+    (sources["jira"] / "meta.json").symlink_to(tmp_path / "nowhere.json")
+    with pytest.raises(BuildRefused, match="meta.json: symbolic link"):
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+def test_a_symlinked_single_text_file_refuses_the_group(tmp_path, sources):
+    real = tmp_path / "releases.map"
+    (sources["cmssw-releases"] / "releases.map").rename(real)
+    (sources["cmssw-releases"] / "releases.map").symlink_to(real)
+    with pytest.raises(BuildRefused, match="releases.map: symbolic link"):
+        build(
+            load_config(write_config(tmp_path, sources, only=["cmssw-releases"])),
+            tmp_path / "out",
+        )
+
+
+def test_the_configured_directory_itself_may_be_a_link(tmp_path, sources):
+    alias = tmp_path / "dqm-alias"
+    alias.symlink_to(sources["dqm"], target_is_directory=True)
+    config = tmp_path / "c.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"snapshot": "s", "groups": {"dqm": {"path": str(alias), "collected": "2026-06-12"}}}
+        )
+    )
+    build(load_config(config), tmp_path / "out")
+
+
+def test_an_address_in_a_file_name_refuses_the_group(tmp_path, sources):
+    (sources["twiki-eos"] / "jdoe@cern.ch.txt").write_text("---+ Page\nText.\n")
+    with pytest.raises(BuildRefused, match="a file path contains an email address"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_an_unreadable_file_is_a_named_refusal_and_other_groups_are_reported(
+    tmp_path, sources, capsys
+):
+    records = sources["dqm"] / "records.json"
+    records.chmod(0)
+    try:
+        if os.access(records, os.R_OK):
+            pytest.skip("running with privileges that ignore file modes")
+        _write_json(sources["indico"] / "records.json", [{"title": "no id"}])
+        config = write_config(tmp_path, sources, only=["dqm", "indico", "jira"])
+        code = cli_main(["build", "--config", str(config), "--out", str(tmp_path / "o")])
+    finally:
+        records.chmod(0o644)
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "2 group(s) refused" in err
+    assert "group 'dqm' refused: cannot read its cache: PermissionError" in err
+    assert "group 'indico' refused" in err
+    assert "Traceback" not in err
+
+
+def test_json_nested_too_deeply_is_a_named_refusal(tmp_path, sources):
+    depth = 100_000
+    (sources["dqm"] / "records.json").write_text("[" * depth + "]" * depth)
+    with pytest.raises(BuildRefused, match="nested too deeply"):
+        build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
+
+
+def test_lock_counts_the_addresses_removed(built):
+    _, lock = built
+    counts = {name: row["addresses_removed"] for name, row in lock["groups"].items()}
+    # jira: 2 planted + 1 emailAddress field; indico: chair email + 3 texts;
+    # docs: body + last_editor_email; cric: facility name + contact_email.
+    assert counts["jira"] == 3
+    assert counts["indico"] == 4
+    assert counts["gitlab-docs"] == counts["docsite"] == 2
+    assert counts["cric"] == 2
+    assert counts["twiki-eos"] == 1
+    assert counts["cmssw-releases"] == 0
+    assert all(isinstance(v, int) for v in counts.values())
 
 
 # --- determinism and verification ---------------------------------------------
@@ -740,3 +890,20 @@ def test_cli_build_refusal_exits_2_and_names_the_group(tmp_path, sources, capsys
     assert cli_main(["build", "--config", str(config), "--out", str(tmp_path / "o")]) == 2
     err = capsys.readouterr().err
     assert "group 'dqm' refused" in err and "no snapshot written" in err
+
+
+def test_the_counting_redactor_matches_the_plain_one():
+    from archi.enrichment.anonymizer import (
+        redact_email_addresses,
+        redact_email_addresses_with_count,
+    )
+
+    for text, count in (
+        ("no address here, AT&amp;T", 0),
+        ("mail a@cern.ch or b@fnal.gov", 2),
+        ("|bob@cern.ch|alice@fnal.gov|", 2),
+        ("numpy@1.26.4 stays", 0),
+    ):
+        clean, removed = redact_email_addresses_with_count(text)
+        assert clean == redact_email_addresses(text)
+        assert removed == count

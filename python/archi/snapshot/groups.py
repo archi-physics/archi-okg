@@ -47,13 +47,14 @@ class JsonFile:
 
 @dataclass(frozen=True)
 class TextFiles:
-    """Plain-text cache files: one exact name, or every match under the dir."""
+    """Plain-text cache files: one exact name, or every match under the dir.
+
+    Every file must be UTF-8 without NUL bytes; anything else could hide an
+    address from the redactor, so it refuses the group.
+    """
 
     pattern: str
     recursive: bool = False
-    #: ``strict`` refuses a file that is not UTF-8 (the reader would fail);
-    #: ``replace`` decodes it as the reader does (``errors="replace"``).
-    errors: str = "strict"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,9 @@ class GroupSpec:
     #: on top of the schema and of the build config.
     default_drop_fields: frozenset[str] = field(default_factory=frozenset)
     default_keep_fields: frozenset[str] = field(default_factory=frozenset)
+    #: Keys removed at every depth of every JSON file, whatever the schema
+    #: and the config's keep_fields say.
+    deep_drop_keys: frozenset[str] = field(default_factory=frozenset)
     #: Files another group owns that this reader refuses to run without.
     #: Staged (empty) for the validation run only, never archived: the other
     #: group's own archive carries the real ones.
@@ -517,7 +521,7 @@ GROUPS: dict[str, GroupSpec] = {
             "twiki-eos",
             "data/twiki-eos",
             _twiki,
-            text=TextFiles("*.txt", recursive=True, errors="replace"),
+            text=TextFiles("*.txt", recursive=True),
         ),
         GroupSpec(
             "conddb-global-tags",
@@ -553,8 +557,10 @@ GROUPS: dict[str, GroupSpec] = {
                 ),
             ),
             # Jason, 2026-09-28: drop the requestor's certificate DN, keep the
-            # requestor's user name. The reader reads neither field.
-            default_drop_fields=frozenset({"RequestorDN"}),
+            # requestor's user name. The reader reads neither field. A DN
+            # also sits in each RequestTransition entry, so every DN key goes,
+            # at any depth, even if a config keeps the field that holds it.
+            deep_drop_keys=frozenset({"RequestorDN", "DN"}),
             default_keep_fields=frozenset({"Requestor"}),
         ),
         GroupSpec(

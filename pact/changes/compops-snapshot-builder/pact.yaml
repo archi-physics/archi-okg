@@ -38,6 +38,8 @@ affected_code:
 - python/archi/snapshot/builder.py
 - python/archi/snapshot/groups.py
 - python/archi/auth/cookies.py
+- python/archi/enrichment/anonymizer.py
+- .gitignore
 - docs/cache-snapshot.md
 - docs/connector-caches.md
 - docs/okg-alignment.md
@@ -75,13 +77,19 @@ requirements:
     directory and a required collection date (YYYY-MM-DD or a YYYY-MM-DD..YYYY-MM-DD range),
     so one snapshot can mix collection dates. For each group it refuses, with an error naming
     the group, file and record, any missing file, invalid JSON, wrong shape or record the
-    reader would skip or drop; removes every email address from every string with redact_email_addresses;
-    drops every field the reader does not read plus the configured drop_fields (WMStats always
-    drops RequestorDN and keeps Requestor); and runs the group''s archi reader, which must
+    reader would skip or drop; any symbolic link, dot-named path or path resolving outside
+    the group directory; any text file that is not UTF-8 or holds a NUL byte; any file path
+    containing an address; and any unreadable file or too-deeply nested JSON (a named refusal,
+    not a traceback). It removes every email address from every string with redact_email_addresses
+    and records the count removed; drops every field the reader does not read plus the configured
+    drop_fields (WMStats keeps Requestor and removes every RequestorDN and DN key at any depth,
+    which no keep_fields entry can undo); and runs the group''s archi reader, which must
     report health ok, a completed scope, and the same facts as from the unpruned cache. If
     any group is refused nothing is written. Otherwise it writes one deterministic tar.zst
     per group and snapshot.lock.yaml with each group''s collection date, SHA-256, size, file
-    count, record count and contents digest. python -m archi.snapshot verify checks archives
+    count, record count, addresses removed and contents digest. docs/cache-snapshot.md
+    states that snapshots are private okg-deployments assets never committed to or published
+    from this public repository, and .gitignore ignores them. python -m archi.snapshot verify checks archives
     against a lock.
 
 
@@ -103,7 +111,12 @@ requirements:
     byte. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.requestor-dn: the WMStats DN never appears in the output,
-    even when a config asks to keep it; Requestor is kept. [evidence: executed_test]'
+    even when a config asks to keep it or the field that holds it; Requestor is kept. [evidence:
+    executed_test]
+
+    - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
+    Latin-1, UTF-16 or NUL-bearing text, an address in a file name, an unreadable file and
+    deeply nested JSON each refuse the group by name. [evidence: executed_test]'
 tasks:
 - id: task.compops-snapshot-builder.downloaders
   requirement: req.compops-snapshot-builder.downloaders
