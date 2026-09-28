@@ -102,6 +102,11 @@ For every group the build:
    with an unpaired UTF-16 surrogate (which JSON can carry and UTF-8
    cannot store) refuses the group.
 
+   Each refusal names the file (for JSON, also the record and field, such
+   as `records.json [3].description`), the line within the text, and the
+   rule that fired: `line rule`, `span rule`, `path rule`, `surrogate
+   rule` or `stored-text rule`. It does not repeat the address.
+
    **Line rule.** The value is split into lines at LF, a CRLF counting as
    one line end. A line refuses the group when it both shows differently
    from its bytes and may hold an address. It shows differently when it
@@ -110,10 +115,11 @@ For every group the build:
    control, a bidi control (U+202A to U+202E, U+2066 to U+2069, U+200E,
    U+200F) or any other hidden character except the five invisible ones
    named below. It may hold an address when either reading below has a
-   separator either redactor reads: `@` (also full-width and small),
-   `%40`, `&commat;`, `&#64;`, a bracketed `at` or `dot` (`[at]`, `(dot)`,
-   `<at>` ...), a glued `_at_`, `-at-` or `_NOSPAM_AT_`, or `NOSPAM` (the
-   list is built from the redactors' own patterns). So a colour code on
+   separator either redactor reads: `@` (also `\@`, full-width and
+   small), `%40`, `&commat;`, `&#64;` or `&#x40;` with their `&` (a bare
+   `#642` or `commat;` does not count), a bracketed `at` or `dot` (`[at]`,
+   `(dot)`, `<at>` ...), a glued `_at_`, `-at-` or `_NOSPAM_AT_`, or
+   `NOSPAM` (the list is built from the redactors' own patterns). So a colour code on
    the same line as an address, `ESC 7 ... ESC 8` (save and restore
    cursor), `<U+202E>gro.elpmaxe@eodj` and `jdoe(<BS>@example.org` refuse,
    whatever the address looks like. This rule is also checked on the text
@@ -217,7 +223,9 @@ For every group the build:
 3. **Removes every email address** from every string, JSON keys included, and
    from whole text files, with `archi.enrichment.anonymizer.redact_email_addresses`
    (which keeps a literal `git@` host account such as
-   `git@gitlab.cern.ch:group/repo.git`), then every spelled-out address
+   `git@gitlab.cern.ch:group/repo.git`, and reads a backslash-escaped
+   `jdoe\@example.org` or `jdoe\@example\.org`, as Perl, Doxygen and
+   shell text write it, as an address, backslash included), then every spelled-out address
    (`jdoe[AT]cern.ch`, `jdoe(at)cern(dot)ch`, `jdoe_at_cern.ch`, `NOSPAM`
    forms) with `redact_obfuscated_email_addresses`; free prose such as
    `john.doe at cern.ch` is kept. It repeats both until neither changes the

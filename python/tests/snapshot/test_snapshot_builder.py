@@ -732,7 +732,7 @@ def test_an_address_split_by_a_control_in_json_refuses_the_group(tmp_path, sourc
     records = json.loads(path.read_text())
     records[0]["filename"] = "owner a.b@c\u0001d.ch"
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
 
 
@@ -1468,7 +1468,7 @@ def test_note_must_be_short_text(note, expected):
     "note, expected",
     [
         ("fetched by jdoe@cern.ch", "note: an address survived redaction"),
-        ("fetched by a.b@c\u0081d.ch", "note: an address is split by a control character"),
+        ("fetched by a.b@c\u0081d.ch", "note, line 1: line rule"),
     ],
 )
 def test_an_address_in_a_note_refuses_the_group(tmp_path, sources, note, expected):
@@ -1586,7 +1586,7 @@ def test_a_colour_code_on_the_same_line_as_an_address_refuses(tmp_path, sources)
     (sources["twiki-eos"] / "Log.txt").write_bytes(
         b"---+ Log\n$ make done \x1b[1;31mERROR\x1b[0m, mail jdoe@example.org\n" + PADDING
     )
-    with pytest.raises(BuildRefused, match="Log.txt: .*line with a carriage return"):
+    with pytest.raises(BuildRefused, match=r"Log.txt, line 2: line rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -1596,7 +1596,7 @@ def test_ansi_colour_codes_inside_an_address_refuse_the_group(tmp_path, sources)
     (sources["twiki-eos"] / "Log.txt").write_bytes(
         b"---+ Log\n$ \x1b[32mjdoe\x1b[0m@laptop.example.org done\n" + PADDING
     )
-    with pytest.raises(BuildRefused, match="Log.txt: an address is split by a control"):
+    with pytest.raises(BuildRefused, match=r"Log.txt, line 2: (line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -1792,13 +1792,13 @@ def test_a_control_character_inside_a_spelled_out_address_refuses_the_group(
     records = json.loads(path.read_text())
     records[0]["filename"] = value
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["dqm"])), tmp_path / "out")
 
 
 def test_a_control_character_inside_a_spelled_out_address_in_twiki_refuses(tmp_path, sources):
     (sources["twiki-eos"] / "Del.txt").write_bytes(b"---+ Page\nAsk jdoe\x7f[at]cern.ch ok.\n" + PADDING)
-    with pytest.raises(BuildRefused, match="Del.txt: an address is split by a control character"):
+    with pytest.raises(BuildRefused, match=r"Del.txt, line 2: (line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -1928,7 +1928,7 @@ def test_a_hidden_character_in_an_address_in_a_json_string_refuses(
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} today."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -1940,7 +1940,7 @@ def test_a_hidden_character_in_an_address_on_a_text_page_refuses(
         f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
     )
     with pytest.raises(
-        BuildRefused, match="Local.txt: an address is split by a control character"
+        BuildRefused, match=r"Local.txt, line 2: (line|span) rule"
     ):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
@@ -1951,7 +1951,7 @@ def test_a_hidden_character_in_an_address_in_a_json_key_refuses(tmp_path, source
     records = json.loads(path.read_text())
     records[0][key] = "owner"
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -1966,7 +1966,7 @@ FORMAT_CHARACTERS = [
 
 @pytest.mark.parametrize("char", FORMAT_CHARACTERS, ids=lambda c: f"U+{ord(c):04X}")
 def test_a_format_character_in_the_local_part_refuses(char):
-    with pytest.raises(GroupRefused, match="split by a control character"):
+    with pytest.raises(GroupRefused, match=r"(line|span) rule"):
         builder_module._clean(
             "g", "f", f"Ask jdoe{char}x@example.org today.", builder_module._Counter()
         )
@@ -2051,7 +2051,7 @@ def test_a_line_with_an_escape_and_a_separator_refuses(tmp_path, sources, value)
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} today."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2061,7 +2061,7 @@ def test_a_short_or_string_escape_in_an_address_in_json_refuses(tmp_path, source
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} today."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2073,7 +2073,7 @@ def test_a_short_or_string_escape_in_an_address_on_a_text_page_refuses(
         f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
     )
     with pytest.raises(
-        BuildRefused, match="Short.txt: an address is split by a control character"
+        BuildRefused, match=r"Short.txt, line 2: (line|span) rule"
     ):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
@@ -2082,7 +2082,7 @@ def test_a_hidden_character_in_an_address_in_a_file_path_refuses(tmp_path, sourc
     (sources["twiki-eos"] / "jdoe\u200e@example.org.txt").write_bytes(
         b"---+ Page\nPlain text.\n" + PADDING
     )
-    with pytest.raises(BuildRefused, match="file path .*split by a control character"):
+    with pytest.raises(BuildRefused, match=r"file path .*: path rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -2208,7 +2208,7 @@ def test_a_control_character_still_refuses_next_to_a_normalized_address(
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} now."
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2243,7 +2243,7 @@ def test_a_compatibility_character_outside_an_address_is_stored(
 def test_an_address_in_a_window_title_refuses(value):
     # Round 9 redacted the first; a line with an escape and an @ now refuses.
     clean, counter = builder_module._clean, builder_module._Counter
-    with pytest.raises(GroupRefused, match="split by a control character"):
+    with pytest.raises(GroupRefused, match=r"(line|span) rule"):
         clean("g", "f", value, counter())
 
 
@@ -2285,7 +2285,7 @@ def test_a_ninth_review_display_trick_in_json_refuses(tmp_path, sources, value):
     records = json.loads(path.read_text())
     records[0]["description"] = f"Logged by {value} now"
     path.write_text(json.dumps(records))
-    with pytest.raises(BuildRefused, match="split by a control character"):
+    with pytest.raises(BuildRefused, match=r"(line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
@@ -2294,7 +2294,7 @@ def test_a_ninth_review_display_trick_on_a_text_page_refuses(tmp_path, sources, 
     (sources["twiki-eos"] / "Show.txt").write_bytes(
         f"---+ Page\nAsk {value} now\n".encode("utf-8") + PADDING
     )
-    with pytest.raises(BuildRefused, match="Show.txt: an address is split"):
+    with pytest.raises(BuildRefused, match=r"Show.txt, line 2: (line|span) rule"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
@@ -2354,5 +2354,78 @@ def test_a_lone_surrogate_in_json_refuses_cleanly(tmp_path, sources):
     records = json.loads(text)
     records[0]["description"] = "SURROGATE"
     path.write_text(json.dumps(records).replace("SURROGATE", "bad \\ud800 text"))
-    with pytest.raises(BuildRefused, match="unpaired UTF-16 surrogate"):
+    with pytest.raises(BuildRefused, match=r"records.json \[0\]\.description, line 1: surrogate rule"):
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+# --- tenth review: backslash-escaped @, the separator list, messages ------------
+
+#: Perl, Doxygen and shell text escape @ as \@ (TWiki is written in Perl).
+BACKSLASH_ESCAPED = [
+    ('my $to = "jdoe\\@example.org";', 'my $to = "";'),
+    ("\\author J. Doe (jdoe\\@example.org)", "\\author J. Doe ()"),
+    ("mail jdoe\\@example.org now", "mail  now"),
+    ("/^jdoe\\@example\\.org$/", "/$/"),
+]
+
+
+@pytest.mark.parametrize(("value", "stored"), BACKSLASH_ESCAPED)
+def test_a_backslash_escaped_address_in_json_is_removed(tmp_path, sources, value, stored):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = value
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    result = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert result[0]["description"] == stored
+    assert "jdoe" not in result[0]["description"]
+    assert lock["groups"]["jira"]["addresses_removed"] >= 2  # this one and the planted one
+
+
+@pytest.mark.parametrize(("value", "stored"), BACKSLASH_ESCAPED)
+def test_a_backslash_escaped_address_on_a_text_page_is_removed(
+    tmp_path, sources, value, stored
+):
+    (sources["twiki-eos"] / "Perl.txt").write_bytes(
+        f"---+ Page\n{value}\n".encode("utf-8") + PADDING
+    )
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Perl.txt"].decode("utf-8")
+    assert page.startswith(f"---+ Page\n{stored}\n")
+
+
+def test_a_coloured_line_with_a_bare_hash_number_is_stored(tmp_path, sources):
+    # "#642" is not "&#64;": the line rule's separators need their "&".
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = "\x1b[32mfixed\x1b[0m in PR #642, see commat; and #x40"
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    result = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert result[0]["description"] == "fixed in PR #642, see commat; and #x40"
+    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 2
+
+
+def test_a_refusal_names_the_file_line_and_rule(tmp_path, sources):
+    (sources["twiki-eos"] / "Show.txt").write_bytes(
+        b"---+ Page\nfirst line\n    @example.org\rjdoe\n" + PADDING
+    )
+    with pytest.raises(BuildRefused) as caught:
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+    message = str(caught.value)
+    assert "Show.txt, line 3: line rule: the line has a carriage return" in message
+    assert "an address is split" not in message
+    assert "jdoe" not in message
+
+
+def test_a_json_refusal_names_the_record_and_field(tmp_path, sources):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = "one\ntwo jdoe\x7fx@example.org"
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused) as caught:
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+    assert "records.json [0].description, line 2: line rule" in str(caught.value)

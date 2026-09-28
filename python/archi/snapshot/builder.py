@@ -423,11 +423,17 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         raise GroupRefused(group.name, f"no cache files found in {source}")
 
     for archive_path in final:
-        if _hidden_address_spans(group.name, f"file path {archive_path}", archive_path):
+        try:
+            spans = _hidden_address_spans(group.name, "path", archive_path)
+        except GroupRefused as exc:
+            raise GroupRefused(
+                group.name, f"file path {archive_path}: path rule: {exc.reason}"
+            ) from exc
+        if spans:
             raise GroupRefused(
                 group.name,
-                f"file path {archive_path}: an address in it is written with "
-                "full-width or invisible characters",
+                f"file path {archive_path}: path rule: an address in it is "
+                "written with full-width or invisible characters",
             )
         if redact_email_addresses(archive_path) != archive_path:
             raise GroupRefused(
@@ -567,9 +573,12 @@ def _clean(group: str, where: str, text: str, counter: _Counter) -> str:
     an invisible character are removed whole first (see
     :func:`_hidden_address_spans`).
     """
-    if _SURROGATE_RE.search(text):
+    surrogate = _SURROGATE_RE.search(text)
+    if surrogate:
         raise GroupRefused(
-            group, f"{where}: has an unpaired UTF-16 surrogate (not valid Unicode)"
+            group,
+            f"{where}, line {_line_number(text, surrogate.start())}: surrogate "
+            "rule: an unpaired UTF-16 surrogate (not valid Unicode)",
         )
     text = _remove_normalized(group, where, text, counter)
     stripped = counter.strip_ansi(text)
@@ -593,29 +602,47 @@ def _remove_normalized(group: str, where: str, text: str, counter: _Counter) -> 
         text = "".join(pieces)
     if _hidden_address_spans(group, where, text):
         raise GroupRefused(
-            group, f"{where}: an address is still hidden after removing others"
+            group,
+            f"{where}: span rule: an address is still hidden after "
+            f"{_REDACTION_ROUNDS} rounds of removing others",
         )
     return text
 
 
-def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
+def _redact_json(
+    group: str, file_name: str, value: Any, counter: _Counter, path: str = ""
+) -> Any:
+    """Redact every string and key of ``value``. ``path`` locates it for a
+    refusal message (``records.json [3].description``); a key that is not
+    short plain text shows as ``?``, so a message never repeats one."""
+    where = f"{file_name} {path or '(top level)'}"
     if isinstance(value, str):
-        return _clean(group, file_name, value, counter)
+        return _clean(group, where, value, counter)
     if isinstance(value, list):
-        return [_redact_json(group, file_name, item, counter) for item in value]
+        return [
+            _redact_json(group, file_name, item, counter, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            clean_key = _clean(group, file_name, key, counter)
+            shown = key if _PATH_KEY_RE.fullmatch(key) else "?"
+            clean_key = _clean(group, f"{where} (key {shown})", key, counter)
             if clean_key in out:
                 raise GroupRefused(
                     group,
                     f"{file_name}: removing addresses makes two keys equal "
                     f"({clean_key!r})",
                 )
-            out[clean_key] = _redact_json(group, file_name, item, counter)
+            out[clean_key] = _redact_json(
+                group, file_name, item, counter, f"{path}.{shown}"
+            )
         return out
     return value
+
+
+#: A JSON key short and plain enough to show in a refusal message.
+_PATH_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
 
 
 def _prune(value: Any, schema: Schema) -> Any:
@@ -867,19 +894,52 @@ def _refuse_display_tricks(group: str, where: str, text: str) -> None:
     address its bytes spell differently (``____@example.org<CR>jdoe``,
     ``<U+202E>gro.elpmaxe@eodj``, ``ESC 7 ... ESC 8``, backspace).
     """
-    for base, _decoded in _bases(text):
+    for base, decoded in _bases(text):
         if not _DISPLAY_RE.search(base):
             continue
+        start = 0
         for line in base.split("\n"):
-            if _DISPLAY_RE.search(line) and any(
-                ADDRESS_SEPARATOR_RE.search(reading) for reading in _readings(line)
-            ):
-                raise GroupRefused(
-                    group,
-                    f"{where}: an address is split by a control character (a "
-                    "line with a carriage return, backspace, escape or bidi "
-                    "control has an address separator)",
+            trick = _DISPLAY_RE.search(line)
+            if trick:
+                separator = next(
+                    (
+                        found
+                        for reading in _readings(line)
+                        if (found := ADDRESS_SEPARATOR_RE.search(reading))
+                    ),
+                    None,
                 )
+                if separator is not None:
+                    raw = start if decoded is None else decoded.raw_start(start)
+                    raise GroupRefused(
+                        group,
+                        f"{where}, line {_line_number(text, raw)}: line rule: "
+                        f"the line has {_describe(trick.group()[0])} and the "
+                        f"address separator {separator.group()!r}, so it may "
+                        "show an address its bytes do not spell",
+                    )
+            start += len(line) + 1
+
+
+def _line_number(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+_CONTROL_NAMES = {
+    "\r": "a carriage return not before a line feed",
+    "\x08": "a backspace",
+    "\x1b": "an ESC",
+    "\x7f": "a DEL",
+}
+
+
+def _describe(char: str) -> str:
+    """``char`` named for a refusal message."""
+    if char in _CONTROL_NAMES:
+        return _CONTROL_NAMES[char]
+    name = unicodedata.name(char, "")
+    kind = "control" if not name else name
+    return f"U+{ord(char):04X} ({kind})"
 
 
 @dataclass
@@ -1056,11 +1116,19 @@ def _hidden_address_spans(group: str, where: str, text: str) -> list[tuple[int, 
             for run in re.finditer(b"\x01+", mask):
                 low = view.raw(run.start())
                 high = view.raw(run.end() - 1)
-                if _HARD in view.removed[max(low - 1, 0) : high + 2]:
+                window = view.removed[max(low - 1, 0) : high + 2]
+                if _HARD in window:
+                    at = max(low - 1, 0) + window.index(_HARD)
+                    raw = at if decoded is None else decoded.raw_start(at)
+                    what = (
+                        _describe(base[at])
+                        if _HIDDEN_RE.match(base[at])
+                        else "part of a terminal escape sequence"
+                    )
                     raise GroupRefused(
                         group,
-                        f"{where}: an address is split by a control character "
-                        "or touches one",
+                        f"{where}, line {_line_number(text, raw)}: span rule: "
+                        f"an address contains or touches {what}",
                     )
                 first = bisect.bisect_left(changed, low)
                 if _SOFT in view.removed[low : high + 1] or (
@@ -1191,16 +1259,27 @@ def _check_string(group: str, where: str, value: str) -> None:
     _refuse_display_tricks(group, where, value)
     if _reads_as_itself(value):
         return
-    for reading in (r for base, _ in _bases(value) for r in _readings(base)):
-        if (
-            redact_email_addresses(reading) != reading
-            or redact_obfuscated_email_addresses(reading) != reading
-        ):
-            raise GroupRefused(
-                group,
-                f"{where}: an address is split by a control character (it "
-                "shows once hidden characters are removed and NFKC applied)",
-            )
+    if _address_in_a_reading(value):
+        lines = value.split("\n")
+        number = next(
+            (n for n, line in enumerate(lines, 1) if _address_in_a_reading(line)),
+            None,
+        )
+        at = "" if number is None else f", line {number}"
+        raise GroupRefused(
+            group,
+            f"{where}{at}: stored-text rule: an address shows in the stored "
+            "text once hidden characters are removed and NFKC applied",
+        )
+
+
+def _address_in_a_reading(value: str) -> bool:
+    return any(
+        redact_email_addresses(reading) != reading
+        or redact_obfuscated_email_addresses(reading) != reading
+        for base, _ in _bases(value)
+        for reading in _readings(base)
+    )
 
 
 def _reader_check(

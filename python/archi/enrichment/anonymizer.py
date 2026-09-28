@@ -181,7 +181,9 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 #
 # - SEP: ``@``, fullwidth or small ``@`` (U+FF20, U+FE6B), URL ``%40`` or
 #   ``%2540``, or ``&commat;`` / ``&#64;`` / ``&#x40;`` (any leading zeros,
-#   ``;`` optional) behind any number of ``&amp;`` layers.
+#   ``;`` optional) behind any number of ``&amp;`` layers. A backslash
+#   before ``@`` belongs to the separator: ``jdoe\@cern.ch`` is how Perl,
+#   Doxygen and shell text escape an address.
 # - LOCAL: a quoted string on one line, or a run of Unicode word
 #   characters, combining marks, invisible characters (soft hyphen,
 #   zero-width space/joiners, word joiner), ``.!#$%&'*+^`{|}~-=``,
@@ -189,8 +191,9 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 #   URL path is not swallowed; ``=`` is included, so ``mail=`` before an
 #   address in a query string goes with it.
 # - DOMAIN: word characters, marks, invisible characters, ``-``, and dots
-#   (``.``, fullwidth ``.`` U+FF0E, or an encoded ``&#46;`` / ``&#x2e;`` /
-#   ``&period;``), with at least one dot, ending in a label that contains
+#   (``.``, fullwidth ``.`` U+FF0E, a backslash-escaped ``\.`` as in Perl
+#   regex text, or an encoded ``&#46;`` / ``&#x2e;`` / ``&period;``), with
+#   at least one dot, ending in a label that contains
 #   a letter. So ``numpy@1.26.4`` is a version pin, not an address.
 #
 # Matching runs in linear time. Separators are found by one regex pass;
@@ -227,6 +230,8 @@ def _is_local(char: str) -> bool:
 def _separator_start(text: str, match: re.Match, bound: int) -> int | None:
     """Start of the separator whose core ``match`` found, or None."""
     start = match.start()
+    if text[start] == "@" and start - 1 >= bound and text[start - 1] == "\\":
+        return start - 1
     if text[start] in "@\uff20\ufe6b%":
         return start
     # An entity core (``commat;``, ``#64;``) needs its ``&``, possibly
@@ -268,6 +273,9 @@ def _domain_end(text: str, start: int) -> int | None:
         if char in _DOTS:
             dots.append((i, i + 1))
             i += 1
+        elif char == "\\" and i + 1 < size and text[i + 1] in _DOTS and i > start:
+            dots.append((i, i + 2))
+            i += 2
         elif _is_word(char) or char == "-" or char in _INVISIBLE:
             i += 1
         elif char == "&":
@@ -299,7 +307,7 @@ _GIT_WRAPPERS = frozenset("`'|{")
 # A whole separator (core plus any leading ``&`` / ``&amp;`` layers)
 # starting at a given position.
 _SEP_AT_RE = re.compile(
-    r"[@＠﹫]|%(?:25)*40|&(?:amp;)*(?:commat;|#0*64;?|#x0*40;?)",
+    r"\\?@|[＠﹫]|%(?:25)*40|&(?:amp;)*(?:commat;|#0*64;?|#x0*40;?)",
     re.IGNORECASE,
 )
 
@@ -554,15 +562,16 @@ _OBF_NOSPAM_DOMAIN_END_RE = re.compile(
 
 
 #: Every separator either redactor reads, built from the patterns above: the
-#: ``@`` forms of redact_email_addresses (``@``, full-width and small ``@``,
-#: ``%40``, ``&commat;``, ``&#64;``, ``&#x40;``), and the bracketed ``at``
+#: whole ``@`` forms of redact_email_addresses (``@``, ``\@``, full-width
+#: and small ``@``, ``%40``, and ``&commat;``, ``&#64;``, ``&#x40;`` with
+#: their ``&``, so a bare ``#64`` in "PR #642" is not one), and the bracketed ``at``
 #: and ``dot``, glued ``_at_`` / ``-at-`` / ``_NOSPAM_AT_`` and ``NOSPAM``
 #: of redact_obfuscated_email_addresses. A match marks text that may hold
 #: an address; it is not itself one.
 ADDRESS_SEPARATOR_RE = re.compile(
     "|".join(
         (
-            _SEP_CORE_RE.pattern,
+            _SEP_AT_RE.pattern,
             _OBF_BRACKET_AT,
             _OBF_BRACKET_DOT,
             _OBF_GLUED_SEP,
