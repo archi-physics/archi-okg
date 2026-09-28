@@ -108,10 +108,10 @@ requirements:
     TWiki and an address after it is removed; after merging main (#13), redact_email_addresses
     and redact_obfuscated_email_addresses equal main 6193edd0ca on random strings including
     git@ variants; the final review''s gaps are closed for spelled-out forms too: a control
-    character inside one (jdoe<DEL>[at]cern.ch) refuses the group, a stray byte next to or inside
-    one (jdoe<0x93>[at]cern.ch, jdoe[at]<0x93>cern.ch, jdoe<0x93>(at)cern(dot)ch,
-    john.doe<0x93>_at_cern.ch) stores the page without its invalid bytes, and ANSI sequences are
-    stripped from JSON strings as well as text files. [evidence: executed_test]
+    character inside one (jdoe<DEL>[at]cern.ch) refuses the group, a stray byte next to or
+    inside one (jdoe<0x93>[at]cern.ch, jdoe[at]<0x93>cern.ch, jdoe<0x93>(at)cern(dot)ch, john.doe<0x93>_at_cern.ch)
+    stores the page without its invalid bytes, and ANSI sequences are stripped from JSON strings
+    as well as text files. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.jira-facts: the archi JIRA reader emits the same facts
     from a raw JIRA fixture and from the snapshot''s redacted copy. [evidence: executed_test]
@@ -358,4 +358,27 @@ evidence:
   head: 092cca7d9c66d569d6943fe01bfe09a7728cdf81
   at: '2026-09-28T15:29:54+00:00'
   note: 13 passed at this head inside the 875-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 6cfeca4dabd2fb27ea6bec34e376187d954b1db4
+  at: '2026-09-28T16:22:13+00:00'
+  note: '884 passed at this head (main 6193edd0ca merged in; okg origin/dev 435ab285ac exported
+    source, Python 3.12, zstd v1.5.7, hatchling on the path), 205 snapshot tests, #13''s tests
+    unchanged. Final-review fixes: jdoe<DEL>[at]cern.ch ok and jdoe[at]cern<DEL>.ch refuse
+    the group in JSON and TWiki; jdoe<0x93>[at]cern.ch, jdoe[at]<0x93>cern.ch, jdoe<0x93>(at)cern(dot)ch
+    and john.doe<0x93>_at_cern.ch lose the whole address via the dropped-byte reading; a 2,000-page
+    fuzz of spelled-out forms with stray bytes leaves no local part in the output; ANSI sequences
+    in a JSON string are stripped and counted. obfuscated_email_address_spans rebuilds redact_obfuscated_email_addresses,
+    and both redactors equal main 6193edd on 40,000 random strings (2,578 changed by the spelled-out
+    redactor), 0 differences. Mutations: split check without the spelled-out redactor 3 failed,
+    page choice seeing only @ addresses 5, no ANSI strip in JSON 1.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 6cfeca4dabd2fb27ea6bec34e376187d954b1db4
+  at: '2026-09-28T16:22:13+00:00'
+  note: 13 passed at this head inside the 884-test suite; downloaders unchanged since 96a34d6.
 decisions: []
