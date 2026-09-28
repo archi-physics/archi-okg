@@ -567,7 +567,8 @@ def test_email_addresses_removed_from_every_emitted_field(tmp_path):
         c.attrs["text"] for c in _nodes(facts, "document_chunk")
     )
     assert "Retrying via cmsweb.cern.ch" in chunk_text
-    assert "ViewProfile?mail= for the owner" in chunk_text
+    # "=" is a local-part character, so the query key goes too.
+    assert "ViewProfile? for the owner" in chunk_text
     assert "environment: prod, owner" in chunk_text
     assert run.health.status == "ok"
 
@@ -636,3 +637,19 @@ def test_non_ascii_and_padded_addresses_leave_no_fragment(tmp_path):
     assert [p.attrs["display_name"] for p in _nodes(facts, "person")] == [
         "Grace Hopper"
     ]
+
+
+def test_adjacent_addresses_in_table_markup_are_both_removed(tmp_path):
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-304",
+        "description": "||owner||backup||\n|tablebob@cern.ch|tablealice@fnal.gov|",
+        "recent_comments": [],
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps([f.attrs for f in facts], sort_keys=True)
+    assert "tablebob" not in emitted
+    assert "tablealice" not in emitted
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["description"] == "||owner||backup||\n|"

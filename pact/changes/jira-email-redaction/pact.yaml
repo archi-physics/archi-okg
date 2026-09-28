@@ -18,13 +18,20 @@ why: 'The comp-ops JIRA source moves from okg-deployments (cms/cms_sources/jira.
   It deliberately differs from the cms helper. The cms helper decodes &amp;, &commat;,
   &#64; and &#x40; in the whole string before matching, so it also rewrites text that holds
   no address (AT&amp;T becomes AT&T), which changes that chunk''s text, content hash and chunk
-  id; and it lets through a non-ASCII local part (only the last ASCII run was removed, leaving
-  a prefix), zero-padded or semicolon-less &#064; / &#x0040; / &#64, URL %2540, and fullwidth
-  or small @ (U+FF20, U+FE6B). The archi helper decodes nothing: the encoded separators are
-  part of its own pattern, the local part and domain accept Unicode letters and combining
-  marks, and the only change to a string is the removal of each whole address. A match starts
-  only where a run of address characters starts, so a long token with no @ is scanned once
-  rather than once per character. Anonymizer''s own pattern is unchanged.
+  id; and it lets through a non-ASCII local part or one with = (only the part after the last
+  unsupported character was removed, leaving a prefix such as uber.mu or list-bounces+bob=),
+  zero-padded or semicolon-less &#064; / &#x0040; / &#64, URL %2540, fullwidth or small @,
+  encoded or fullwidth dots, and addresses with soft hyphens or zero-width characters. It
+  also removes version pins such as numpy@1.26.4.
+
+
+  The archi helper decodes nothing. It finds each separator with one regex pass, then scans
+  the local part leftwards back to the previous separator or match and the domain rightwards
+  to the first character that cannot be in a domain, so it runs in linear time and removes an
+  address that directly follows another one (|bob@cern.ch|alice@fnal.gov|). A domain must end
+  in a label with a letter, so all-numeric version strings are not addresses. The only change
+  to a string is the removal of each address-shaped token. Anonymizer''s own pattern is
+  unchanged.
 
 
   CARRIED SIDE EFFECT, same as cms: a person whose display name is only an address gets no
@@ -46,12 +53,27 @@ requirements:
     status, priority, resolution, issue type, project, dates, assignee and reporter names,
     labels, components, fix versions, comment authors and bodies), in both the flat and the
     JIRA REST record shapes, and so every jira_issue and person attr and every document_chunk
-    text. Address forms: plain, +tag, quoted local part, non-ASCII local part or domain (NFC
-    and NFD), @ as &commat; or &#64; / &#x40; with any leading zeros and an optional semicolon,
-    any of those behind one or more &amp; layers, URL %40 and %2540, and fullwidth or small
-    @. The whole address is removed with no placeholder; the surrounding text, including any
-    HTML entities around it, is kept byte for byte. No entity is decoded, so text without
-    an address is returned byte-identical and its chunk text and chunk id do not change.
+    text. An address-shaped token is LOCAL SEP DOMAIN. SEP is @, fullwidth or small @, URL
+    %40 or %2540, or &commat; / &#64; / &#x40; with any leading zeros and an optional semicolon,
+    behind any number of &amp; layers. LOCAL is a quoted string on one line, or a run of Unicode
+    letters, digits, combining marks, soft hyphen and zero-width characters, the punctuation
+    .!#$%&''*+^`{|}~-= and &amp; or encoded-dot entities (not / or ?). DOMAIN is the same
+    letters, digits, marks and invisible characters plus - and dots (., fullwidth dot, or an
+    encoded &#46; / &#x2e; / &period;), with at least one dot, ending in a label that contains
+    a letter. Each whole token is removed with no placeholder, including one that directly
+    follows another; the surrounding text, including HTML entities around it, is kept byte for
+    byte. No entity is decoded, so text containing no address-shaped token is returned
+    byte-identical and its chunk text and chunk id do not change.
+
+
+    Accepted over-removal (fail closed): a URL query key before an address goes with it
+    (?mail=bob%40cern.ch leaves ?), and address-shaped non-mail tokens are removed
+    (image@2x.png, the user@host part of git@github.com:org/x and https://user@host/x).
+
+
+    Known gaps, not covered: an IP-literal domain (bob@[127.0.0.1]); MIME =40 header encoding;
+    a quoted local part that itself contains @ ("a@b"@cern.ch leaves a@b); a domain with no
+    dot (bob@localhost).
 
 
     Acceptance:
@@ -59,13 +81,17 @@ requirements:
     - acc.jira-email-redaction.fields: A cached issue with a distinct address in each field
     emits no fact whose attrs or record id contain any of them; the same test fails on main
     with all twelve leaked. An issue whose text holds HTML entities and no address is emitted
-    verbatim, and one whose assignee is only a non-ASCII address gets no person and leaves
-    no fragment of it. [evidence: executed_test]
+    verbatim, one whose assignee is only a non-ASCII address gets no person and leaves no
+    fragment of it, and two adjacent addresses in JIRA table markup are both removed.
+    [evidence: executed_test]
 
-    - acc.jira-email-redaction.forms: redact_email_addresses removes each address form whole,
-    keeps entities around an address, leaves address-free text (including &amp;, &commat;,
-    &#64; and fullwidth @ on their own) byte-identical, and runs in linear time on a long
-    run of address characters. [evidence: executed_test]'
+    - acc.jira-email-redaction.forms: redact_email_addresses removes each address form whole
+    (including adjacent addresses, = in the local part, encoded and fullwidth dots, and
+    invisible characters), keeps entities around an address, keeps version pins such as
+    numpy@1.26.4, leaves address-free text (including &amp;, &commat;, &#64; and fullwidth @
+    on their own) byte-identical, agrees with a slow single-regex definition of the same
+    grammar on 20,000 random strings, and runs in linear time on long runs with and without
+    separators. [evidence: executed_test]'
 tasks:
 - id: task.jira-email-redaction.deliver
   requirement: req.jira-email-redaction.main

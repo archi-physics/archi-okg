@@ -52,6 +52,7 @@ Name replacement and text extraction for NER are kept verbatim.
 from __future__ import annotations
 
 import re
+import unicodedata
 from html import unescape
 from collections.abc import Iterable, Sequence
 
@@ -168,50 +169,165 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 # ``cms/cms_sources/anonymizer.py`` (commit b25e36f06c), where the cms
 # JIRA source applied it to every string it read.
 #
-# It decodes nothing. The encoded forms of ``@`` are part of the pattern
-# instead, so the only change to a string is the removal of the addresses
-# it holds: text with no address comes back byte-identical, and entities
-# around an address (``&lt;``, ``&amp;``) stay encoded. A decode-first
-# pass would rewrite ``AT&amp;T`` to ``AT&T`` in every string and so
-# change the text, content hash and chunk id of chunks with no address.
+# It decodes nothing: the encoded forms are recognized in place, and the
+# only change to a string is the removal of each address-shaped token.
+# Text with no such token comes back byte-identical, and entities around
+# an address (``&lt;``, ``&amp;``) stay. A decode-first pass would rewrite
+# ``AT&amp;T`` to ``AT&T`` in every string and so change the text, content
+# hash and chunk id of chunks that hold no address.
 #
-# Separator: ``@``, fullwidth and small ``@`` (U+FF20, U+FE6B), URL
-# ``%40`` and double-encoded ``%2540``, and ``&commat;`` / ``&#64;`` /
-# ``&#x40;`` with any leading zeros, an optional ``;`` and any number of
-# ``&amp;`` layers (``&amp;#64;``). Local part and domain are Unicode word
-# characters plus combining marks, so ``\u00fcber.m\u00fcller@...`` (in
-# NFC or NFD) is removed whole rather than from its last ASCII run.
-_WORD_CHARS = "\\w\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f"
-# The unquoted local part starts only where a run of local-part characters
-# (and ``&amp;`` layers, whose ``;`` is not one) starts: the two
-# lookbehinds. The run itself is then searched for the
-# separator, so no address is missed, and a long run with no separator is
-# scanned once instead of once per character (quadratic time on long
-# tokens such as pasted base64).
-_LOCAL_CHARS = _WORD_CHARS + ".!#$%&'*+^`{|}~-"
-_AMP = r"&(?:amp;)*"
-_SOURCE_EMAIL_PATTERN = (
-    r"(?:\"[^\"\n]+\""
-    r"|(?<![" + _LOCAL_CHARS + r"])(?<!&amp;)"
-    r"(?:&(?:amp;)+|[" + _LOCAL_CHARS + r"])+)"
-    r"(?:[@\uff20\ufe6b]|%(?:25)*40"
-    r"|" + _AMP + r"(?:commat;|#0*64;?|#x0*40;?))"
-    r"[" + _WORD_CHARS + r".-]+\.[" + _WORD_CHARS + r"]+"
+# An address-shaped token is LOCAL SEP DOMAIN:
+#
+# - SEP: ``@``, fullwidth or small ``@`` (U+FF20, U+FE6B), URL ``%40`` or
+#   ``%2540``, or ``&commat;`` / ``&#64;`` / ``&#x40;`` (any leading zeros,
+#   ``;`` optional) behind any number of ``&amp;`` layers.
+# - LOCAL: a quoted string on one line, or a run of Unicode word
+#   characters, combining marks, invisible characters (soft hyphen,
+#   zero-width space/joiners, word joiner), ``.!#$%&'*+^`{|}~-=``,
+#   ``&amp;`` layers and encoded dots. ``/`` and ``?`` are excluded so a
+#   URL path is not swallowed; ``=`` is included, so ``mail=`` before an
+#   address in a query string goes with it.
+# - DOMAIN: word characters, marks, invisible characters, ``-``, and dots
+#   (``.``, fullwidth ``.`` U+FF0E, or an encoded ``&#46;`` / ``&#x2e;`` /
+#   ``&period;``), with at least one dot, ending in a label that contains
+#   a letter. So ``numpy@1.26.4`` is a version pin, not an address.
+#
+# Matching runs in linear time. Separators are found by one regex pass;
+# each local part is scanned leftwards only back to the previous
+# separator or match, and each domain rightwards only up to the next
+# character that cannot be in a domain, so every character is looked at
+# a bounded number of times. (A single regex with a leftmost-start search
+# is quadratic on a long run with no separator, and a lookbehind that
+# avoids that misses an address that directly follows another one.)
+_SEP_CORE_RE = re.compile(
+    r"[@\uff20\ufe6b]|%(?:25)*40|commat;|#0*64;?|#x0*40;?", re.IGNORECASE
 )
-_EMAIL_ADDRESS_RE = re.compile(_SOURCE_EMAIL_PATTERN, re.IGNORECASE)
+_DOT_TOKEN_RE = re.compile(
+    r"&(?:amp;)*(?:#0*46;?|#x0*2e;?|period;)", re.IGNORECASE
+)
+_LOCAL_TOKEN_RE = re.compile(
+    r"&(?:amp;)+|&(?:amp;)*(?:#0*46;?|#x0*2e;?|period;)", re.IGNORECASE
+)
+_LOCAL_PUNCT = frozenset(".!#$%&'*+^`{|}~-=")
+_INVISIBLE = frozenset("\u00ad\u200b\u200c\u200d\u2060")
+_DOTS = frozenset(".\uff0e")
+
+
+def _is_word(char: str) -> bool:
+    return (
+        char.isalnum() or char == "_" or unicodedata.category(char)[0] == "M"
+    )
+
+
+def _is_local(char: str) -> bool:
+    return _is_word(char) or char in _LOCAL_PUNCT or char in _INVISIBLE
+
+
+def _separator_start(text: str, match: re.Match, bound: int) -> int | None:
+    """Start of the separator whose core ``match`` found, or None."""
+    start = match.start()
+    if text[start] in "@\uff20\ufe6b%":
+        return start
+    # An entity core (``commat;``, ``#64;``) needs its ``&``, possibly
+    # behind ``&amp;`` layers: ``&amp;amp;#64;``.
+    while start - 4 >= bound and text.startswith("amp;", start - 4):
+        start -= 4
+    if start - 1 >= bound and text[start - 1] == "&":
+        return start - 1
+    return None
+
+
+def _local_start(text: str, sep: int, bound: int) -> int:
+    """Leftmost start of the local part that ends at ``sep`` (``sep`` if none)."""
+    if sep - 1 > bound and text[sep - 1] == '"':
+        quote = text.rfind('"', bound, sep - 1)
+        if quote != -1 and quote < sep - 2 and "\n" not in text[quote:sep]:
+            return quote
+    i = sep
+    while i > bound:
+        char = text[i - 1]
+        if _is_local(char):
+            i -= 1
+        elif char == ";":
+            amp = text.rfind("&", max(bound, i - 40), i)
+            if amp == -1 or not _LOCAL_TOKEN_RE.fullmatch(text, amp, i):
+                break
+            i = amp
+        else:
+            break
+    return i
+
+
+def _domain_end(text: str, start: int) -> int | None:
+    """End of the domain that starts at ``start``, or None if it is not one."""
+    dots: list[tuple[int, int]] = []
+    i, size = start, len(text)
+    while i < size:
+        char = text[i]
+        if char in _DOTS:
+            dots.append((i, i + 1))
+            i += 1
+        elif _is_word(char) or char == "-" or char in _INVISIBLE:
+            i += 1
+        elif char == "&":
+            token = _DOT_TOKEN_RE.match(text, i)
+            if token is None:
+                break
+            dots.append((i, token.end()))
+            i = token.end()
+        else:
+            break
+    # The last label is the one after the right-most dot that still has a
+    # letter; a trailing version-like label (``.4``) or dash is left out.
+    end = i
+    for dot_start, dot_end in reversed(dots):
+        label_end = end
+        while label_end > dot_end and not _is_word(text[label_end - 1]):
+            label_end -= 1
+        if dot_start > start and any(
+            c.isalpha() for c in text[dot_end:label_end]
+        ):
+            return label_end
+        end = dot_start
+    return None
 
 
 def redact_email_addresses(text: str) -> str:
     """Remove whole email addresses, including tagged and encoded forms.
 
-    ``john.doe+ops@cern.ch``, ``"john doe"@cern.ch``, ``jdoe&#64;cern.ch``
-    (and ``&#064;``, ``&#x0040;``, ``&#64`` without ``;``, ``&amp;#64;``),
-    ``jdoe\uff20cern.ch`` and the URL forms ``jdoe%40cern.ch`` and
-    ``jdoe%2540cern.ch`` are removed outright (replaced by nothing, as in
-    the cms source). Nothing is decoded: the addresses are the only
-    change, so text without an address is returned byte-identical.
+    ``john.doe+ops@cern.ch``, ``"john doe"@cern.ch``, ``über.müller@cern.ch``,
+    ``jdoe&#64;cern.ch`` (and ``&#064;``, ``&#x0040;``, ``&#64`` without
+    ``;``, ``&amp;#64;``), ``jdoe＠cern．ch``, ``bob&#64;cern&#46;ch``
+    and the URL forms ``jdoe%40cern.ch`` and ``jdoe%2540cern.ch`` are
+    removed outright (replaced by nothing, as in the cms source). A domain
+    must end in a label with a letter, so ``numpy@1.26.4`` stays.
+
+    Nothing is decoded: text that holds no address-shaped token (see the
+    comment above for the exact shape) comes back byte-identical. Tokens
+    that are address-shaped but not mail addresses, such as
+    ``image@2x.png`` or ``git@github.com``, are removed too (fail closed).
     """
-    return _EMAIL_ADDRESS_RE.sub("", text)
+    pieces: list[str] = []
+    kept = 0  # text[kept:] is not yet copied to pieces
+    bound = 0  # no local part may start before this
+    for core in _SEP_CORE_RE.finditer(text):
+        if core.start() < bound:
+            continue
+        sep = _separator_start(text, core, bound)
+        if sep is None:
+            continue
+        domain_start = core.end()
+        end = _domain_end(text, domain_start)
+        local = _local_start(text, sep, bound)
+        if end is None or local == sep:
+            bound = domain_start
+            continue
+        pieces.append(text[kept:local])
+        kept = bound = end
+    if not pieces:
+        return text
+    pieces.append(text[kept:])
+    return "".join(pieces)
 
 # Text-level HTML character references decoded before redaction. The
 # numeric-reference decoder below deliberately keeps &lt;/&gt; (and any
