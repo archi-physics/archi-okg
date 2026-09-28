@@ -51,7 +51,9 @@ Name replacement and text extraction for NER are kept verbatim.
 """
 from __future__ import annotations
 
+import bisect
 import re
+import unicodedata
 from html import unescape
 from collections.abc import Iterable, Sequence
 
@@ -163,6 +165,398 @@ _DEFAULT_EMAIL_PATTERN = (
     r"(?:\"[^\"\n]+\"|[A-Za-z0-9.!#$%&'*+^_`{|}~-]+)(?:@|%40)[\w.-]+\.\w+"
 )
 _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
+
+# Email-only redaction for source text, ported from okg-deployments
+# ``cms/cms_sources/anonymizer.py`` (commit b25e36f06c), where the cms
+# JIRA source applied it to every string it read.
+#
+# It decodes nothing: the encoded forms are recognized in place, and the
+# only change to a string is the removal of each address-shaped token.
+# Text with no such token comes back byte-identical, and entities around
+# an address (``&lt;``, ``&amp;``) stay. A decode-first pass would rewrite
+# ``AT&amp;T`` to ``AT&T`` in every string and so change the text, content
+# hash and chunk id of chunks that hold no address.
+#
+# An address-shaped token is LOCAL SEP DOMAIN:
+#
+# - SEP: ``@``, fullwidth or small ``@`` (U+FF20, U+FE6B), URL ``%40`` or
+#   ``%2540``, or ``&commat;`` / ``&#64;`` / ``&#x40;`` (any leading zeros,
+#   ``;`` optional) behind any number of ``&amp;`` layers.
+# - LOCAL: a quoted string on one line, or a run of Unicode word
+#   characters, combining marks, invisible characters (soft hyphen,
+#   zero-width space/joiners, word joiner), ``.!#$%&'*+^`{|}~-=``,
+#   ``&amp;`` layers and encoded dots. ``/`` and ``?`` are excluded so a
+#   URL path is not swallowed; ``=`` is included, so ``mail=`` before an
+#   address in a query string goes with it.
+# - DOMAIN: word characters, marks, invisible characters, ``-``, and dots
+#   (``.``, fullwidth ``.`` U+FF0E, or an encoded ``&#46;`` / ``&#x2e;`` /
+#   ``&period;``), with at least one dot, ending in a label that contains
+#   a letter. So ``numpy@1.26.4`` is a version pin, not an address.
+#
+# Matching runs in linear time. Separators are found by one regex pass;
+# each local part is scanned leftwards only back to the previous
+# separator or match, and each domain rightwards only up to the next
+# character that cannot be in a domain, so every character is looked at
+# a bounded number of times. (A single regex with a leftmost-start search
+# is quadratic on a long run with no separator, and a lookbehind that
+# avoids that misses an address that directly follows another one.)
+_SEP_CORE_RE = re.compile(
+    r"[@\uff20\ufe6b]|%(?:25)*40|commat;|#0*64;?|#x0*40;?", re.IGNORECASE
+)
+_DOT_TOKEN_RE = re.compile(
+    r"&(?:amp;)*(?:#0*46;?|#x0*2e;?|period;)", re.IGNORECASE
+)
+_LOCAL_TOKEN_RE = re.compile(
+    r"&(?:amp;)+|&(?:amp;)*(?:#0*46;?|#x0*2e;?|period;)", re.IGNORECASE
+)
+_LOCAL_PUNCT = frozenset(".!#$%&'*+^`{|}~-=")
+_INVISIBLE = frozenset("\u00ad\u200b\u200c\u200d\u2060")
+_DOTS = frozenset(".\uff0e")
+
+
+def _is_word(char: str) -> bool:
+    return (
+        char.isalnum() or char == "_" or unicodedata.category(char)[0] == "M"
+    )
+
+
+def _is_local(char: str) -> bool:
+    return _is_word(char) or char in _LOCAL_PUNCT or char in _INVISIBLE
+
+
+def _separator_start(text: str, match: re.Match, bound: int) -> int | None:
+    """Start of the separator whose core ``match`` found, or None."""
+    start = match.start()
+    if text[start] in "@\uff20\ufe6b%":
+        return start
+    # An entity core (``commat;``, ``#64;``) needs its ``&``, possibly
+    # behind ``&amp;`` layers: ``&amp;amp;#64;``.
+    while start - 4 >= bound and text.startswith("amp;", start - 4):
+        start -= 4
+    if start - 1 >= bound and text[start - 1] == "&":
+        return start - 1
+    return None
+
+
+def _local_start(text: str, sep: int, bound: int) -> int:
+    """Leftmost start of the local part that ends at ``sep`` (``sep`` if none)."""
+    if sep - 1 > bound and text[sep - 1] == '"':
+        quote = text.rfind('"', bound, sep - 1)
+        if quote != -1 and quote < sep - 2 and "\n" not in text[quote:sep]:
+            return quote
+    i = sep
+    while i > bound:
+        char = text[i - 1]
+        if _is_local(char):
+            i -= 1
+        elif char == ";":
+            amp = text.rfind("&", max(bound, i - 40), i)
+            if amp == -1 or not _LOCAL_TOKEN_RE.fullmatch(text, amp, i):
+                break
+            i = amp
+        else:
+            break
+    return i
+
+
+def _domain_end(text: str, start: int) -> int | None:
+    """End of the domain that starts at ``start``, or None if it is not one."""
+    dots: list[tuple[int, int]] = []
+    i, size = start, len(text)
+    while i < size:
+        char = text[i]
+        if char in _DOTS:
+            dots.append((i, i + 1))
+            i += 1
+        elif _is_word(char) or char == "-" or char in _INVISIBLE:
+            i += 1
+        elif char == "&":
+            token = _DOT_TOKEN_RE.match(text, i)
+            if token is None:
+                break
+            dots.append((i, token.end()))
+            i = token.end()
+        else:
+            break
+    # The last label is the one after the right-most dot that still has a
+    # letter; a trailing version-like label (``.4``) or dash is left out.
+    end = i
+    for dot_start, dot_end in reversed(dots):
+        label_end = end
+        while label_end > dot_end and not _is_word(text[label_end - 1]):
+            label_end -= 1
+        if dot_start > start and any(
+            c.isalpha() for c in text[dot_end:label_end]
+        ):
+            return label_end
+        end = dot_start
+    return None
+
+
+# Wrapping characters that may sit directly before a kept ``git@`` inside
+# the scanned local part (```git@host```, ``'git@host'``, ``|git@host|``).
+_GIT_WRAPPERS = frozenset("`'|{")
+# A whole separator (core plus any leading ``&`` / ``&amp;`` layers)
+# starting at a given position.
+_SEP_AT_RE = re.compile(
+    r"[@＠﹫]|%(?:25)*40|&(?:amp;)*(?:commat;|#0*64;?|#x0*40;?)",
+    re.IGNORECASE,
+)
+
+
+def _runs_into_separator(text: str, start: int) -> bool:
+    """Whether a local part could run from ``start`` into a separator.
+
+    Scans rightwards over everything :func:`_local_start` would scan
+    leftwards over (local-part characters and ``&amp;`` / encoded-dot
+    tokens), plus the domain dots, and over a quoted string that ends
+    directly at a separator. True if that scan reaches any separator
+    ``_SEP_CORE_RE`` recognises, whether or not a domain follows it.
+    """
+    i, size = start, len(text)
+    while i < size:
+        if _SEP_AT_RE.match(text, i):
+            return True
+        char = text[i]
+        if char == "&":
+            # The longest token, as _local_start's fullmatch sees it:
+            # ``&amp;#46;`` is one encoded dot, not ``&amp;`` then ``#46;``.
+            ends = [
+                token.end()
+                for token in (
+                    _DOT_TOKEN_RE.match(text, i),
+                    _LOCAL_TOKEN_RE.match(text, i),
+                )
+                if token
+            ]
+            i = max(ends) if ends else i + 1
+        elif char == '"':
+            # ``git@host.jdoe"@cern.ch`` and ``git@host.jdoe"x y"@cern.ch``:
+            # the quote may close or open a quoted local part.
+            if _SEP_AT_RE.match(text, i + 1):
+                return True
+            close = text.find('"', i + 1)
+            return (
+                close != -1
+                and "\n" not in text[i:close]
+                and _SEP_AT_RE.match(text, close + 1) is not None
+            )
+        elif _is_local(char) or char in _DOTS:
+            i += 1
+        else:
+            return False
+    return False
+
+
+def _in_quoted_local(quotes: Sequence[int], text: str, local: int, end: int) -> bool:
+    """Whether ``text[local:end]`` sits in a quoted string that ends at a separator.
+
+    ``quotes`` holds the position of every ``"`` in ``text``, in order.
+    ``"x git@host y"@cern.ch`` is a quoted local part that holds the token.
+    Line breaks are not checked, so a quote pair across lines also counts
+    (fail closed). A binary search keeps this O(log n) per token.
+    """
+    k = bisect.bisect_left(quotes, end)
+    if k == 0 or k == len(quotes) or quotes[k - 1] >= local:
+        return False
+    return _SEP_AT_RE.match(text, quotes[k] + 1) is not None
+
+
+def _is_git_account(
+    text: str, sep: int, local: int, end: int, quotes: Sequence[int]
+) -> bool:
+    """Whether the token ``text[local:end]`` is the literal ``git@`` account.
+
+    The separator at ``sep`` must be a literal ``@``; the local part must be
+    exactly ``git``, or ``git`` behind only wrapping characters (a backtick,
+    ``'``, ``|`` or ``{``). So ``git@github.com``, ``ssh://git@host`` and
+    ```git@host``` qualify, while ``john.git@cern.ch``, ``my-git@cern.ch``,
+    ``jdoe'git@cern.ch``, ``url=git@host``, ``GIT@host`` and ``git%40host``
+    do not.
+
+    The token must also not run into another address: if a local part
+    could continue from its end to any separator (``git@host.jdoe@cern.ch``,
+    ``git@host.jdoe.1+x@cern.ch``, ``git@host.o'brien@cern.ch``,
+    ``'git@host.jdoe'@cern.ch``, ``git@host.jdoe"x"@cern.ch``), its tail may
+    be part of that address's local part, so it is not kept (fail closed).
+    ``git@host:path``, ``git@host/path`` and ``git@host`` before a space
+    stop the scan and are kept. Nor may the token sit inside a quoted local
+    part (``"x git@host:y z"@cern.ch``); ``quotes`` lists every ``"`` in
+    ``text``.
+    """
+    if text[sep] != "@" or sep - 3 < local or text[sep - 3:sep] != "git":
+        return False
+    if any(char not in _GIT_WRAPPERS for char in text[local:sep - 3]):
+        return False
+    if _in_quoted_local(quotes, text, local, end):
+        return False
+    return not _runs_into_separator(text, end)
+
+
+def redact_email_addresses(text: str) -> str:
+    """Remove whole email addresses, including tagged and encoded forms.
+
+    ``john.doe+ops@cern.ch``, ``"john doe"@cern.ch``, ``über.müller@cern.ch``,
+    ``jdoe&#64;cern.ch`` (and ``&#064;``, ``&#x0040;``, ``&#64`` without
+    ``;``, ``&amp;#64;``), ``jdoe＠cern．ch``, ``bob&#64;cern&#46;ch``
+    and the URL forms ``jdoe%40cern.ch`` and ``jdoe%2540cern.ch`` are
+    removed outright (replaced by nothing, as in the cms source). A domain
+    must end in a label with a letter, so ``numpy@1.26.4`` stays.
+
+    Nothing is decoded: text that holds no address-shaped token (see the
+    comment above for the exact shape) comes back byte-identical. Tokens
+    that are address-shaped but not mail addresses, such as
+    ``image@2x.png`` or the ``jdoe@lxplus.cern.ch`` of ``ssh
+    jdoe@lxplus.cern.ch``, are removed too (fail closed).
+
+    One exception (operator decision, 2026-09-28): the literal ``git@``
+    account of a git host is kept whole, so ``git clone
+    git@github.com:org/x.git`` and ``git@gitlab.cern.ch:group/y.git`` stay
+    intact (see :func:`_is_git_account` for the exact form). A kept ``git@``
+    token neither hides nor absorbs an address after it.
+    """
+    pieces: list[str] = []
+    kept = 0  # text[kept:] is not yet copied to pieces
+    bound = 0  # no local part may start before this
+    quotes: list[int] | None = None  # every '"' position, built on first use
+    for core in _SEP_CORE_RE.finditer(text):
+        if core.start() < bound:
+            continue
+        sep = _separator_start(text, core, bound)
+        if sep is None:
+            continue
+        domain_start = core.end()
+        end = _domain_end(text, domain_start)
+        local = _local_start(text, sep, bound)
+        if end is None or local == sep:
+            bound = domain_start
+            continue
+        if quotes is None and text[sep] == "@":
+            quotes = [match.start() for match in re.finditer('"', text)]
+        if _is_git_account(text, sep, local, end, quotes or ()):
+            # Kept in place; no later local part may start inside it.
+            bound = end
+            continue
+        pieces.append(text[kept:local])
+        kept = bound = end
+    if not pieces:
+        return text
+    pieces.append(text[kept:])
+    return "".join(pieces)
+
+
+# Spelled-out ("anti-spam") address forms, which have no ``@`` at all and
+# so are outside redact_email_addresses. Operator rule (Jason,
+# 2026-09-28): remove the bracketed and parenthesised forms, and leave the
+# free-prose "at ... dot" forms alone. Measured on the cms-kb TWiki
+# snapshot (2026-09-28, 1,261 candidate topics of 43,888): bracketed
+# ``jdoe[AT]cern.ch`` / ``jdoe(at)cern(dot)ch`` (37), glued
+# ``john.doe_at_cern.ch`` (6) and ``NOSPAM`` insertions (8) are removed;
+# spaced ``john.doe at cern.ch`` / ``jdoe AT cern DOT ch`` (123) are kept.
+#
+# - Bracketed ``(at)`` ``[at]`` ``{at}`` ``<at>`` (any case, optional
+#   spaces): any domain with a dot (``.``, a bracketed ``(dot)`` /
+#   ``[DOT]``, or a spaced ``dot``) whose last label is two or more
+#   letters, with nothing domain- or path-like after it (so ``Run2 [at]
+#   13.6TeV`` stays).
+# - A spaced ``" at "`` (any case) before a domain with at least one
+#   bracketed ``(dot)`` / ``[DOT]``: ``jdoe at cern(dot)ch``.
+# - Free-prose word separators ``" at "`` / ``" AT "`` with only ``.`` or
+#   a spaced ``" dot "`` / ``" DOT "`` as the dot are never removed:
+#   ``john.doe at cern.ch``, ``jdoe AT cern DOT ch`` and "based at
+#   cern.ch" stay byte for byte.
+# - Glued separators ``_at_``, ``-at-``, ``_AT_`` and ``_NOSPAM_AT_`` (not
+#   covered by the operator rule; removed, and flagged for review) count
+#   only before exactly ``cern.ch``, ``fnal.gov`` or ``gmail.com`` (``.``,
+#   ``(dot)``, ``_dot_`` or a spaced ``DOT`` as the dot) or a plain-dotted
+#   ``.edu`` or ``.gov`` domain, with nothing domain- or path-like after it.
+#   ``x_2016_at_13TeV.root`` and ``x-at-2.3`` stay.
+# - A token that carries ``NOSPAM`` (any case) and, with it taken out,
+#   ends like a mail domain (``.ch``, ``.edu``, ``.gov``, ``.org``,
+#   ``.com``, ``DOTch`` ... or ``cernch``) is removed whole, with a
+#   preceding ``name AT`` / ``name_at_`` part: the ``NOSPAM`` marker says
+#   the token is an address. ``NOSPAM`` alone, or in a name such as
+#   ``NoSpamFilter``, stays.
+#
+# Every repetition is bounded or unambiguous, so matching is linear.
+# Like redact_email_addresses this decodes nothing and only removes the
+# matched token, so text with no match comes back byte-identical.
+# Accepted over-removal: ``f(at)obj.attr``-shaped code goes.
+_OBF_LOCAL = r"(?<![\w.+-])[\w.+-]{1,64}"
+_OBF_BRACKET_DOT = r"\s?[(\[{<]\s?dot\s?[)\]}>]\s?"
+_OBF_END = r"(?![\w-]|[./:@(][\w-])"
+# After a bracketed ``[at]`` any dot counts, bracketed or spelled out
+# (``jdoe[at]cern dot ch``): the brackets already mark the token.
+_OBF_ANY_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| dot )"
+_OBF_STRONG_RE = re.compile(
+    _OBF_LOCAL
+    + r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
+    + r"[\w-]+(?:" + _OBF_ANY_DOT + r"[\w-]+)*"
+    + _OBF_ANY_DOT + r"[^\W\d_]{2,}"
+    + _OBF_END,
+    re.IGNORECASE,
+)
+# A spaced " at " is prose unless the domain after it has a bracketed
+# ``(dot)`` / ``[DOT]``: ``jdoe at cern(dot)ch`` goes, ``jdoe at cern.ch``
+# and ``jdoe AT cern DOT ch`` stay.
+_OBF_SPACED_BRACKET_DOT_RE = re.compile(
+    _OBF_LOCAL
+    + r" at "
+    + r"[\w-]+(?:\.[\w-]+)*" + _OBF_BRACKET_DOT
+    + r"(?:[\w-]+" + _OBF_ANY_DOT + r")*"
+    + r"[^\W\d_]{2,}"
+    + _OBF_END,
+    re.IGNORECASE,
+)
+_OBF_GLUED_SEP = r"(?:_at_|-at-|_AT_|_NOSPAM_AT_)"
+_OBF_WORD_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| (?:DOT|dot) |_(?:DOT|dot)_)"
+_OBF_GLUED_MAIL_RE = re.compile(
+    _OBF_LOCAL
+    + _OBF_GLUED_SEP
+    + r"(?i:cern" + _OBF_WORD_DOT + r"ch|fnal" + _OBF_WORD_DOT + r"gov"
+    + r"|gmail" + _OBF_WORD_DOT + r"com)"
+    + _OBF_END
+)
+# Glued separators also count before any plain-dotted domain ending in
+# .edu or .gov (john.doe_at_physics.ucsd.edu).
+_OBF_GLUED_RE = re.compile(
+    _OBF_LOCAL
+    + _OBF_GLUED_SEP
+    + r"[\w-]{1,63}(?:\.[\w-]{1,63}){0,5}\.(?i:edu|gov)"
+    + _OBF_END
+)
+_OBF_NOSPAM_RE = re.compile(
+    r"(?<![\w.+-])(?:[\w.+-]{1,64}(?: at | AT |_at_|_AT_))?"
+    r"[\w.+-]*NOSPAM[\w.+-]*",
+    re.IGNORECASE,
+)
+_OBF_NOSPAM_DOMAIN_END_RE = re.compile(
+    r"(?:(?:\.|dot|_)(?:ch|edu|gov|org|com)|cernch)\.?$", re.IGNORECASE
+)
+
+
+def _nospam_token(match: re.Match) -> str:
+    rest = re.sub("nospam", "", match.group(0), flags=re.IGNORECASE)
+    if _OBF_NOSPAM_DOMAIN_END_RE.search(rest):
+        return ""
+    return match.group(0)
+
+
+def redact_obfuscated_email_addresses(text: str) -> str:
+    """Remove spelled-out addresses: ``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``,
+    ``john.doe_at_cern.ch`` and ``NOSPAM`` forms. Free-prose forms such as
+    ``john.doe at cern.ch`` and ``jdoe AT cern DOT ch`` are kept. See the
+    comment above for the exact rules.
+
+    Run it after :func:`redact_email_addresses`; it only removes matched
+    tokens, so text without one is returned byte-identical.
+    """
+    out = _OBF_STRONG_RE.sub("", text)
+    out = _OBF_SPACED_BRACKET_DOT_RE.sub("", out)
+    out = _OBF_GLUED_MAIL_RE.sub("", out)
+    out = _OBF_GLUED_RE.sub("", out)
+    return _OBF_NOSPAM_RE.sub(_nospam_token, out)
+
 
 # Text-level HTML character references decoded before redaction. The
 # numeric-reference decoder below deliberately keeps &lt;/&gt; (and any

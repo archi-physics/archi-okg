@@ -19,6 +19,7 @@ import inspect
 import json
 import os
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -547,3 +548,267 @@ def test_an_install_answer_reaches_the_source_byte_for_byte(tmp_path, answer):
     params = body["cmssw_releases"]["params"]
     assert params["map_cache_path"] == answer
     assert params["map_cache_digest"] == digest
+
+
+# --- comp-ops readers with no bundle entry ---------------------------------
+#
+# These readers ship no source-default: an operator registers one by copying
+# the registry-entry template out of the reader module's docstring. Before
+# they had adapters that template named the bare reader, so every run failed
+# on `next_cursor` exactly as the bundle's own sources once did. The template
+# is what an operator copies, so the test reads it rather than restating it.
+
+#: source id -> the files its template's params name, as a tiny valid cache.
+#: The shapes follow the readers' own tests under tests/sources/.
+_COMPOPS_CACHES = {
+    "cric": {
+        "sites_path": {
+            "T2_US_MIT": {
+                "tier_level": 2,
+                "facility": "MIT",
+                "sitedb_title": "MIT Bates",
+                "computeunits": {"MIT-CE1": {}},
+            }
+        },
+        "storage_units_path": {
+            "MIT-SE": {"type": "DISK", "site": {"name": "T2_US_MIT"}}
+        },
+        "compute_units_path": {"MIT-CE1": {"corepower": 11.0}},
+        "facilities_path": {"MIT": {"cmssites": [{"name": "T2_US_MIT"}]}},
+        "responsibilities_path": {
+            "result": [["adalove", "MIT Bates", "Site Executive"]]
+        },
+    },
+    "cric_core": {
+        "services_path": {
+            "reqmgr2-cmsweb.cern.ch": {
+                "type": "webservice",
+                "endpoint": "cmsweb.cern.ch/reqmgr2",
+                "rcsite": "CERN-PROD",
+            }
+        },
+        "rcsites_path": {
+            "CERN-PROD": {"sites": [{"name": "T0_CH_CERN", "vo_name": "cms"}]}
+        },
+        "federations_path": {
+            "CH-CERN": {"vos": ["cms"], "rcsites": ["CERN-PROD"], "pledges": {}}
+        },
+    },
+    "dqm": {
+        "records_path": [
+            {
+                "filename": "Cert_Collisions2024_378981_385194_Golden.json",
+                "cert_name": "Cert_Collisions2024_378981_385194_Golden",
+                "run_range": [378981, 385194],
+                "datasets": ["/Muon0/Run2024C-PromptReco-v1/DQMIO"],
+            }
+        ],
+    },
+    "gocdb_downtimes": {
+        "records_path": [
+            {
+                "downtime_id": 101,
+                "severity": "OUTAGE",
+                "classification": "SCHEDULED",
+                "start_date": "2026-08-01T06:00:00",
+                "end_date": "2026-08-01T18:00:00",
+                "hosted_by": "T2_US_MIT",
+                "service_type": "CE",
+                "hostname": "ce01.cmsaf.mit.edu",
+            }
+        ],
+        "sites_path": {"T2_US_MIT": {}},
+        "services_path": {"reqmgr2": {"endpoint": "cmsweb.cern.ch/reqmgr2"}},
+    },
+    "conddb_global_tags": {
+        "records_path": [{"name": "140X_dataRun3_v2", "release": "CMSSW_14_0_X"}],
+        "cmssw_records_path": [{"label": "CMSSW_14_0_1"}],
+    },
+    "dbs_datasets": {
+        "records_path": [
+            {
+                "dataset": "/TTto2L2Nu/Run3Summer23-v1/AODSIM",
+                "data_tier_name": "AODSIM",
+                "primary_ds_name": "TTto2L2Nu",
+                "processed_ds_name": "Run3Summer23-v1",
+            }
+        ],
+    },
+    "wmstats_workflows": {
+        "records_path": [
+            {
+                "RequestName": "pdmvserv_task_TOP-Run3Summer23-00001",
+                "RequestType": "TaskChain",
+                "RequestStatus": "running-open",
+                "OutputDatasets": ["/TTto2L2Nu/Run3Summer23-v1/AODSIM"],
+            }
+        ],
+    },
+    # Reads no cache: its template authors no parameters, and the reader
+    # falls back to its configured default repository list.
+    "github_repos": {},
+}
+
+#: source id -> (module, a subtype a successful run must emit).
+_COMPOPS_READERS = {
+    "cric": ("archi.sources.cric", "site"),
+    "cric_core": ("archi.sources.cric", "infrastructure_service"),
+    "dqm": ("archi.sources.dqm", "data_certification"),
+    "gocdb_downtimes": ("archi.sources.gocdb", "downtime"),
+    "conddb_global_tags": ("archi.sources.conddb", "global_tag"),
+    "dbs_datasets": ("archi.sources.dbs", "dataset"),
+    "wmstats_workflows": ("archi.sources.wmstats", "workflow"),
+    "github_repos": ("archi.sources.github_repos", "software_repository"),
+}
+
+
+def _docstring_template(module_name, source_id):
+    """The registry entry for ``source_id`` in the module's docstring.
+
+    Each reader module ends its docstring with a literal YAML block after a
+    ``::`` line; that block is what an operator pastes into a registry.
+    """
+    module = importlib.import_module(module_name)
+    _head, sep, block = (module.__doc__ or "").rpartition("::\n")
+    assert sep, f"{module_name} has no registry-entry template"
+    templates = yaml.safe_load(textwrap.dedent(block))
+    assert source_id in templates, f"{module_name} template has no {source_id}"
+    entry = templates[source_id]
+    assert entry["module"] == module_name
+    return entry
+
+
+@pytest.mark.parametrize("source_id", sorted(_COMPOPS_READERS))
+def test_compops_template_names_an_adapter_that_runs(tmp_path, source_id):
+    module_name, subtype = _COMPOPS_READERS[source_id]
+    entry = _docstring_template(module_name, source_id)
+    module = importlib.import_module(module_name)
+    cls = getattr(module, entry["class"], None)
+    assert cls is not None, f"{module_name} defines no {entry['class']}"
+    assert inspect.isclass(cls) and issubclass(cls, ConnectorAdapter), (
+        f"the {source_id} template names {entry['class']}, which the substrate "
+        "runner cannot drive; it must name the reader's ConnectorAdapter"
+    )
+
+    # Authority: string literals the substrate can read, equal to the
+    # reader's own values and to what the template declares.
+    reader = inspect.getattr_static(cls, "reader_class")
+    source_path = Path(module.__file__)
+    for attr in ("profile", "change_probe_kind"):
+        literal = _class_level_constant(source_path, entry["class"], attr)
+        assert literal == getattr(reader, attr)
+        assert inspect.getattr_static(cls, attr) == literal
+    assert inspect.getattr_static(cls, "profile") == entry["source_class"]
+
+    # The template's own parameters bind against the adapter's signature.
+    signature = inspect.signature(cls)
+    assert not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+    )
+    params = dict(entry.get("params") or {})
+    signature.bind(**params)
+
+    # And it runs: write a tiny cache at the template's paths, then drive the
+    # adapter the way the substrate runner does.
+    caches = _COMPOPS_CACHES[source_id]
+    assert set(caches) == set(params), "the fixture must cover every template path"
+    for key, payload in caches.items():
+        path = tmp_path / params[key]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload))
+    if "base" in signature.parameters:
+        params["base"] = str(tmp_path)
+    adapter = cls(**params)
+    assert adapter.preflight().status == "ok"
+    run, facts = _run(adapter)
+    assert run.completed_scope is True
+    primary = [f for f in facts if isinstance(f, NodeFact) and f.subtype == subtype]
+    assert primary
+    # The declared identity fields are the keys the reader actually emits for
+    # its primary records, so the declaration describes the real record key.
+    for fact in primary:
+        assert set(fact.source_record_id) == set(entry["record_identity_fields"]), (
+            f"{source_id}: {fact.node_id} is keyed by {sorted(fact.source_record_id)}"
+            f" but the template declares {entry['record_identity_fields']}"
+        )
+
+
+def test_compops_template_profile_tuples_are_all_accepted():
+    """Call the substrate's own validator on each template, as install does.
+
+    Each template once declared a combination `okg install` refused with
+    `deployment.source_registry.profile_invalid`: `record_identity_kind:
+    remote_id` under discovery_crawl or reference_catalog, and `content_hash`
+    revisions under mutable_api for WMStats. The fix is in the declaration
+    only: the readers' emitted record keys and node ids are unchanged, and
+    match what the okg-deployments cms registry declared for the same code.
+    """
+    from okg.substrate.sources.profiles import validate_profile_tuple
+
+    refused = {}
+    for source_id, (module_name, _subtype) in sorted(_COMPOPS_READERS.items()):
+        entry = _docstring_template(module_name, source_id)
+        try:
+            validate_profile_tuple(
+                source_class=entry["source_class"],
+                record_identity_kind=entry.get("record_identity_kind"),
+                source_revision_kind=entry.get("source_revision_kind"),
+                deletion_semantics=entry.get("deletion_semantics"),
+                publication_mode=entry.get("publication_mode"),
+            )
+        except ValueError as exc:
+            refused[source_id] = str(exc)
+    assert not refused, (
+        "these templates would fail `okg install` with "
+        "deployment.source_registry.profile_invalid:\n\n"
+        + "\n\n".join(f"{name}: {why}" for name, why in sorted(refused.items()))
+    )
+
+
+@pytest.mark.parametrize("source_id", sorted(_COMPOPS_READERS))
+def test_compops_template_passes_strict_registry_admission(source_id):
+    """Admit the pasted template the way a registry load does, then bind it.
+
+    Uses okg's own admission and `source_adapter_init_params` on the strict
+    contract, as the bundle test above does. This is what caught the GitHub
+    template's bare `params:` (null), which strict admission refuses with
+    `source_params_not_mapping`.
+    """
+    import dataclasses
+
+    from okg.substrate.ingest.adapter_factory import source_adapter_init_params
+    from okg.substrate.sources.registry import (
+        STRICT_ADMISSION_CONTRACT,
+        admit_source_registry_document,
+    )
+
+    module_name, _subtype = _COMPOPS_READERS[source_id]
+    entry = _docstring_template(module_name, source_id)
+    admission = admit_source_registry_document(
+        {"sources": {source_id: entry}}, registry_path=Path("registry.yaml")
+    )
+    strict = dataclasses.replace(
+        admission.entries[source_id], admission_contract=STRICT_ADMISSION_CONTRACT
+    )
+    params = source_adapter_init_params(
+        strict,
+        dsn="postgresql://localhost/unused",
+        deployment="unused",
+        adapter_class=getattr(importlib.import_module(module_name), entry["class"]),
+    )
+    assert set(entry["params"]) <= set(params)
+
+
+def test_a_bare_compops_reader_lacks_the_field_the_runner_reads(tmp_path):
+    """The defect the adapters exist for, shown on one reader.
+
+    If a reader's run result ever grows ``next_cursor`` the adapters become
+    redundant; this test says so rather than letting them rot silently.
+    """
+    from archi.sources.dqm import DQMSource
+
+    path = tmp_path / "data" / "dqm" / "records.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(_COMPOPS_CACHES["dqm"]["records_path"]))
+    run = DQMSource(base=str(tmp_path)).run("run-1", mode="scope_complete")
+    assert not hasattr(run, "next_cursor")

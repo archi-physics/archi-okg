@@ -52,6 +52,17 @@ hash their input with a literal backslash-zero separator (the cms
 original's ``f'..\\0..'`` inside an f-string), not the NUL byte docs.py
 uses. Changing it would re-key every twiki chunk at cutover.
 
+Email addresses are removed from every emitted text field (page title,
+author, parent topic, version, date, body, chunk text) by
+:func:`archi.enrichment.anonymizer.redact_email_addresses`, the same
+email-only pass the JIRA source uses, plus
+``redact_obfuscated_email_addresses`` for bracketed spelled-out forms
+(``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``); names are kept (operator
+decision for the cms-kb public chat, 2026-09-28). Free-prose forms
+(``john.doe at cern.ch``) and the ``git@`` account of a git host
+(``git@github.com:org/x.git``) are kept. Chunks whose text held an
+address get new chunk ids on the next ingest.
+
 Deliberate parity deviations from the cms parser (its ``=code=``
 unwrap regex paired ``=`` across lines/assignments and its heading
 ``\\s*`` absorbed the next line after a bare marker) are fixed in
@@ -209,8 +220,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -228,6 +240,11 @@ from okg.deployment import (
 from okg.deployment import ContentHashProbe
 from okg.deployment import file_preflight
 
+from archi.enrichment import anonymizer as _anonymizer
+from archi.enrichment.anonymizer import (
+    redact_email_addresses,
+    redact_obfuscated_email_addresses,
+)
 from archi.sources._sdk_adapter import ReaderAdapter
 from archi.sources._twiki_physics import PhysicsFilterReport, filter_records
 from archi.auth.cache import (
@@ -399,7 +416,7 @@ class TwikiEOSSource:
                 "datasets_path": self.datasets_path,
                 "global_tags_path": self.global_tags_path,
             },
-            emit_targets=TwikiEOSSource,
+            emit_targets=_emit_targets(TwikiEOSSource),
         )
 
     def _probe_content_items(self) -> list[tuple[str, Any]]:
@@ -809,7 +826,7 @@ class TwikiCrawlSource:
                 "max_pages": self.max_pages,
                 "skip_patterns": list(self.skip_patterns),
             },
-            emit_targets=TwikiCrawlSource,
+            emit_targets=_emit_targets(TwikiCrawlSource),
             base=base,
         )
 
@@ -1119,6 +1136,19 @@ class _TwikiCrawlOutcome:
     truncated_queued: int = 0
 
 
+def _emit_targets(source_class: type) -> list[Any]:
+    """What the change probe fingerprints as this source's emission code.
+
+    The class alone is not enough: the facts are built by module-level
+    functions here (``_facts_for_twiki_records``) and the email redaction
+    lives in :mod:`archi.enrichment.anonymizer`. With only the class, a
+    change to either left the probe token unchanged, so an unchanged
+    snapshot was skipped and text already stored kept its addresses.
+    Fingerprinting both modules makes such a change re-emit once.
+    """
+    return [source_class, sys.modules[__name__], _anonymizer]
+
+
 def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1237,6 +1267,42 @@ def _topic_reference_page_ids(
         )
 
 
+def _redact(text: str) -> str:
+    return redact_obfuscated_email_addresses(redact_email_addresses(text))
+
+
+def _without_email_addresses(record: TwikiRecord) -> TwikiRecord:
+    """The record with email addresses removed from its text fields.
+
+    Uses :func:`archi.enrichment.anonymizer.redact_email_addresses`, the
+    email-only pass the JIRA source uses, then
+    :func:`~archi.enrichment.anonymizer.redact_obfuscated_email_addresses`
+    for the bracketed spelled-out forms TWiki topics use
+    (``jdoe[AT]cern.ch``, ``jdoe(at)cern(dot)ch``), glued ``_at_`` forms
+    and ``NOSPAM``; free-prose ``john.doe at cern.ch`` and the ``git@``
+    account stay (operator rule, 2026-09-28). Names (``Main.JohnDoe``, the
+    ``%META`` author) are kept. Neither decodes anything, so a field
+    without an address comes back byte-identical and its chunk ids do
+    not move.
+
+    Not redacted: the identity fields ``page_id``, ``source_path``,
+    ``url``, ``web_name`` and ``web_root`` (all derived from the topic
+    path; redacting them would change or collide node and record ids,
+    and TWiki topic names are WikiWords, which cannot hold an address),
+    and ``wiki_links`` / ``bare_wikiwords``, which are only resolved to
+    edges between known topic ids and are never emitted as text.
+    """
+    return replace(
+        record,
+        title=_redact(record.title),
+        body=_redact(record.body),
+        last_modified=_redact(record.last_modified),
+        author=_redact(record.author),
+        parent_topic=_redact(record.parent_topic),
+        version=_redact(record.version),
+    )
+
+
 def _facts_for_twiki_records(
     records: list[TwikiRecord],
     revision: dict[str, Any],
@@ -1245,6 +1311,11 @@ def _facts_for_twiki_records(
     chunker_name: str,
 ) -> Iterator[NodeFact | EdgeFact]:
     known_node_ids = {record.node_id for record in records}
+    # Every emitted string (page attrs, chunk text, heading_path, and the
+    # text the chunk reference edges are matched on) comes from these
+    # redacted records. Redacting before chunking also catches an
+    # address that would straddle a chunk boundary.
+    records = [_without_email_addresses(record) for record in records]
     for record in records:
         yield _page_node(record, revision)
         yielded_targets: set[str] = set()

@@ -14,7 +14,7 @@ from a substrate module. ::
 
     dqm:
       module: archi.sources.dqm
-      class: DQMSource
+      class: DQMAdapter
       ownership_id: <instance>.dqm
       admission_policy:
         producer_id: <instance>.dqm
@@ -39,7 +39,7 @@ from a substrate module. ::
             - data_certification recorded_during run
             - data_certification references dataset
       source_class: discovery_crawl
-      record_identity_kind: remote_id
+      record_identity_kind: scoped_locator
       record_identity_fields: [certification_id]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope
@@ -75,6 +75,7 @@ from archi.auth.cache import (
     resolve_repo_path,
 )
 from archi.sources._cache_report import skipped_items_status
+from archi.sources._sdk_adapter import ReaderAdapter
 
 _GROUP_RE = re.compile(r"Cert_((?:Collisions|Cosmics|Commissioning)\d+)")
 _CERT_TYPE_MAP = {
@@ -350,3 +351,21 @@ def _group_and_year(name: str) -> tuple[str, int | None]:
     if year_match:
         return group, 2000 + int(year_match.group(1))
     return group, None
+
+
+class DQMAdapter(ReaderAdapter):
+    """Registry adapter for :class:`DQMSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = DQMSource
+    profile = "discovery_crawl"
+    change_probe_kind = "content_hash"
