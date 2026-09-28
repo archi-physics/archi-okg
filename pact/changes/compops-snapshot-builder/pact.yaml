@@ -423,4 +423,25 @@ evidence:
   head: 17ffb2824b386935c987c1ac724cd769ef14f07a
   at: '2026-09-28T21:17:37+00:00'
   note: 13 passed at this head inside the 947-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 040d5f9627020aca8d4a3b1941c8d1d8f205ec3d
+  at: '2026-09-28T21:31:07+00:00'
+  note: '961 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 282 snapshot tests. Seventh-review fixes: jdoe<ESC>\@example.org, jdoe@example<ESC>\.org,
+    jdoe<ESC>Pq<ESC>\@example.org, jdoe<ESC>>@example.org and the word-rule-only forms jdoe<ESC>(<e-acute>@example.org
+    and jdoe[<U+200E>at]laptop refuse in JSON and TWiki; a TWiki file named jdoe<U+200E>@example.org.txt
+    refuses; a hidden character in a word with no @ or bracketed at/dot is kept or stripped
+    as before. The same test file on 6adb358: 13 failed, 269 passed (the no-separator regression
+    passes there by design). A 120,000-case fuzz including the new escape forms left no local-part
+    letter of a terminal-visible address in any accepted output.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 040d5f9627020aca8d4a3b1941c8d1d8f205ec3d
+  at: '2026-09-28T21:31:07+00:00'
+  note: 13 passed at this head inside the 961-test suite; downloaders unchanged since 96a34d6.
 decisions: []
