@@ -90,15 +90,26 @@ For every group the build:
    the fallback reading, the page is stored without its invalid bytes
    instead. The lock records `text_pages`, `pages_valid_utf8`,
    `pages_with_fallback_runs`, `pages_bytes_dropped`, `fallback_bytes` (per
-   decoding). ANSI colour sequences (`ESC[32m`) are removed from text files
-   and from every JSON string before redaction, since they can sit inside an
-   address; the lock counts them as `ansi_sequences_stripped` for every
-   group. A text file with more than 1% control
-   characters, and at least 16 of them, is refused as binary; tab, newline,
-   vertical tab, form feed and carriage return do not count. Any string in which
-   a control character splits an address or a spelled-out address
-   (`a.b@c<control>d.ch`, `jdoe<DEL>[at]cern.ch`) is refused, because the
-   redactors would not see it.
+   decoding). Terminal escape sequences are removed from text files and from
+   every JSON string and key before redaction, since they can sit inside an
+   address: CSI sequences such as colours (`ESC[32m`, and the 8-bit form that
+   starts with U+009B) and `ESC` + intermediate bytes + a final byte (the
+   `ESC ( B` that `tput sgr0` emits). The lock counts them as
+   `ansi_sequences_stripped` for every group. A text file with more than 1%
+   control characters, and at least 16 of them, is refused as binary; tab,
+   newline, vertical tab, form feed and carriage return do not count. The
+   same characters are the control characters for the next rule: each text
+   file and JSON string and key is also redacted with its control characters
+   removed, before the real redaction runs, and if that removes any character
+   the real redaction would keep, the group is refused. This catches a
+   control character anywhere in an address or a spelled-out address
+   (`jdoe<DEL>x@example.org`, `a.b@c<control>d.org`,
+   `j<DEL>doe.x(at)example(dot)org`), where the redactor would stop at the
+   control character and keep part of the name. It can also refuse a string
+   where a control character only joins a word to an address
+   (`word<control>jdoe@example.org`). The configured `note`, which is
+   checked but not redacted, is refused when an address appears in it once
+   its control characters are removed.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC

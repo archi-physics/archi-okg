@@ -1864,3 +1864,80 @@ def test_ansi_codes_are_stripped_from_json_strings(tmp_path, sources):
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
     assert stored[0]["description"] == "Logged by  in bold."
     assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 4
+
+
+# --- sixth review: a control character inside the local part --------------------
+#
+# The recheck used to run on the redacted output. A control character inside
+# the local part made the redactor remove only the part after it, so the name
+# before it survived and the recheck saw no address left.
+
+LOCAL_PART_CONTROLS = [
+    "jdoe\x7fx@example.org",
+    "jdoe\x01.x@example.org",
+    "jdoe\x7fx[at]example.org",
+    "j\x7fdoe.x(at)example(dot)org",
+]
+
+
+@pytest.mark.parametrize("value", LOCAL_PART_CONTROLS)
+def test_a_control_inside_the_local_part_of_a_json_string_refuses(
+    tmp_path, sources, value
+):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"Logged by {value} today."
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+@pytest.mark.parametrize("value", LOCAL_PART_CONTROLS)
+def test_a_control_inside_the_local_part_on_a_text_page_refuses(
+    tmp_path, sources, value
+):
+    (sources["twiki-eos"] / "Local.txt").write_bytes(
+        f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
+    )
+    with pytest.raises(
+        BuildRefused, match="Local.txt: an address is split by a control character"
+    ):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+#: Terminal sequences the old pattern missed: ``tput sgr0`` emits ESC ( B
+#: (select the ASCII character set) and some tools emit the 8-bit CSI U+009B.
+TERMINAL_SEQUENCES = [
+    ("\x1b[1mjdoe\x1b(B\x1b[m@example.org", 3),
+    ("jdoe\x9b32m@example.org", 1),
+]
+
+
+@pytest.mark.parametrize(("value", "sequences"), TERMINAL_SEQUENCES)
+def test_charset_and_8bit_csi_sequences_are_stripped_from_json(
+    tmp_path, sources, value, sequences
+):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = f"Logged by {value} today."
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert stored[0]["description"] == "Logged by  today."
+    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == sequences
+
+
+@pytest.mark.parametrize(("value", "sequences"), TERMINAL_SEQUENCES)
+def test_charset_and_8bit_csi_sequences_are_stripped_from_text(
+    tmp_path, sources, value, sequences
+):
+    (sources["twiki-eos"] / "Term.txt").write_bytes(
+        f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
+    )
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Term.txt"].decode("utf-8")
+    assert page.startswith("---+ Page\nAsk  today.\n")
+    assert "jdoe" not in page
+    assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == sequences

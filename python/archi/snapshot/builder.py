@@ -407,6 +407,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                         text_stats["pages_bytes_dropped"] += 1
                 else:
                     text_stats["pages_valid_utf8"] += 1
+            _refuse_hidden_address(group.name, rel, text)
             data = counter.redact(text).encode("utf-8")
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
@@ -546,13 +547,17 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
 
 def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
     if isinstance(value, str):
-        return counter.redact(counter.strip_ansi(value))
+        value = counter.strip_ansi(value)
+        _refuse_hidden_address(group, file_name, value)
+        return counter.redact(value)
     if isinstance(value, list):
         return [_redact_json(group, file_name, item, counter) for item in value]
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            clean_key = counter.redact(counter.strip_ansi(key))
+            key = counter.strip_ansi(key)
+            _refuse_hidden_address(group, file_name, key)
+            clean_key = counter.redact(key)
             if clean_key in out:
                 raise GroupRefused(
                     group,
@@ -626,10 +631,15 @@ _CONTROL_RE = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
 #: least ``CONTROL_MIN_COUNT`` of them, are control characters.
 CONTROL_SHARE_LIMIT = 0.01
 CONTROL_MIN_COUNT = 16
-#: ANSI CSI escape sequences (terminal colours pasted from logs). Removed
-#: from text before redaction: ``ESC[32mjason ESC[0m@laptop.cern.ch`` would
-#: otherwise hide the address from the redactor.
-_CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
+#: Terminal escape sequences pasted from logs, removed from text before
+#: redaction (``ESC[32mjdoe ESC[0m@example.org`` would otherwise hide the
+#: address from the redactor): CSI sequences, both ``ESC [`` and the 8-bit
+#: U+009B form, and ``ESC`` + intermediates + final byte, such as the
+#: ``ESC ( B`` that ``tput sgr0`` emits.
+_CSI_RE = re.compile(
+    r"(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"
+    r"|\x1b[\x20-\x2f]+[\x30-\x7e]"
+)
 
 
 @dataclass
@@ -675,6 +685,27 @@ def _redaction_mask(text: str) -> bytearray:
         if not changed:
             break
     return mask
+
+
+def _refuse_hidden_address(group: str, where: str, text: str) -> None:
+    """Refuse ``text`` when a control character hides part of an address.
+
+    ``jdoe<DEL>x@example.org`` reads as ``jdoex@example.org``, but the
+    redactor stops at the control character and would keep ``jdoe``. So the
+    redaction mask of ``text`` with its control characters removed is
+    compared with the mask of ``text`` itself; any character the first
+    removes and the second keeps refuses the group. Checked on the input, not
+    the output: the kept part no longer looks like an address after redaction.
+    """
+    if not _CONTROL_RE.search(text):
+        return
+    kept = [i for i, char in enumerate(text) if not _CONTROL_RE.match(char)]
+    found = _redaction_mask("".join(text[i] for i in kept))
+    removed = _redaction_mask(text)
+    if any(flag and not removed[kept[i]] for i, flag in enumerate(found)):
+        raise GroupRefused(
+            group, f"{where}: an address is split by a control character"
+        )
 
 
 def _decode_with_fallback(data: bytes) -> _Page:
