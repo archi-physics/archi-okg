@@ -28,6 +28,9 @@ Deliberately **not** ported:
   anonymizer per the porting matrix); the hook point to preserve there
   is the text surface this module emits — ``jira_issue.attrs`` text
   fields and ``document_chunk.attrs["text"]`` — before embedding.
+  The cms source's narrower, always-on email removal *is* kept: every
+  string read from the cache goes through :func:`_pg_text`, which
+  calls :func:`archi.enrichment.anonymizer.redact_email_addresses`.
 - The live JIRA fetch itself: like the cms original this source reads
   an externally maintained records cache; credentials stay env-var
   references only.
@@ -178,6 +181,7 @@ from okg.deployment import (
     ConnectorRun,
 )
 
+from archi.enrichment.anonymizer import redact_email_addresses
 from archi.sources._sdk_adapter import ReaderAdapter
 from archi.auth.cache import (
     cache_or_forced_live_change_probe,
@@ -772,7 +776,16 @@ def _chunk_text(record: JiraIssueRecord) -> str:
 
 
 def _pg_text(text: str) -> str:
-    return text.replace("\x00", " ")
+    """Normalize one source string: NUL to space, email addresses removed.
+
+    Every string this source reads from the records cache passes through
+    here (key, summary, description, environment, dates, status-like
+    names, people, labels, components, comment authors and bodies), so
+    no address reaches a ``jira_issue`` or ``person`` attr or
+    ``document_chunk`` text. Parity with okg-deployments
+    ``cms/cms_sources/jira.py`` (commit b25e36f06c).
+    """
+    return redact_email_addresses(text.replace("\x00", " "))
 
 
 def _sha256(text: str) -> str:

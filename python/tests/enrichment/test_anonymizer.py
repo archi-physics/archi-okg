@@ -4,7 +4,9 @@ Runs with NER disabled (``nlp_model=None``) so no spaCy model is
 needed: the regex passes plus ``known_names`` cover the connector
 emission hook (jira/docs ``anonymize_data``) deterministically.
 """
-from archi.enrichment.anonymizer import Anonymizer
+import pytest
+
+from archi.enrichment.anonymizer import Anonymizer, redact_email_addresses
 
 
 def _anonymizer(**kwargs):
@@ -246,3 +248,191 @@ def test_real_greetings_and_signoffs_still_stripped():
     )
     out = an.anonymize(text)
     assert out.strip() == "The transfer failed overnight."
+
+
+# --- redact_email_addresses: the email-only pass sources call ---------------
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("mail john.doe@cern.ch now", "mail  now"),
+        ("tagged john.doe+ops@cern.ch", "tagged "),
+        ('quoted "john doe"@cern.ch.', "quoted ."),
+        ("encoded jdoe&#64;cern.ch", "encoded "),
+        ("hex jdoe&#x40;cern.ch", "hex "),
+        ("named jdoe&commat;cern.ch", "named "),
+        ("double jdoe&amp;#64;cern.ch", "double "),
+        ("url ?mail=john.doe%40cern.ch&x=1", "url ?&x=1"),
+        ("host cmsweb.cern.ch stays", "host cmsweb.cern.ch stays"),
+    ],
+)
+def test_redact_email_addresses_forms(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def test_redact_email_addresses_changes_nothing_else():
+    # Unlike Anonymizer.anonymize: no greeting, sign-off, name, NBSP or
+    # general entity pass, so text without an address is returned as is.
+    text = "Hi,\nJohn Doe &lt;b&gt; run 381000\nThanks"
+    assert redact_email_addresses(text) == text
+
+
+# Address forms the first version let through whole or in part. Each one
+# must be removed entirely: no prefix of the local part may survive.
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("non-ascii \u00fcber.m\u00fcller@cern.ch end", "non-ascii  end"),
+        # NFD: "u" followed by a combining diaeresis (U+0308).
+        ("nfd u\u0308ber.mu\u0308ller@cern.ch end", "nfd  end"),
+        ("nfd domain jdoe@ce\u0301rn.ch end", "nfd domain  end"),
+        ("zero-padded jdoe&#064;cern.ch end", "zero-padded  end"),
+        ("hex zero-padded jdoe&#x0040;cern.ch end", "hex zero-padded  end"),
+        ("no semicolon jdoe&#64cern.ch end", "no semicolon  end"),
+        ("hex no semicolon jdoe&#x40cern.ch end", "hex no semicolon  end"),
+        ("url ?mail=john.doe%40cern.ch&x=1", "url ?&x=1"),
+        ("double url ?mail=john.doe%2540cern.ch&x=1", "double url ?&x=1"),
+        ("fullwidth jdoe\uff20cern.ch end", "fullwidth  end"),
+        ("small at jdoe\ufe6bcern.ch end", "small at  end"),
+        ("amp in local jdoe&amp;x@cern.ch end", "amp in local  end"),
+        ("double commat jdoe&amp;commat;cern.ch end", "double commat  end"),
+    ],
+)
+def test_redact_email_addresses_removes_whole_address(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "AT&amp;T ok",
+        "R&amp;D &commat; CERN, ref &#64; and &#x40; alone",
+        "double &amp;amp; stays, run 381000",
+        "Hi,\nJohn Doe &lt;b&gt; 100% done \uff20 home",
+    ],
+)
+def test_redact_email_addresses_leaves_address_free_text_byte_identical(text):
+    # No address, no change: entities are never decoded, so the chunk
+    # text (and its content hash and chunk id) is exactly the input.
+    assert redact_email_addresses(text) == text
+
+
+def test_redact_email_addresses_keeps_entities_around_an_address():
+    # Only the address goes; the surrounding entities stay encoded.
+    text = "R&amp;D &lt;jdoe&#64;cern.ch&gt; ok"
+    assert redact_email_addresses(text) == "R&amp;D &lt;&gt; ok"
+
+
+def test_redact_email_addresses_is_linear_on_long_runs():
+    # Each local part is scanned back only to the previous separator or
+    # match, and each domain forward only to the next non-domain
+    # character, so long runs and runs full of separators stay linear.
+    # A leftmost-start regex took seconds (tens of seconds at 50,000).
+    import time
+
+    run = "a" * 20000 + " " + "&amp;" * 4000 + " " + "b&" * 10000
+    crowded = [
+        "a%40" * 5000,
+        "a@" * 10000,
+        "&amp;" * 4000 + "#64",
+        "x@1.2+" * 4000,
+        "a@b-" * 5000,
+        "&#64" * 5000,
+    ]
+    started = time.perf_counter()
+    assert redact_email_addresses(run) == run
+    assert redact_email_addresses(run + " jdoe@cern.ch") == run + " "
+    for text in crowded:
+        assert redact_email_addresses(text) == text
+    assert time.perf_counter() - started < 1.0
+
+
+# An address directly after another one (JIRA table cells, braces, "+",
+# "&amp;", quotes). The first lookbehind version let the second through.
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("|bob@cern.ch|alice@fnal.gov|", "|"),
+        ("{bob@cern.ch}{alice@fnal.gov}", "}"),
+        ("bob@cern.ch+alice@fnal.gov", ""),
+        ("bob@cern.ch&amp;alice@fnal.gov", ""),
+        ("bob@cern.ch'alice@fnal.gov'", "'"),
+    ],
+)
+def test_redact_email_addresses_adjacent_addresses(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # "=" is a local-part character: no user name prefix survives.
+        ("bounce list-bounces+bob=cern.ch@lists.cern.ch end", "bounce  end"),
+        ("eq first=last@cern.ch end", "eq  end"),
+        ("srs SRS0=HHH=TT=example.com=bob@fwd.org end", "srs  end"),
+        # Encoded or fullwidth dot in the domain.
+        ("encoded dot bob&#64;cern&#46;ch end", "encoded dot  end"),
+        ("hex dot bob@cern&#x2e;ch end", "hex dot  end"),
+        ("fullwidth dot bob\uff20cern\uff0ech end", "fullwidth dot  end"),
+        # Invisible characters inside the address.
+        ("soft hyphen b\u00adob@cern.ch end", "soft hyphen  end"),
+        ("zero width b\u200bob@cern\u200d.ch end", "zero width  end"),
+        ("word joiner bo\u2060b@cern.ch end", "word joiner  end"),
+    ],
+)
+def test_redact_email_addresses_equals_dots_and_invisibles(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pip install numpy@1.26.4",
+        "py-numpy@1.26.4 %gcc@11.2.0",
+        "npm i @types/node@18.0.1",
+        "no dot bob@localhost",
+        "known gap bob@[127.0.0.1]",
+    ],
+)
+def test_redact_email_addresses_keeps_version_pins(text):
+    # A domain must end in a label with a letter: version pins stay.
+    assert redact_email_addresses(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Address-shaped but not mail: removed (fail closed).
+        ("logo image@2x.png end", "logo  end"),
+        ("clone git@github.com:org/x", "clone :org/x"),
+        ("see https://user@host.org/x", "see https:///x"),
+        # A trailing numeric label is left; the address before it goes.
+        ("v bob@cern.ch.123", "v .123"),
+    ],
+)
+def test_redact_email_addresses_address_shaped_tokens(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def _reference_redact(text):
+    # Slow single-regex definition of the same grammar, restricted to
+    # plain ASCII (no quotes, entities, fullwidth or invisible forms).
+    import re
+
+    pattern = (
+        r"[\w.!#$%&'*+^`{|}~=-]+@"
+        r"[\w.-]+\.(?=[\w-]*[^\W\d_])[\w-]*\w"
+    )
+    return re.sub(pattern, "", text)
+
+
+def test_redact_email_addresses_matches_reference_on_random_text():
+    import random
+
+    rng = random.Random(20260928)
+    alphabet = "ab1_.-+=|{}'&%# @@@"
+    for _ in range(20000):
+        text = "".join(
+            rng.choice(alphabet) for _ in range(rng.randint(0, 18))
+        )
+        assert redact_email_addresses(text) == _reference_redact(text), text
