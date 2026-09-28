@@ -80,19 +80,18 @@ requirements:
     reader would skip or drop; any symbolic link, dot-named path or path resolving outside
     the group directory; any text file that holds a NUL byte or is not UTF-8 (TWiki pages
     alone fall back to cp1252, then Latin-1, are stored as UTF-8 and are redacted after decoding,
-    with per-encoding counts in the lock); any file path
-    containing an address; and any unreadable file or too-deeply nested JSON (a named refusal,
-    not a traceback). It removes every email address from every string with redact_email_addresses
-    and records the count removed; drops every field the reader does not read plus the configured
-    drop_fields (WMStats keeps Requestor and removes every RequestorDN and DN key at any depth,
-    which no keep_fields entry can undo); and runs the group''s archi reader, which must report
-    health ok, a completed scope, and the same facts as from the unpruned cache. If any group
-    is refused nothing is written. Otherwise it writes one deterministic tar.zst per group
-    and snapshot.lock.yaml with each group''s collection date, SHA-256, size, file count,
-    record count, addresses removed and contents digest. docs/cache-snapshot.md states that
-    snapshots are private okg-deployments assets never committed to or published from this
-    public repository, and .gitignore ignores them. python -m archi.snapshot verify checks
-    archives against a lock.
+    with per-encoding counts in the lock); any file path containing an address; and any unreadable
+    file or too-deeply nested JSON (a named refusal, not a traceback). It removes every email
+    address from every string with redact_email_addresses and records the count removed; drops
+    every field the reader does not read plus the configured drop_fields (WMStats keeps Requestor
+    and removes every RequestorDN and DN key at any depth, which no keep_fields entry can
+    undo); and runs the group''s archi reader, which must report health ok, a completed scope,
+    and the same facts as from the unpruned cache. If any group is refused nothing is written.
+    Otherwise it writes one deterministic tar.zst per group and snapshot.lock.yaml with each
+    group''s collection date, SHA-256, size, file count, record count, addresses removed and
+    contents digest. docs/cache-snapshot.md states that snapshots are private okg-deployments
+    assets never committed to or published from this public repository, and .gitignore ignores
+    them. python -m archi.snapshot verify checks archives against a lock.
 
 
     Acceptance:
@@ -122,8 +121,8 @@ requirements:
     prefers the map when both exist. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
-    UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an unreadable file and
-    deeply nested JSON each refuse the group by name. [evidence: executed_test]'
+    UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an
+    unreadable file and deeply nested JSON each refuse the group by name. [evidence: executed_test]'
 tasks:
 - id: task.compops-snapshot-builder.downloaders
   requirement: req.compops-snapshot-builder.downloaders
@@ -204,4 +203,25 @@ evidence:
   at: '2026-09-28T06:40:07+00:00'
   note: 13 passed at this head (downloaders unchanged since 96a34d6; rerun inside the 600-test
     suite).
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: be4bc38a1061e344d481df529d4c060fda14c513
+  at: '2026-09-28T07:04:51+00:00'
+  note: '607 passed at this head (okg origin/dev 9ad926c3d1 exported source, Python 3.12,
+    zstd v1.5.7, hatchling on the path), 84 snapshot tests. New: a Latin-1-only TWiki page
+    (0x81 undefined in cp1252) holding j\xe9r\xf4me.dupont@cern.ch loses the whole address;
+    a cp1252 page keeps smart quotes and an en dash as UTF-8; the lock counts {cp1252: 1,
+    latin-1: 1}; NUL still refuses, including in a Latin-1 page; releases.map that is not
+    UTF-8 still refuses; CMSSW reads records.json when the map is absent, prefers the map
+    when both exist, refuses when neither exists. Mutations: no fallback decoding 1 failed,
+    no variant selection 19 failed + 24 errors, no transcode count 1 failed.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: be4bc38a1061e344d481df529d4c060fda14c513
+  at: '2026-09-28T07:04:51+00:00'
+  note: 13 passed at this head inside the 607-test suite; downloaders unchanged since 96a34d6.
 decisions: []
