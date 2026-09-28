@@ -709,14 +709,17 @@ def test_cp1252_and_latin1_runs_are_decoded_and_counted(tmp_path, sources):
     assert row["fallback_bytes"] == {"cp1252": 5, "latin-1": 1}
 
 
-def test_an_address_split_by_a_c1_control_refuses_the_group(tmp_path, sources):
-    # 0x81 is undefined in cp1252, so it decodes as the C1 control U+0081,
-    # which hides a.b@cd.ch from the redactor.
+def test_an_address_split_by_a_c1_fallback_byte_is_removed(tmp_path, sources):
+    # 0x81 is undefined in cp1252; as Latin-1 it is the C1 control U+0081,
+    # which would hide a.b@cd.ch. The page falls back to dropping the byte.
     (sources["twiki-eos"] / "Split.txt").write_bytes(
         b"---+ Page\nMail a.b@c\x81d.ch now.\n" + PADDING
     )
-    with pytest.raises(BuildRefused, match="an address is split by a control character"):
-        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Split.txt"].decode("utf-8")
+    assert page.startswith("---+ Page\nMail  now.\n")
+    assert lock["groups"]["twiki-eos"]["pages_bytes_dropped"] == 1
 
 
 def test_an_address_split_by_a_control_in_json_refuses_the_group(tmp_path, sources):
@@ -739,6 +742,31 @@ def test_a_page_that_is_mostly_control_characters_is_refused_as_binary(
     (sources["twiki-eos"] / "Blob.txt").write_bytes(content)
     with pytest.raises(BuildRefused, match=r"Blob.txt looks binary: \d+ of \d+ characters"):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_fewer_than_16_control_characters_are_not_binary(tmp_path, sources):
+    # 15 controls in a 40-character page: 37%, but too few to call it binary.
+    (sources["twiki-eos"] / "Short.txt").write_bytes(b"---+ Page\n" + b"\x01" * 15 + b" short page text.\n")
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_16_controls_over_1_percent_are_binary(tmp_path, sources):
+    (sources["twiki-eos"] / "Blob.txt").write_bytes(b"---+ Page\n" + b"\x01" * 16 + b" short page text.\n")
+    with pytest.raises(BuildRefused, match="Blob.txt looks binary: 16 of"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+
+
+def test_form_feed_and_vertical_tab_are_not_control_characters_here(tmp_path, sources):
+    # Twenty \f and \v in a short page: not binary. \f before an @ does not
+    # count as splitting an address; the redactor sees no local part there
+    # (a form feed cannot be in one), so nothing is removed or refused.
+    (sources["twiki-eos"] / "Pages.txt").write_bytes(
+        b"---+ Pages\n" + b"\x0c\x0b" * 10 + b"\nfoo\x0c@cern.ch and bar@cern.ch\n"
+    )
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Pages.txt"].decode("utf-8")
+    assert page.endswith("\nfoo\x0c@cern.ch and \n")
 
 
 def test_a_few_control_characters_are_allowed(tmp_path, sources):
@@ -1443,3 +1471,177 @@ def test_an_address_in_a_note_refuses_the_group(tmp_path, sources, note, expecte
     with pytest.raises(BuildRefused, match=expected):
         build(load_config(config), tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+# --- a printable fallback character must not hide an address -----------------------
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"jean.dupont\x93@cern.ch",      # a smart quote before the @
+        b"jean.dupont@ce\x96rn.ch",      # an en dash inside the domain
+        b"jean.dupont@ce\xa0rn.ch",      # a no-break space inside the domain
+        b"jean.dupont\xc0\x80@cern.ch",  # an overlong NUL (two invalid bytes)
+    ],
+    ids=["quote-before-at", "dash-in-domain", "nbsp-in-domain", "overlong-nul"],
+)
+def test_the_third_reviews_examples_lose_the_whole_address(tmp_path, sources, raw):
+    (sources["twiki-eos"] / "Hidden.txt").write_bytes(b"---+ Page\nWrite to " + raw + b" today.\n" + PADDING)
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Hidden.txt"].decode("utf-8")
+    assert "jean" not in page and "dupont" not in page and "cern" not in page and "@" not in page
+    assert "Write to  today." in page
+    assert lock["groups"]["twiki-eos"]["pages_bytes_dropped"] == 1
+
+
+def test_a_stray_byte_away_from_addresses_keeps_its_fallback_character(tmp_path, sources):
+    (sources["twiki-eos"] / "Quote.txt").write_bytes(
+        b"---+ Page\nThe \x93golden\x94 JSON; mail jean.dupont@cern.ch.\n" + PADDING
+    )
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Quote.txt"].decode("utf-8")
+    assert "\u201cgolden\u201d" in page and "dupont" not in page
+    assert lock["groups"]["twiki-eos"]["pages_bytes_dropped"] == 0
+
+
+def test_fuzz_no_address_from_the_dropped_view_survives():
+    """2,000 random pages, each with an address and 1-3 stray bytes placed
+    anywhere, including inside and next to the address."""
+    import random
+
+    from archi.enrichment.anonymizer import email_address_spans
+    from archi.snapshot.builder import _decode_with_fallback
+
+    rng = random.Random(20260928)
+    # The address is written only with letters and digits that the words
+    # around it never use, so any of them left in the output is a leak.
+    address_letters = "qxzkjvy"
+    word_letters = "abdefgilmnoprstuw"
+    marks = set(address_letters + "0123456789@")
+    checked = 0
+    for case in range(2000):
+        local = "".join(rng.choice(address_letters + "0123456789") for _ in range(rng.randint(3, 12)))
+        if rng.random() < 0.3:
+            local = local[:2] + "." + local[2:]
+        domain = "".join(rng.choice(address_letters) for _ in range(rng.randint(2, 8)))
+        address = f"{local}@{domain}.{rng.choice(['qz', 'kj', 'yx'])}".encode()
+        chunks = [bytes([b]) for b in address]
+        for _ in range(rng.randint(1, 3)):
+            stray = bytes([rng.randint(0x80, 0xFF)])
+            chunks.insert(rng.randint(0, len(chunks)), stray)
+        words = [
+            "".join(rng.choice(word_letters) for _ in range(rng.randint(1, 8)))
+            for _ in range(rng.randint(0, 6))
+        ]
+        before = " ".join(words[: len(words) // 2]).encode()
+        after = " ".join(words[len(words) // 2 :]).encode()
+        sep = rng.choice([b" ", b"", b"(", b"<"])
+        data = before + sep + b"".join(chunks) + sep + after + b"\n"
+        page = _decode_with_fallback(data)
+        output = redact(page.text)
+        dropped = data.decode("utf-8", errors="ignore")
+        found = [dropped[a:b] for a, b in email_address_spans(dropped)]
+        for address in found:
+            local, _, domain = address.partition("@")
+            assert address not in output, (case, data, output)
+            assert local not in output and domain not in output, (case, data, output)
+        checked += len(found)
+        # Stray bytes that do not pair into a valid UTF-8 character leave
+        # none of the address's letters behind at all.
+        if not any(0xC0 <= b for b in data if b >= 0x80) or data.decode("utf-8", "ignore").isascii():
+            assert not marks & set(output), (case, data, output)
+    assert checked >= 1000
+
+
+def redact(text):
+    from archi.enrichment.anonymizer import redact_email_addresses
+
+    return redact_email_addresses(text)
+
+
+# --- ANSI colour codes ----------------------------------------------------------------
+
+def test_ansi_colour_codes_do_not_hide_an_address(tmp_path, sources):
+    (sources["twiki-eos"] / "Log.txt").write_bytes(
+        b"---+ Log\n$ \x1b[32mjason\x1b[0m@laptop.cern.ch done \x1b[1;31mERROR\x1b[0m\n" + PADDING
+    )
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Log.txt"].decode("utf-8")
+    assert page.startswith("---+ Log\n$  done ERROR\n")
+    assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == 4
+
+
+# --- signals -----------------------------------------------------------------------------
+
+def test_sigterm_handler_restores_the_default_when_none_was_set(monkeypatch, tmp_path, sources):
+    import archi.snapshot.__main__ as main_module
+
+    calls = []
+    real_signal = signal.signal
+
+    def fake_signal(signum, handler):
+        calls.append(handler)
+        if len(calls) == 1:
+            real_signal(signum, handler)
+            return None  # as for a handler not installed from Python
+        return real_signal(signum, handler)
+
+    monkeypatch.setattr(main_module.signal, "signal", fake_signal)
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        cli_main(["verify", "--lock", str(tmp_path / "missing.yaml"), "--archives", str(tmp_path)])
+    finally:
+        real_signal(signal.SIGTERM, before)
+    assert calls[-1] is signal.SIG_DFL
+
+
+def test_a_second_sigterm_during_cleanup_is_ignored(tmp_path, sources, system_tmp, monkeypatch):
+    import archi.snapshot.builder as builder_module
+
+    work = tmp_path / "work-tmp"
+    work.mkdir()
+    real = builder_module._run_reader
+    fired = []
+
+    def wrapper(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builder_module, "_run_reader", wrapper)
+    real_rmtree = builder_module.shutil.rmtree
+
+    def slow_cleanup(*args, **kwargs):  # a second SIGTERM arrives mid-cleanup
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.2)
+        return real_rmtree(*args, **kwargs)
+
+    monkeypatch.setattr(builder_module.shutil, "rmtree", slow_cleanup)
+    import shutil as shutil_module
+
+    monkeypatch.setattr(shutil_module, "rmtree", slow_cleanup)
+    config = write_config(tmp_path, sources, only=["dqm"])
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit) as info:
+        cli_main(["build", "--config", str(config), "--out", str(tmp_path / "o"),
+                  "--tmp-dir", str(work)])
+    assert info.value.code == 128 + signal.SIGTERM
+    assert list(work.iterdir()) == []
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_file_dates_errors_name_the_file_date_not_collected():
+    with pytest.raises(SnapshotError) as info:
+        parse_config(
+            {"snapshot": "s", "groups": {"cric": {"path": "x", "collected": "2026-06-12",
+                                                    "file_dates": {"facilities.json": "April 9"}}}},
+            base=Path("/tmp"),
+        )
+    message = str(info.value)
+    assert "\"file_dates['facilities.json']\" must be YYYY-MM-DD" in message
+    assert "'collected'" not in message

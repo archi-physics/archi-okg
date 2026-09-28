@@ -29,8 +29,6 @@ inside the group's directory, contents digest).
 """
 from __future__ import annotations
 
-import codecs
-import contextvars
 import dataclasses
 import datetime as dt
 import errno
@@ -52,6 +50,7 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 import yaml
 
 from archi.enrichment.anonymizer import (
+    email_address_spans,
     redact_email_addresses,
     redact_email_addresses_with_count,
 )
@@ -213,29 +212,33 @@ def _file_dates(name: str, value: Any) -> tuple[tuple[str, str], ...]:
         )
     return tuple(
         sorted(
-            (str(file), _parse_collected(f"{name}/{file}", date))
+            (str(file), _parse_collected(name, date, field=f"file_dates[{file!r}]"))
             for file, date in value.items()
         )
     )
 
 
-def _parse_collected(name: str, value: Any) -> str:
-    """``YYYY-MM-DD`` or a range ``YYYY-MM-DD..YYYY-MM-DD``, as a string."""
+def _parse_collected(name: str, value: Any, *, field: str = "collected") -> str:
+    """``YYYY-MM-DD`` or a range ``YYYY-MM-DD..YYYY-MM-DD``, as a string.
+
+    ``field`` names the config entry in errors (``collected`` or a
+    ``file_dates`` entry).
+    """
     if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
         return value.isoformat()
     match = _COLLECTED_RE.match(str(value))
     if not match:
         raise SnapshotError(
-            f"group {name!r}: 'collected' must be YYYY-MM-DD or "
+            f"group {name!r}: {field!r} must be YYYY-MM-DD or "
             f"YYYY-MM-DD..YYYY-MM-DD, got {value!r}"
         )
     try:
         start = dt.date.fromisoformat(match.group(1))
         end = dt.date.fromisoformat(match.group(2)) if match.group(2) else start
     except ValueError as exc:
-        raise SnapshotError(f"group {name!r}: 'collected' {value!r}: {exc}") from exc
+        raise SnapshotError(f"group {name!r}: {field!r} {value!r}: {exc}") from exc
     if end < start:
-        raise SnapshotError(f"group {name!r}: 'collected' range ends before it starts")
+        raise SnapshotError(f"group {name!r}: {field!r} range ends before it starts")
     return str(value)
 
 
@@ -361,16 +364,22 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                 "text_pages": 0,
                 "pages_valid_utf8": 0,
                 "pages_with_fallback_runs": 0,
+                "pages_bytes_dropped": 0,
                 "fallback_bytes": {"cp1252": 0, "latin-1": 0},
+                "ansi_sequences_stripped": 0,
             }
         for rel, path in _text_files(spec, source):
-            text, stats = _read_text(group.name, rel, path, fallback=fallback)
+            page = _read_text(group.name, rel, path, fallback=fallback)
+            text = page.text
             if text_stats is not None:
                 text_stats["text_pages"] += 1
-                if any(stats.values()):
+                text_stats["ansi_sequences_stripped"] += page.ansi_stripped
+                if page.fallback_bytes:
                     text_stats["pages_with_fallback_runs"] += 1
-                    for kind, count in stats.items():
+                    for kind, count in page.fallback_bytes.items():
                         text_stats["fallback_bytes"][kind] += count
+                    if page.bytes_dropped:
+                        text_stats["pages_bytes_dropped"] += 1
                 else:
                     text_stats["pages_valid_utf8"] += 1
             data = counter.redact(text).encode("utf-8")
@@ -582,77 +591,112 @@ def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
     return [(rel, _safe_file(spec.name, source, rel)) for rel in sorted(names)]
 
 
-_FALLBACK_ERRORS = "archi-snapshot-cp1252-runs"
-_fallback_counts: contextvars.ContextVar[dict[str, int]] = contextvars.ContextVar(
-    "archi_snapshot_fallback_counts"
-)
-
-
-def _decode_invalid_run(exc: UnicodeError) -> tuple[str, int]:
-    """Codec error handler: decode one invalid UTF-8 byte run as cp1252.
-
-    Bytes cp1252 leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) decode as
-    Latin-1, which gives C1 control characters; the control-character checks
-    below then see them.
-    """
-    if not isinstance(exc, UnicodeDecodeError):
-        raise exc
-    counts = _fallback_counts.get()
-    chars = []
-    for byte in exc.object[exc.start : exc.end]:
-        try:
-            chars.append(bytes([byte]).decode("cp1252"))
-            counts["cp1252"] += 1
-        except UnicodeDecodeError:
-            chars.append(chr(byte))
-            counts["latin-1"] += 1
-    return "".join(chars), exc.end
-
-
-codecs.register_error(_FALLBACK_ERRORS, _decode_invalid_run)
-
-#: C0 controls other than tab, newline and carriage return, DEL, and C1.
-_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
-#: A page with more control characters than this share is binary, not text.
+#: C0 controls other than tab, newline, vertical tab, form feed and carriage
+#: return; DEL; and C1. Counted by the binary guard, and removed before the
+#: split-address check.
+_CONTROL_RE = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
+#: A page is binary when more than this share of its characters, and at
+#: least ``CONTROL_MIN_COUNT`` of them, are control characters.
 CONTROL_SHARE_LIMIT = 0.01
+CONTROL_MIN_COUNT = 16
+#: ANSI CSI escape sequences (terminal colours pasted from logs). Removed
+#: from text before redaction: ``ESC[32mjason ESC[0m@laptop.cern.ch`` would
+#: otherwise hide the address from the redactor.
+_CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
 
 
-def _read_text(
-    group: str, rel: str, path: Path, *, fallback: bool = False
-) -> tuple[str, dict[str, int]]:
-    """The file's text, and how many bytes were decoded by the fallback.
+@dataclass
+class _Page:
+    text: str
+    fallback_bytes: dict[str, int]
+    bytes_dropped: bool = False
+    ansi_stripped: int = 0
+
+
+def _fallback_char(byte: int) -> tuple[str, str]:
+    """One invalid UTF-8 byte as cp1252, or Latin-1 where cp1252 has none."""
+    try:
+        return bytes([byte]).decode("cp1252"), "cp1252"
+    except UnicodeDecodeError:
+        return chr(byte), "latin-1"
+
+
+def _decode_with_fallback(data: bytes) -> _Page:
+    """Decode UTF-8, falling back per invalid byte; drop them if that hides
+    an address.
+
+    ``surrogateescape`` keeps each invalid byte as one placeholder character,
+    so two views of the page line up character for character:
+
+    - the fallback view, where each invalid byte becomes its cp1252 (else
+      Latin-1) character, which keeps a stray Windows quote readable;
+    - the dropped view, where invalid bytes are simply left out.
+
+    A printable fallback character next to or inside an address (``jean.dupont``,
+    a stray 0x93, ``@cern.ch``) can hide it from the redactor. So when any
+    character of an address found in the dropped view would survive redaction
+    of the fallback view, the page uses the dropped view instead.
+    """
+    raw = data.decode("utf-8", errors="surrogateescape")
+    raw, ansi = _CSI_RE.subn("", raw)
+    counts = {"cp1252": 0, "latin-1": 0}
+    fallback_chars: list[str] = []
+    kept_positions: list[int] = []
+    for index, char in enumerate(raw):
+        if "\udc80" <= char <= "\udcff":
+            decoded, kind = _fallback_char(ord(char) - 0xDC00)
+            counts[kind] += 1
+            fallback_chars.append(decoded)
+        else:
+            fallback_chars.append(char)
+            kept_positions.append(index)
+    if not any(counts.values()):
+        return _Page(raw, {}, ansi_stripped=ansi)
+    fallback_view = "".join(fallback_chars)
+    dropped_view = "".join(raw[i] for i in kept_positions)
+    removed = bytearray(len(fallback_view))
+    for start, end in email_address_spans(fallback_view):
+        removed[start:end] = b"\x01" * (end - start)
+    survives = any(
+        not removed[kept_positions[i]]
+        for start, end in email_address_spans(dropped_view)
+        for i in range(start, end)
+    )
+    if survives:
+        return _Page(dropped_view, counts, bytes_dropped=True, ansi_stripped=ansi)
+    return _Page(fallback_view, counts, ansi_stripped=ansi)
+
+
+def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _Page:
+    """The file's text, decoded and checked.
 
     A NUL byte always refuses the group (UTF-16 puts a NUL between the letters
     of an address, hiding it from the redactor). Invalid UTF-8 refuses it
-    unless ``fallback``: then only each invalid byte run is decoded as cp1252
-    (Latin-1 for bytes cp1252 leaves undefined) and valid UTF-8 stays intact.
-    Decoded text that is more than 1% control characters is refused as
-    binary.
+    unless ``fallback`` (see :func:`_decode_with_fallback`). ANSI colour
+    sequences are removed. Decoded text that is more than 1% control
+    characters, and at least 16 of them, is refused as binary.
     """
     data = path.read_bytes()
     if b"\0" in data:
         raise GroupRefused(group, f"{rel} contains NUL bytes (not UTF-8 text)")
-    counts = {"cp1252": 0, "latin-1": 0}
     if fallback:
-        token = _fallback_counts.set(counts)
-        try:
-            text = data.decode("utf-8", errors=_FALLBACK_ERRORS)
-        finally:
-            _fallback_counts.reset(token)
+        page = _decode_with_fallback(data)
     else:
         try:
-            text = data.decode("utf-8")
+            text, ansi = _CSI_RE.subn("", data.decode("utf-8"))
         except UnicodeDecodeError as exc:
             raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
+        page = _Page(text, {}, ansi_stripped=ansi)
+    text = page.text
     if text:
         controls = len(_CONTROL_RE.findall(text))
-        if controls / len(text) > CONTROL_SHARE_LIMIT:
+        if controls >= CONTROL_MIN_COUNT and controls / len(text) > CONTROL_SHARE_LIMIT:
             raise GroupRefused(
                 group,
                 f"{rel} looks binary: {controls} of {len(text)} characters "
                 f"({100 * controls / len(text):.1f}%) are control characters",
             )
-    return text, counts
+    return page
 
 
 def _strings(value: Any) -> Iterator[str]:

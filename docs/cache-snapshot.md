@@ -79,16 +79,23 @@ For every group the build:
    that contains an email address, and any file the builder cannot read
    (permission denied) or JSON nested too deeply to walk. The configured
    directory itself may be a link. TWiki pages are the one exception to
-   UTF-8: a page is decoded as UTF-8, and only each invalid byte run is
-   decoded as cp1252 (the Windows superset of Latin-1; Latin-1 for the five
-   bytes cp1252 leaves undefined). Valid UTF-8 around a stray byte stays
-   intact, the page is stored as UTF-8, and it is redacted after decoding.
-   The lock records `text_pages`, `pages_valid_utf8`,
-   `pages_with_fallback_runs` and `fallback_bytes` (per decoding). Any text
-   file whose decoded text is more than 1% control characters (other than
-   tab, newline and carriage return) is refused as binary, and any string in
-   which a control character splits an address (`a.b@c<control>d.ch`) is
-   refused, because the redactor would not see that address.
+   UTF-8: a page is decoded as UTF-8, and only each invalid byte is decoded
+   as cp1252 (the Windows superset of Latin-1; Latin-1 for the five bytes
+   cp1252 leaves undefined), so valid UTF-8 around a stray byte stays
+   intact. A printable fallback character next to or inside an address
+   (`jean.dupont` + a stray `0x93` + `@cern.ch`) would hide it from the
+   redactor, so the page is also read with its invalid bytes left out; if
+   any character of an address found that way would survive redaction of
+   the fallback reading, the page is stored without its invalid bytes
+   instead. The lock records `text_pages`, `pages_valid_utf8`,
+   `pages_with_fallback_runs`, `pages_bytes_dropped`, `fallback_bytes` (per
+   decoding) and `ansi_sequences_stripped`. ANSI colour sequences
+   (`ESC[32m`) are removed from text files before redaction, since they
+   can sit inside an address. A text file with more than 1% control
+   characters, and at least 16 of them, is refused as binary; tab, newline,
+   vertical tab, form feed and carriage return do not count. Any JSON string
+   in which a control character splits an address (`a.b@c<control>d.ch`)
+   is refused, because the redactor would not see that address.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC
@@ -160,7 +167,8 @@ The reader check stages two copies of each group in a temporary directory,
 so it needs about twice the largest group's size (TWiki is about 1 GB).
 `--tmp-dir` puts it somewhere with room (default: the system temp dir). It
 is removed when each group finishes, when the group is refused, on Ctrl-C
-and on SIGTERM (the command line turns SIGTERM into a clean exit, which also
+and on SIGTERM (the command line turns SIGTERM into a clean exit, ignores a
+second SIGTERM while it cleans up, and also
 removes the output staging directory); only a SIGKILL leaves it behind. A
 full `--tmp-dir` refuses the group with "cannot write the reader-check copy
 ... (disk full?)".

@@ -18,7 +18,9 @@ from archi.snapshot.builder import (
 def _terminate(signum: int, frame: object) -> None:
     """Turn SIGTERM into an exception, so every ``with`` block and the
     build's own cleanup run: the reader-check copies in --tmp-dir and the
-    output staging directory are removed before the process exits."""
+    output staging directory are removed before the process exits. A second
+    SIGTERM during that cleanup is ignored, so it cannot cut it short."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
@@ -29,7 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        # getsignal/signal return None for a handler not set from Python;
+        # the default action is the honest thing to put back then.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
 
 
 def _main(argv: list[str] | None = None) -> int:

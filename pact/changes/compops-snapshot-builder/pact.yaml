@@ -120,8 +120,13 @@ requirements:
     - acc.compops-snapshot-builder.transcode: on the second review''s mixed page (three addresses
     in valid UTF-8 plus one stray 0x93 byte) all three addresses are removed and the valid
     UTF-8 is kept; a Latin-1 page with an accented-local-part address loses the address; a
-    cp1252 page keeps its smart quotes as UTF-8; an address split by a C1 control is refused;
-    a mostly-control page is refused as binary; the lock counts pages and fallback bytes;
+    cp1252 page keeps its smart quotes as UTF-8; the third review''s four examples (a stray
+    0x93 before the @, 0x96 or 0xA0 inside the domain, an overlong 0xC0 0x80 next to the @) and
+    an address split by a C1 fallback byte are removed whole, by storing that page without its
+    invalid bytes (pages_bytes_dropped); 2,000 fuzzed pages leave no address found in the
+    dropped reading in the output; ANSI colour sequences are stripped before redaction; a page is
+    binary only with more than 1% and at least 16 control characters, \f and \v not counted;
+    the lock counts pages, fallback bytes and dropped-byte pages;
     the CMSSW group reads records.json when releases.map is absent and prefers the map when
     both exist. [evidence: executed_test]
 

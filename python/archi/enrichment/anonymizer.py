@@ -312,8 +312,22 @@ def redact_email_addresses(text: str) -> str:
 
 def redact_email_addresses_with_count(text: str) -> tuple[str, int]:
     """:func:`redact_email_addresses`, plus how many addresses it removed."""
+    spans = email_address_spans(text)
+    if not spans:
+        return text, 0
     pieces: list[str] = []
     kept = 0  # text[kept:] is not yet copied to pieces
+    for start, end in spans:
+        pieces.append(text[kept:start])
+        kept = end
+    pieces.append(text[kept:])
+    return "".join(pieces), len(spans)
+
+
+def email_address_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` of every address :func:`redact_email_addresses`
+    removes, in order and non-overlapping."""
+    spans: list[tuple[int, int]] = []
     bound = 0  # no local part may start before this
     for core in _SEP_CORE_RE.finditer(text):
         if core.start() < bound:
@@ -327,13 +341,9 @@ def redact_email_addresses_with_count(text: str) -> tuple[str, int]:
         if end is None or local == sep:
             bound = domain_start
             continue
-        pieces.append(text[kept:local])
-        kept = bound = end
-    if not pieces:
-        return text, 0
-    removed = len(pieces)
-    pieces.append(text[kept:])
-    return "".join(pieces), removed
+        spans.append((local, end))
+        bound = end
+    return spans
 
 # Text-level HTML character references decoded before redaction. The
 # numeric-reference decoder below deliberately keeps &lt;/&gt; (and any
