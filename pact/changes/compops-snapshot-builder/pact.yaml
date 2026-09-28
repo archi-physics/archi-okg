@@ -489,4 +489,26 @@ evidence:
   head: 85883cf414723d5f9c1fa3d4a9bfe58f71d9d4e4
   at: '2026-09-28T22:12:01+00:00'
   note: 13 passed at this head inside the 1017-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 95e240a5e15857752310b16d5090bd3280c7726d
+  at: '2026-09-28T22:32:26+00:00'
+  note: '1048 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 369 snapshot tests. Ninth-review fixes: RLO, backspace, ESC 7/ESC 8, two
+    lone-CR overwrites and &lrm; next to an address refuse in JSON and TWiki; &#8203;, &#x200B;,
+    &shy;, &#65312;, &#8203;&#64; and U+3002/U+FF61 dots are removed whole; ESC 7/ESC 8 are
+    stripped; a lone surrogate in JSON refuses; CRLF pages redact normally. The same test
+    file on 8e96908: 33 failed, 336 passed. Reviewer fuzz.py 56,252 cases 0 leaks, fuzzfw.py
+    257 cases 0 leaks, test_e2e_leak.py 10 inputs fully removed; own fuzz 240,000 cases and
+    180,000 cases with the ninth-review forms, 0 leaks. Line-rule refusals over the repository''s
+    5,376 strings: 1, the test source''s own &lrm; example.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 95e240a5e15857752310b16d5090bd3280c7726d
+  at: '2026-09-28T22:32:26+00:00'
+  note: 13 passed at this head inside the 1048-test suite; downloaders unchanged since 96a34d6.
 decisions: []
