@@ -83,14 +83,14 @@ requirements:
     not a traceback). It removes every email address from every string with redact_email_addresses
     and records the count removed; drops every field the reader does not read plus the configured
     drop_fields (WMStats keeps Requestor and removes every RequestorDN and DN key at any depth,
-    which no keep_fields entry can undo); and runs the group''s archi reader, which must
-    report health ok, a completed scope, and the same facts as from the unpruned cache. If
-    any group is refused nothing is written. Otherwise it writes one deterministic tar.zst
-    per group and snapshot.lock.yaml with each group''s collection date, SHA-256, size, file
-    count, record count, addresses removed and contents digest. docs/cache-snapshot.md
-    states that snapshots are private okg-deployments assets never committed to or published
-    from this public repository, and .gitignore ignores them. python -m archi.snapshot verify checks archives
-    against a lock.
+    which no keep_fields entry can undo); and runs the group''s archi reader, which must report
+    health ok, a completed scope, and the same facts as from the unpruned cache. If any group
+    is refused nothing is written. Otherwise it writes one deterministic tar.zst per group
+    and snapshot.lock.yaml with each group''s collection date, SHA-256, size, file count,
+    record count, addresses removed and contents digest. docs/cache-snapshot.md states that
+    snapshots are private okg-deployments assets never committed to or published from this
+    public repository, and .gitignore ignores them. python -m archi.snapshot verify checks
+    archives against a lock.
 
 
     Acceptance:
@@ -176,4 +176,25 @@ evidence:
     in turn against the 59 tests: no redaction 14 failed, no pruning 4, no record check 12,
     clock mtime 2, shuffled members 1, verify without SHA-256 1, no reader fact comparison
     2, no WMStats DN default drop 3. No real cache was read.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 7fe37db049ad7cebdb6d0e130211d5e8e384d105
+  at: '2026-09-28T06:40:06+00:00'
+  note: '600 passed at this head (okg origin/dev 9ad926c3d1 exported source, Python 3.12,
+    zstd v1.5.7, hatchling on the path for the wheel tests), 77 snapshot tests. Review fixes
+    for f5264a7b2e, each safeguard disabled in turn against the snapshot tests: link check
+    on read files 3 failed, link check in the tree walk 2, dot check in the tree walk 1 (the
+    per-file dot check still catches .txt under a dot dir), NUL check 2, decoding with replacement
+    1, address-in-path check 1, deep DN drop 1, OSError catch 1, RecursionError catch 1, address
+    count 1. No real cache was read by these tests.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 7fe37db049ad7cebdb6d0e130211d5e8e384d105
+  at: '2026-09-28T06:40:07+00:00'
+  note: 13 passed at this head (downloaders unchanged since 96a34d6; rerun inside the 600-test
+    suite).
 decisions: []
