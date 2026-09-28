@@ -444,4 +444,26 @@ evidence:
   head: 040d5f9627020aca8d4a3b1941c8d1d8f205ec3d
   at: '2026-09-28T21:31:07+00:00'
   note: 13 passed at this head inside the 961-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: a3a3e650198a69aef689486bd5c177208695941c
+  at: '2026-09-28T21:36:08+00:00'
+  note: '974 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 295 snapshot tests. Seventh-review fixes plus issue #17 forms: short escapes
+    (ESC \, ESC >), DCS strings, jdoe<ESC>(<e-acute>@example.org, jdoe[<U+200E>at]laptop,
+    jdoe<U+200B>[at]example.org, jdoe(<U+200B>at)example(dot)org, full-width [at], @ and (dot),
+    and a TWiki file named jdoe<U+200E>@example.org.txt refuse; the five redactor-read invisible
+    characters next to an @ now refuse; words without an @ or separator and decomposed accents
+    are kept or redacted as before. The same test file on 6adb358: 28 failed, 267 passed.
+    A 180,000-case fuzz left no local-part letter of a terminal-visible address in any accepted
+    output.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: a3a3e650198a69aef689486bd5c177208695941c
+  at: '2026-09-28T21:36:08+00:00'
+  note: 13 passed at this head inside the 974-test suite; downloaders unchanged since 96a34d6.
 decisions: []
