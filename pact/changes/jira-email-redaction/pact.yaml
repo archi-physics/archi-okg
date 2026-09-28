@@ -1,7 +1,7 @@
 pact_version: 5
 id: jira-email-redaction
 title: Restore email-address removal in the JIRA source
-tier: 1
+tier: 2
 why: 'The comp-ops JIRA source moves from okg-deployments (cms/cms_sources/jira.py) to archi-okg.
   The cms source has removed email addresses from every string it reads since okg-deployments
   commit b25e36f06c: its text helper _pg_text calls redact_email_addresses. The archi port
@@ -15,16 +15,16 @@ why: 'The comp-ops JIRA source moves from okg-deployments (cms/cms_sources/jira.
   and sign-off lines, [~user] mentions and names -- the cms source never did that.
 
 
-  It deliberately differs from the cms helper in one way. The cms helper decodes &amp;,
-  &commat;, &#64; and &#x40; in the whole string before matching, so it also rewrites text
-  that holds no address (AT&amp;T becomes AT&T), which changes that chunk''s text, content hash
-  and chunk id; and it lets through a non-ASCII local part (only the last ASCII run was
-  removed, leaving a prefix), zero-padded or semicolon-less &#064; / &#x0040; / &#64, URL
-  %2540, and fullwidth or small @ (U+FF20, U+FE6B). The archi helper decodes nothing: the
-  encoded separators are part of its own pattern, the local part and domain accept Unicode
-  letters and combining marks, and the only change to a string is the removal of each whole
-  address. A match starts only where a run of address characters starts, so a long token with
-  no @ is scanned once rather than once per character. Anonymizer''s own pattern is unchanged.
+  It deliberately differs from the cms helper. The cms helper decodes &amp;, &commat;,
+  &#64; and &#x40; in the whole string before matching, so it also rewrites text that holds
+  no address (AT&amp;T becomes AT&T), which changes that chunk''s text, content hash and chunk
+  id; and it lets through a non-ASCII local part (only the last ASCII run was removed, leaving
+  a prefix), zero-padded or semicolon-less &#064; / &#x0040; / &#64, URL %2540, and fullwidth
+  or small @ (U+FF20, U+FE6B). The archi helper decodes nothing: the encoded separators are
+  part of its own pattern, the local part and domain accept Unicode letters and combining
+  marks, and the only change to a string is the removal of each whole address. A match starts
+  only where a run of address characters starts, so a long token with no @ is scanned once
+  rather than once per character. Anonymizer''s own pattern is unchanged.
 
 
   CARRIED SIDE EFFECT, same as cms: a person whose display name is only an address gets no
@@ -48,10 +48,10 @@ requirements:
     JIRA REST record shapes, and so every jira_issue and person attr and every document_chunk
     text. Address forms: plain, +tag, quoted local part, non-ASCII local part or domain (NFC
     and NFD), @ as &commat; or &#64; / &#x40; with any leading zeros and an optional semicolon,
-    any of those behind one or more &amp; layers, URL %40 and %2540, and fullwidth or small @.
-    The whole address is removed with no placeholder; the surrounding text, including any HTML
-    entities around it, is kept byte for byte. No entity is decoded, so text without an address
-    is returned byte-identical and its chunk text and chunk id do not change.
+    any of those behind one or more &amp; layers, URL %40 and %2540, and fullwidth or small
+    @. The whole address is removed with no placeholder; the surrounding text, including any
+    HTML entities around it, is kept byte for byte. No entity is decoded, so text without
+    an address is returned byte-identical and its chunk text and chunk id do not change.
 
 
     Acceptance:
@@ -59,13 +59,13 @@ requirements:
     - acc.jira-email-redaction.fields: A cached issue with a distinct address in each field
     emits no fact whose attrs or record id contain any of them; the same test fails on main
     with all twelve leaked. An issue whose text holds HTML entities and no address is emitted
-    verbatim, and one whose assignee is only a non-ASCII address gets no person and leaves no
-    fragment of it. [evidence: executed_test]
+    verbatim, and one whose assignee is only a non-ASCII address gets no person and leaves
+    no fragment of it. [evidence: executed_test]
 
     - acc.jira-email-redaction.forms: redact_email_addresses removes each address form whole,
     keeps entities around an address, leaves address-free text (including &amp;, &commat;,
-    &#64; and fullwidth @ on their own) byte-identical, and runs in linear time on a long run
-    of address characters. [evidence: executed_test]'
+    &#64; and fullwidth @ on their own) byte-identical, and runs in linear time on a long
+    run of address characters. [evidence: executed_test]'
 tasks:
 - id: task.jira-email-redaction.deliver
   requirement: req.jira-email-redaction.main
@@ -92,4 +92,21 @@ evidence:
     form tests. The same new tests against main''s jira.py and anonymizer.py (7b5b911): both
     JIRA tests fail with all 12 addresses leaked, and the anonymizer tests fail at import
     (helper absent).'
+- kind: executed_test
+  requirement: req.jira-email-redaction.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 77219e6791f601320c5792eb84dd7657ff99f856
+  at: '2026-09-28T04:37:32+00:00'
+  note: '467 passed at 77219e6 (okg origin/dev 5760f6ee18 exported source, Python 3.12, hatchling
+    on the path for the wheel tests), including 21 new tests: 13 address forms removed whole
+    (non-ASCII NFC/NFD local part and domain, &#064;, &#x0040;, &#64 and &#x40 without semicolon,
+    %40, %2540, fullwidth and small @, &amp; inside the local part, &amp;commat;), 4 address-free
+    strings byte-identical (AT&amp;T, &commat;/&#64;/&#x40; alone, &amp;amp;, fullwidth @
+    alone), entities kept around an address, a linear-time run test, and 2 JIRA emission tests
+    (entities without an address emitted verbatim; a non-ASCII address as assignee leaves
+    no person and no fragment). Against the previous helper (1351be7) the same run gives 17
+    of the 21 new tests failing and all 55 earlier JIRA and anonymizer tests passing; the
+    4 that already passed are %40, &amp; in the local part, &amp;commat;, and the address-free
+    string with only &lt; and fullwidth @.'
 decisions: []
