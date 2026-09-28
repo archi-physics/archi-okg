@@ -466,4 +466,27 @@ evidence:
   head: a3a3e650198a69aef689486bd5c177208695941c
   at: '2026-09-28T21:36:08+00:00'
   note: 13 passed at this head inside the 974-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 85883cf414723d5f9c1fa3d4a9bfe58f71d9d4e4
+  at: '2026-09-28T22:12:01+00:00'
+  note: '1017 passed at this head (okg 608fa2fa7e editable, Python 3.12.11, zstd v1.5.7, hatchling
+    on the path), 338 snapshot tests. Eighth-review fixes: one rule over the real redactors
+    on a terminal reading and a controls-ignored reading of each value. The reviewer''s 17
+    leak inputs, the five invisible characters and the full-width forms are removed whole
+    in JSON and TWiki; control characters, ESC, sequence characters and other Cf characters
+    in or next to an address still refuse; ellipsis, CJK colon, trademark and superscript
+    next to or outside an address are stored with normal redaction. The same test file on
+    2ed4537: 85 failed, 253 passed. Reviewer fuzz.py 56,252 cases 0 leaks, fuzzfw.py 257 cases
+    0 leaks, test_e2e_leak.py 10 inputs all fully removed; own fuzz 240,000 cases 0 leaks.
+    Unterminated U+009D/U+0090 200 kB: 60-64 s at 2ed4537, 0.34 s here.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: 85883cf414723d5f9c1fa3d4a9bfe58f71d9d4e4
+  at: '2026-09-28T22:12:01+00:00'
+  note: 13 passed at this head inside the 1017-test suite; downloaders unchanged since 96a34d6.
 decisions: []
