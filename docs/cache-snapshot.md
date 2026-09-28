@@ -90,26 +90,45 @@ For every group the build:
    the fallback reading, the page is stored without its invalid bytes
    instead. The lock records `text_pages`, `pages_valid_utf8`,
    `pages_with_fallback_runs`, `pages_bytes_dropped`, `fallback_bytes` (per
-   decoding). Terminal escape sequences are removed from text files and from
-   every JSON string and key before redaction, since they can sit inside an
-   address: CSI sequences such as colours (`ESC[32m`, and the 8-bit form that
-   starts with U+009B) and `ESC` + intermediate bytes + a final byte (the
-   `ESC ( B` that `tput sgr0` emits). The lock counts them as
-   `ansi_sequences_stripped` for every group. A text file with more than 1%
-   control characters, and at least 16 of them, is refused as binary; tab,
-   newline, vertical tab, form feed and carriage return do not count. The
-   same characters are the control characters for the next rule: each text
-   file and JSON string and key is also redacted with its control characters
-   removed, before the real redaction runs, and if that removes any character
-   the real redaction would keep, the group is refused. This catches a
-   control character anywhere in an address or a spelled-out address
-   (`jdoe<DEL>x@example.org`, `a.b@c<control>d.org`,
-   `j<DEL>doe.x(at)example(dot)org`), where the redactor would stop at the
-   control character and keep part of the name. It can also refuse a string
-   where a control character only joins a word to an address
-   (`word<control>jdoe@example.org`). The configured `note`, which is
-   checked but not redacted, is refused when an address appears in it once
-   its control characters are removed.
+   decoding). A text file with more than 1% control characters, and at
+   least 16 of them, is refused as binary. Control characters here are C0
+   controls, DEL and C1 controls (U+0080 to U+009F); tab, newline, vertical
+   tab, form feed and carriage return do not count, and neither do the
+   characters of ANSI colour sequences (`ESC[32m`).
+
+   Before anything is stripped or redacted, each text file and each JSON
+   string and key is checked for hidden characters in or next to an
+   address. Hidden characters are those control characters plus every
+   invisible format character (Unicode category Cf, such as U+200E, U+2068
+   or U+FEFF), except soft hyphen, zero-width space, zero-width non-joiner,
+   zero-width joiner and word joiner, which the redactor already reads as
+   part of an address. Both redactors match three copies of the value: one
+   with its hidden characters removed; one that also drops the second
+   character of each terminal sequence (the `[` of `ESC [`); and one that
+   also drops whole terminal sequences, as a terminal would show the text.
+   Terminal sequences here are `ESC [` and U+009B CSI sequences, `ESC` +
+   intermediate bytes + a final byte (`ESC ( B`) and OSC strings
+   (`ESC ] 0;title BEL`). If any match contains, or sits directly next to, a
+   hidden character or any character of a terminal sequence, the group is
+   refused. So `jdoe<DEL>x@example.org`, `j<DEL>doe.x(at)example(dot)org`,
+   `jdoe@example<ESC>.org`, `jdoe<U+009B>@example.org`,
+   `jdoe<U+200E>x@example.org` and `<U+2068>jdoe<U+2069>@example.org` are
+   refused. Two consequences are accepted: an address wrapped directly in
+   colour codes (`ESC[31mjdoe@example.org ESC[0m`) is refused rather than
+   cleaned, and so is a string where a control character only joins a word
+   to an address (`word<control>jdoe@example.org`). Tab, newline, vertical
+   tab, form feed, carriage return and the Unicode line and paragraph
+   separators (U+2028, U+2029) are not hidden characters: they show as
+   breaks, so `jdoe<CR>x@example.org` stores `jdoe<CR>` as two separate
+   words would.
+
+   Only a value that passes this check has its ANSI CSI sequences
+   (`ESC [` + parameters + a final byte) removed and is then redacted. A
+   lone `ESC` or U+009B that starts no such sequence is kept, with the text
+   after it. The lock counts the removed sequences as
+   `ansi_sequences_stripped` for every group. The configured `note`, which
+   is checked but not redacted, is refused when an address appears in it
+   once its hidden characters are removed.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC

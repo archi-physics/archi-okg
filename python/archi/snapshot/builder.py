@@ -43,12 +43,14 @@ import socket
 import subprocess
 import tarfile
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
 import yaml
 
+from archi.enrichment.anonymizer import _INVISIBLE as _REDACTOR_INVISIBLE
 from archi.enrichment.anonymizer import (
     email_address_spans,
     obfuscated_email_address_spans,
@@ -396,7 +398,6 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         for rel, path in _text_files(spec, source):
             page = _read_text(group.name, rel, path, fallback=fallback)
             text = page.text
-            counter.ansi += page.ansi_stripped
             if text_stats is not None:
                 text_stats["text_pages"] += 1
                 if page.fallback_bytes:
@@ -408,7 +409,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                 else:
                     text_stats["pages_valid_utf8"] += 1
             _refuse_hidden_address(group.name, rel, text)
-            data = counter.redact(text).encode("utf-8")
+            data = counter.redact(counter.strip_ansi(text)).encode("utf-8")
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
             final[archive_path] = data
@@ -547,17 +548,15 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
 
 def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
     if isinstance(value, str):
-        value = counter.strip_ansi(value)
         _refuse_hidden_address(group, file_name, value)
-        return counter.redact(value)
+        return counter.redact(counter.strip_ansi(value))
     if isinstance(value, list):
         return [_redact_json(group, file_name, item, counter) for item in value]
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            key = counter.strip_ansi(key)
             _refuse_hidden_address(group, file_name, key)
-            clean_key = counter.redact(key)
+            clean_key = counter.redact(counter.strip_ansi(key))
             if clean_key in out:
                 raise GroupRefused(
                     group,
@@ -624,21 +623,37 @@ def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
 
 
 #: C0 controls other than tab, newline, vertical tab, form feed and carriage
-#: return; DEL; and C1. Counted by the binary guard, and removed before the
-#: split-address check.
+#: return; DEL; and C1. Counted by the binary guard.
 _CONTROL_RE = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
+#: What the hidden-address check removes: the control characters above and
+#: every invisible format character (Unicode category Cf, such as U+200E or
+#: U+2068) except the ones the redactor already reads as part of an address
+#: (soft hyphen, zero-width space and joiners, word joiner).
+_HIDDEN_RE = re.compile(
+    "[\x00-\x08\x0e-\x1f\x7f-\x9f"
+    + "".join(
+        re.escape(chr(code))
+        for code in range(0x110000)
+        if unicodedata.category(chr(code)) == "Cf"
+        and chr(code) not in _REDACTOR_INVISIBLE
+    )
+    + "]"
+)
 #: A page is binary when more than this share of its characters, and at
 #: least ``CONTROL_MIN_COUNT`` of them, are control characters.
 CONTROL_SHARE_LIMIT = 0.01
 CONTROL_MIN_COUNT = 16
-#: Terminal escape sequences pasted from logs, removed from text before
-#: redaction (``ESC[32mjdoe ESC[0m@example.org`` would otherwise hide the
-#: address from the redactor): CSI sequences, both ``ESC [`` and the 8-bit
-#: U+009B form, and ``ESC`` + intermediates + final byte, such as the
-#: ``ESC ( B`` that ``tput sgr0`` emits.
-_CSI_RE = re.compile(
+#: ANSI CSI escape sequences (terminal colours pasted from logs), removed
+#: from text after the hidden-address check and before redaction.
+_CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
+#: Terminal sequences a terminal would not print, for the hidden-address
+#: check only (they are not stripped): CSI in its 7-bit and 8-bit (U+009B)
+#: forms, ``ESC`` + intermediates + final byte (``ESC ( B`` from
+#: ``tput sgr0``), and OSC strings (``ESC ] 0;title BEL``).
+_SEQUENCE_RE = re.compile(
     r"(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"
     r"|\x1b[\x20-\x2f]+[\x30-\x7e]"
+    r"|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
 )
 
 
@@ -647,7 +662,6 @@ class _Page:
     text: str
     fallback_bytes: dict[str, int]
     bytes_dropped: bool = False
-    ansi_stripped: int = 0
 
 
 def _fallback_char(byte: int) -> tuple[str, str]:
@@ -688,24 +702,55 @@ def _redaction_mask(text: str) -> bytearray:
 
 
 def _refuse_hidden_address(group: str, where: str, text: str) -> None:
-    """Refuse ``text`` when a control character hides part of an address.
+    """Refuse ``text`` when an address has a hidden character in or next to it.
 
-    ``jdoe<DEL>x@example.org`` reads as ``jdoex@example.org``, but the
-    redactor stops at the control character and would keep ``jdoe``. So the
-    redaction mask of ``text`` with its control characters removed is
-    compared with the mask of ``text`` itself; any character the first
-    removes and the second keeps refuses the group. Checked on the input, not
-    the output: the kept part no longer looks like an address after redaction.
+    Runs on the input, before terminal sequences are stripped. Both
+    redactors (addresses, then spelled-out addresses, repeated) match three
+    copies of the text:
+
+    - with every hidden character (:data:`_HIDDEN_RE`) removed;
+    - also without the second character (``[``, ``(``, ``]``) of each
+      terminal sequence (:data:`_SEQUENCE_RE`), so ``jdoe ESC [ @example.org``
+      reads ``jdoe@example.org``;
+    - also without whole terminal sequences, as a terminal would show it
+      (``jdoe ESC ( B x@example.org`` reads ``jdoex@example.org``).
+
+    A matched stretch refuses the group when, in ``text``, it contains or
+    directly touches a hidden character or any character of a terminal
+    sequence. So ``jdoe<DEL>x@example.org``, ``jdoe@example<ESC>.org`` and
+    ``<ESC>[31mjdoe@example.org<ESC>[0m`` all refuse: nothing that sits in
+    or next to an address is stripped and re-matched.
     """
-    if not _CONTROL_RE.search(text):
+    hidden = bytearray(len(text))
+    for match in _HIDDEN_RE.finditer(text):
+        hidden[match.start()] = 1
+    if not any(hidden):
         return
-    kept = [i for i, char in enumerate(text) if not _CONTROL_RE.match(char)]
-    found = _redaction_mask("".join(text[i] for i in kept))
-    removed = _redaction_mask(text)
-    if any(flag and not removed[kept[i]] for i, flag in enumerate(found)):
-        raise GroupRefused(
-            group, f"{where}: an address is split by a control character"
-        )
+    suspect = bytearray(hidden)
+    introducers = bytearray(hidden)
+    for match in _SEQUENCE_RE.finditer(text):
+        start, end = match.span()
+        suspect[start:end] = b"\x01" * (end - start)
+        if text[start] == "\x1b":
+            introducers[start + 1] = 1
+    for removed in (hidden, introducers, suspect):
+        kept = [i for i, flag in enumerate(removed) if not flag]
+        mask = _redaction_mask("".join(text[i] for i in kept))
+        index = 0
+        while index < len(mask):
+            if not mask[index]:
+                index += 1
+                continue
+            end = index
+            while end < len(mask) and mask[end]:
+                end += 1
+            if any(suspect[max(kept[index] - 1, 0) : kept[end - 1] + 2]):
+                raise GroupRefused(
+                    group,
+                    f"{where}: an address is split by a control character "
+                    "or touches one",
+                )
+            index = end
 
 
 def _decode_with_fallback(data: bytes) -> _Page:
@@ -726,7 +771,6 @@ def _decode_with_fallback(data: bytes) -> _Page:
     of the fallback view, the page uses the dropped view instead.
     """
     raw = data.decode("utf-8", errors="surrogateescape")
-    raw, ansi = _CSI_RE.subn("", raw)
     counts = {"cp1252": 0, "latin-1": 0}
     fallback_chars: list[str] = []
     kept_positions: list[int] = []
@@ -739,7 +783,7 @@ def _decode_with_fallback(data: bytes) -> _Page:
             fallback_chars.append(char)
             kept_positions.append(index)
     if not any(counts.values()):
-        return _Page(raw, {}, ansi_stripped=ansi)
+        return _Page(raw, {})
     fallback_view = "".join(fallback_chars)
     dropped_view = "".join(raw[i] for i in kept_positions)
     removed = _redaction_mask(fallback_view)
@@ -748,8 +792,8 @@ def _decode_with_fallback(data: bytes) -> _Page:
         flag and not removed[kept_positions[i]] for i, flag in enumerate(found)
     )
     if survives:
-        return _Page(dropped_view, counts, bytes_dropped=True, ansi_stripped=ansi)
-    return _Page(fallback_view, counts, ansi_stripped=ansi)
+        return _Page(dropped_view, counts, bytes_dropped=True)
+    return _Page(fallback_view, counts)
 
 
 def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _Page:
@@ -757,9 +801,11 @@ def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _
 
     A NUL byte always refuses the group (UTF-16 puts a NUL between the letters
     of an address, hiding it from the redactor). Invalid UTF-8 refuses it
-    unless ``fallback`` (see :func:`_decode_with_fallback`). ANSI colour
-    sequences are removed. Decoded text that is more than 1% control
-    characters, and at least 16 of them, is refused as binary.
+    unless ``fallback`` (see :func:`_decode_with_fallback`). Decoded text
+    that is more than 1% control characters, and at least 16 of them, not
+    counting ANSI colour sequences, is refused as binary. The text is
+    returned with its colour sequences; they are stripped after the
+    hidden-address check.
     """
     data = path.read_bytes()
     if b"\0" in data:
@@ -768,11 +814,10 @@ def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _
         page = _decode_with_fallback(data)
     else:
         try:
-            text, ansi = _CSI_RE.subn("", data.decode("utf-8"))
+            page = _Page(data.decode("utf-8"), {})
         except UnicodeDecodeError as exc:
             raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
-        page = _Page(text, {}, ansi_stripped=ansi)
-    text = page.text
+    text = _CSI_RE.sub("", page.text)
     if text:
         controls = len(_CONTROL_RE.findall(text))
         if controls >= CONTROL_MIN_COUNT and controls / len(text) > CONTROL_SHARE_LIMIT:
@@ -798,9 +843,10 @@ def _strings(value: Any) -> Iterator[str]:
 
 def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
     """Every string must be a fixed point of the redactor, also with its
-    control characters removed: a control character inside an address (for
-    example a C1 control from the Latin-1 fallback in ``a.b@c<U+0081>d.ch``)
-    hides it from the redactor, so such a string refuses the group."""
+    hidden characters (:data:`_HIDDEN_RE`) removed: a control character
+    inside an address (for example a C1 control from the Latin-1 fallback in
+    ``a.b@c<U+0081>d.ch``) hides it from the redactor, so such a string
+    refuses the group."""
     for path, data in files.items():
         text = data.decode("utf-8")
         strings = _strings(json.loads(text)) if path.endswith(".json") else [text]
@@ -815,8 +861,8 @@ def _check_string(group: str, where: str, value: str) -> None:
         raise GroupRefused(
             group, f"{where}: a spelled-out address survived redaction"
         )
-    if _CONTROL_RE.search(value):
-        bare = _CONTROL_RE.sub("", value)
+    if _HIDDEN_RE.search(value):
+        bare = _HIDDEN_RE.sub("", value)
         if (
             redact_email_addresses(bare) != bare
             or redact_obfuscated_email_addresses(bare) != bare

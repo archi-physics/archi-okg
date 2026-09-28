@@ -24,7 +24,9 @@ from archi.snapshot.__main__ import main as cli_main
 from archi.snapshot.builder import (
     LOCK_NAME,
     BuildRefused,
+    GroupRefused,
     SnapshotError,
+    _refuse_hidden_address,
     build,
     load_config,
     normalize_fact,
@@ -1563,15 +1565,25 @@ def redact(text):
 
 # --- ANSI colour codes ----------------------------------------------------------------
 
-def test_ansi_colour_codes_do_not_hide_an_address(tmp_path, sources):
+def test_ansi_colour_codes_away_from_an_address_are_stripped(tmp_path, sources):
     (sources["twiki-eos"] / "Log.txt").write_bytes(
-        b"---+ Log\n$ \x1b[32mjason\x1b[0m@laptop.cern.ch done \x1b[1;31mERROR\x1b[0m\n" + PADDING
+        b"---+ Log\n$ make done \x1b[1;31mERROR\x1b[0m, mail jdoe@example.org\n" + PADDING
     )
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
     page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Log.txt"].decode("utf-8")
-    assert page.startswith("---+ Log\n$  done ERROR\n")
-    assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == 4
+    assert page.startswith("---+ Log\n$ make done ERROR, mail \n")
+    assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == 2
+
+
+def test_ansi_colour_codes_inside_an_address_refuse_the_group(tmp_path, sources):
+    # Detection runs before the strip: a colour code in or next to an
+    # address refuses rather than being stripped and re-matched.
+    (sources["twiki-eos"] / "Log.txt").write_bytes(
+        b"---+ Log\n$ \x1b[32mjdoe\x1b[0m@laptop.example.org done\n" + PADDING
+    )
+    with pytest.raises(BuildRefused, match="Log.txt: an address is split by a control"):
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
 # --- signals -----------------------------------------------------------------------------
@@ -1857,31 +1869,46 @@ def test_fuzz_no_spelled_out_address_from_the_dropped_view_survives():
 def test_ansi_codes_are_stripped_from_json_strings(tmp_path, sources):
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
-    records[0]["description"] = "Logged by \x1b[32mjdoe\x1b[0m@cern.ch in \x1b[1mbold\x1b[0m."
+    records[0]["description"] = "Logged by jdoe@example.org in \x1b[1mbold\x1b[0m."
     path.write_text(json.dumps(records))
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
     assert stored[0]["description"] == "Logged by  in bold."
-    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 4
+    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 2
 
 
-# --- sixth review: a control character inside the local part --------------------
+# --- fifth and sixth reviews: hidden characters in or next to an address --------
 #
-# The recheck used to run on the redacted output. A control character inside
-# the local part made the redactor remove only the part after it, so the name
-# before it survived and the recheck saw no address left.
+# Until 51bb241 the control-character check ran on the redacted output, so a
+# control character inside the local part left the name before it stored.
+# d45838f checked the input, but after stripping terminal sequences, and its
+# wider strip could delete an address's own "." or "@". Now each value is
+# checked on the raw input first: matched with every hidden character (C0/C1
+# controls and format characters) removed, a match that contains or touches
+# a hidden character, or a colour sequence, refuses the group.
 
-LOCAL_PART_CONTROLS = [
+HIDDEN_IN_ADDRESS = [
+    # fifth review
     "jdoe\x7fx@example.org",
     "jdoe\x01.x@example.org",
     "jdoe\x7fx[at]example.org",
     "j\x7fdoe.x(at)example(dot)org",
+    "\x1b[1mjdoe\x1b(B\x1b[m@example.org",
+    "jdoe\x9b32m@example.org",
+    # sixth review
+    "jdoe@example\x1b.org",
+    "jdoe@example\x9b.org",
+    "jdoe\x9b@example.org",
+    "jdoe\x1b[@example.org",
+    "⁨jdoe⁩@example.org",
+    "jdoe‎x@example.org",
+    "\x1b[31mjdoe@example.org\x1b[0m",
 ]
 
 
-@pytest.mark.parametrize("value", LOCAL_PART_CONTROLS)
-def test_a_control_inside_the_local_part_of_a_json_string_refuses(
+@pytest.mark.parametrize("value", HIDDEN_IN_ADDRESS)
+def test_a_hidden_character_in_an_address_in_a_json_string_refuses(
     tmp_path, sources, value
 ):
     path = sources["jira"] / "records.json"
@@ -1892,8 +1919,8 @@ def test_a_control_inside_the_local_part_of_a_json_string_refuses(
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
 
 
-@pytest.mark.parametrize("value", LOCAL_PART_CONTROLS)
-def test_a_control_inside_the_local_part_on_a_text_page_refuses(
+@pytest.mark.parametrize("value", HIDDEN_IN_ADDRESS)
+def test_a_hidden_character_in_an_address_on_a_text_page_refuses(
     tmp_path, sources, value
 ):
     (sources["twiki-eos"] / "Local.txt").write_bytes(
@@ -1905,39 +1932,69 @@ def test_a_control_inside_the_local_part_on_a_text_page_refuses(
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
 
 
-#: Terminal sequences the old pattern missed: ``tput sgr0`` emits ESC ( B
-#: (select the ASCII character set) and some tools emit the 8-bit CSI U+009B.
-TERMINAL_SEQUENCES = [
-    ("\x1b[1mjdoe\x1b(B\x1b[m@example.org", 3),
-    ("jdoe\x9b32m@example.org", 1),
+@pytest.mark.parametrize("key", ["jdoe\x7fx@example.org", "jdoe@example\u200e.org"])
+def test_a_hidden_character_in_an_address_in_a_json_key_refuses(tmp_path, sources, key):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0][key] = "owner"
+    path.write_text(json.dumps(records))
+    with pytest.raises(BuildRefused, match="split by a control character"):
+        build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
+
+
+#: Format characters (Unicode category Cf) the redactor does not read as part
+#: of an address; each kept "jdoe" out of jdoe<char>x@example.org.
+FORMAT_CHARACTERS = [
+    "﻿", "‎", "‏", "‪", "‫", "‬", "‭", "‮",
+    "⁦", "⁧", "⁨", "⁩", "⁡", "⁢", "⁣", "⁤",
+    "᠎", "؀", "؁", "؂", "؃", "؄", "؅",
 ]
 
 
-@pytest.mark.parametrize(("value", "sequences"), TERMINAL_SEQUENCES)
-def test_charset_and_8bit_csi_sequences_are_stripped_from_json(
-    tmp_path, sources, value, sequences
+@pytest.mark.parametrize("char", FORMAT_CHARACTERS, ids=lambda c: f"U+{ord(c):04X}")
+def test_a_format_character_in_the_local_part_refuses(char):
+    with pytest.raises(GroupRefused, match="split by a control character"):
+        _refuse_hidden_address("g", "f", f"Ask jdoe{char}x@example.org today.")
+
+
+@pytest.mark.parametrize("char", ["­", "​", "‌", "‍", "⁠"])
+def test_invisible_characters_the_redactor_reads_are_still_redacted(
+    tmp_path, sources, char
 ):
     path = sources["jira"] / "records.json"
     records = json.loads(path.read_text())
-    records[0]["description"] = f"Logged by {value} today."
+    records[0]["description"] = f"Logged by jdoe{char}x@example.org today."
+    path.write_text(json.dumps(records))
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
+    stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
+    assert stored[0]["description"] == "Logged by  today."
+
+
+#: A lone ESC or U+009B that starts no CSI sequence is left in place: d45838f
+#: stripped "ESC 5" and "U+009B P" along with them.
+LONE_CONTROLS = ["price \x1b 5 x", "Home \x9b Projects", "\x9b2023 jdoe"]
+
+
+@pytest.mark.parametrize("value", LONE_CONTROLS)
+def test_a_lone_escape_in_a_json_string_is_kept_with_its_text(tmp_path, sources, value):
+    path = sources["jira"] / "records.json"
+    records = json.loads(path.read_text())
+    records[0]["description"] = value
     path.write_text(json.dumps(records))
     out = tmp_path / "out"
     lock = build(load_config(write_config(tmp_path, sources, only=["jira"])), out)
     stored = json.loads(read_archive(out / "jira.tar.zst")["data/jira/records.json"])
-    assert stored[0]["description"] == "Logged by  today."
-    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == sequences
+    assert stored[0]["description"] == value
+    assert lock["groups"]["jira"]["ansi_sequences_stripped"] == 0
 
 
-@pytest.mark.parametrize(("value", "sequences"), TERMINAL_SEQUENCES)
-def test_charset_and_8bit_csi_sequences_are_stripped_from_text(
-    tmp_path, sources, value, sequences
-):
-    (sources["twiki-eos"] / "Term.txt").write_bytes(
-        f"---+ Page\nAsk {value} today.\n".encode("utf-8") + PADDING
+@pytest.mark.parametrize("value", LONE_CONTROLS)
+def test_a_lone_escape_on_a_text_page_is_kept_with_its_text(tmp_path, sources, value):
+    (sources["twiki-eos"] / "Lone.txt").write_bytes(
+        f"---+ Page\n{value}\n".encode("utf-8") + PADDING
     )
     out = tmp_path / "out"
-    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
-    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Term.txt"].decode("utf-8")
-    assert page.startswith("---+ Page\nAsk  today.\n")
-    assert "jdoe" not in page
-    assert lock["groups"]["twiki-eos"]["ansi_sequences_stripped"] == sequences
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    page = read_archive(out / "twiki-eos.tar.zst")["data/twiki-eos/Lone.txt"].decode("utf-8")
+    assert page.startswith(f"---+ Page\n{value}\n")
