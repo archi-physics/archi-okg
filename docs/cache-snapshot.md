@@ -48,7 +48,7 @@ Known groups and the files each one reads (from `archi/snapshot/groups.py`):
 |---|---|---|
 | `cric` | `sites.json`, `storage_units.json`, `compute_units.json`, `facilities.json`, `responsibilities.json` | `data/cric/` |
 | `cric-core` | `services.json`, `rcsites.json`, `federations.json` | `data/cric-core/` |
-| `cmssw-releases` | `releases.map` | `data/cmssw-releases/` |
+| `cmssw-releases` | `releases.map`, or `records.json` when there is no map | `data/cmssw-releases/` |
 | `jira` | `records.json`, optional `meta.json` | `data/jira/` |
 | `indico` | `records.json` | `data/indico/` |
 | `dqm` | `records.json` | `data/dqm/` |
@@ -64,11 +64,15 @@ For every group the build:
 1. **Refuses input it cannot check.** Any symbolic link (file or directory)
    or any path with a component starting with `.` in the files a group reads
    (for TWiki, anywhere in its tree), any path that resolves outside the
-   group's directory, any text file that is not UTF-8 or contains a NUL byte
-   (UTF-16 text would hide an address from the redactor), any file path that
-   contains an email address, and any file the builder cannot read
+   group's directory, any text file that contains a NUL byte (UTF-16 text
+   would hide an address from the redactor) or is not UTF-8, any file path
+   that contains an email address, and any file the builder cannot read
    (permission denied) or JSON nested too deeply to walk. The configured
-   directory itself may be a link.
+   directory itself may be a link. TWiki pages are the one exception to
+   UTF-8: a page that is not UTF-8 is decoded as cp1252 (the Windows
+   superset of Latin-1), else as Latin-1, stored re-encoded as UTF-8, and
+   redacted after decoding. The lock counts these as `transcoded_files` and
+   `transcoded_by_encoding`.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC
@@ -104,7 +108,8 @@ same input with the same zstd version give byte-identical archives.
 
 The lock records, per group: `collected`, `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
-`addresses_removed`,
+`addresses_removed`, `input_file` (for CMSSW, which input was used),
+`transcoded_files` and `transcoded_by_encoding` (TWiki),
 `contents_sha256` (a digest of the unpacked files), `archive_dir`, and the
 dropped and extra kept fields. It also records who built it, when, on which
 host, the archi version and commit, and the zstd version and level.

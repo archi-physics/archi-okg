@@ -78,7 +78,9 @@ requirements:
     so one snapshot can mix collection dates. For each group it refuses, with an error naming
     the group, file and record, any missing file, invalid JSON, wrong shape or record the
     reader would skip or drop; any symbolic link, dot-named path or path resolving outside
-    the group directory; any text file that is not UTF-8 or holds a NUL byte; any file path
+    the group directory; any text file that holds a NUL byte or is not UTF-8 (TWiki pages
+    alone fall back to cp1252, then Latin-1, are stored as UTF-8 and are redacted after decoding,
+    with per-encoding counts in the lock); any file path
     containing an address; and any unreadable file or too-deeply nested JSON (a named refusal,
     not a traceback). It removes every email address from every string with redact_email_addresses
     and records the count removed; drops every field the reader does not read plus the configured
@@ -114,8 +116,13 @@ requirements:
     even when a config asks to keep it or the field that holds it; Requestor is kept. [evidence:
     executed_test]
 
+    - acc.compops-snapshot-builder.transcode: a Latin-1 TWiki page with an accented-local-part
+    address loses the address, a cp1252 page keeps its smart quotes as UTF-8, and the lock
+    counts one of each; the CMSSW group reads records.json when releases.map is absent and
+    prefers the map when both exist. [evidence: executed_test]
+
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
-    Latin-1, UTF-16 or NUL-bearing text, an address in a file name, an unreadable file and
+    UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an unreadable file and
     deeply nested JSON each refuse the group by name. [evidence: executed_test]'
 tasks:
 - id: task.compops-snapshot-builder.downloaders

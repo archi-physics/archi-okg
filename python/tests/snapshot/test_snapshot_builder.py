@@ -608,19 +608,118 @@ def test_a_missing_required_file_refuses_the_group(tmp_path, sources):
 @pytest.mark.parametrize(
     "content",
     [
-        b"---+ Caf\xe9 page\nText.\n",  # Latin-1
         "jdoe@cern.ch wrote this".encode("utf-16-le"),  # NUL between letters
         b"---+ Page\nText\x00with a NUL.\n",
+        b"---+ Caf\xe9 page\x00\n",  # Latin-1 does not excuse a NUL
     ],
-    ids=["latin1", "utf16", "nul"],
+    ids=["utf16", "nul", "latin1-with-nul"],
 )
-def test_text_that_is_not_clean_utf8_refuses_the_group(tmp_path, sources, content):
+def test_text_with_nul_bytes_refuses_the_group(tmp_path, sources, content):
     (sources["twiki-eos"] / "Odd.txt").write_bytes(content)
     with pytest.raises(BuildRefused) as info:
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
     reason = info.value.refusals[0].reason
-    assert reason.startswith("Odd.txt ")
-    assert "NUL" in reason or "not UTF-8" in reason
+    assert reason == "Odd.txt contains NUL bytes (not UTF-8 text)"
+
+
+def test_non_utf8_text_without_a_fallback_refuses_the_group(tmp_path, sources):
+    path = sources["cmssw-releases"] / "releases.map"
+    path.write_bytes(path.read_bytes() + b"architecture=x;label=CMSSW_14_0_3;type=Caf\xe9;\n")
+    with pytest.raises(BuildRefused, match="releases.map is not UTF-8"):
+        build(
+            load_config(write_config(tmp_path, sources, only=["cmssw-releases"])),
+            tmp_path / "out",
+        )
+
+
+def test_twiki_pages_in_cp1252_and_latin1_are_transcoded_then_redacted(tmp_path, sources):
+    twiki = sources["twiki-eos"]
+    # 0x81 is undefined in cp1252, so this page only decodes as Latin-1. Its
+    # address has an accented local part (j\xe9r\xf4me = jérôme).
+    (twiki / "LatinPage.txt").write_bytes(
+        b"---+ Contacts\nWrite to j\xe9r\xf4me.dupont@cern.ch \x81today.\n"
+    )
+    # cp1252 smart quotes (0x93, 0x94) and an en dash (0x96).
+    (twiki / "QuotePage.txt").write_bytes(
+        b"---+ Quotes\nThe \x93golden\x94 JSON \x96 see caf\xe9 notes.\n"
+    )
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    members = read_archive(out / "twiki-eos.tar.zst")
+    latin = members["data/twiki-eos/LatinPage.txt"].decode("utf-8")
+    assert latin == "---+ Contacts\nWrite to  \x81today.\n"
+    quotes = members["data/twiki-eos/QuotePage.txt"].decode("utf-8")
+    assert quotes == "---+ Quotes\nThe \u201cgolden\u201d JSON \u2013 see caf\u00e9 notes.\n"
+    row = lock["groups"]["twiki-eos"]
+    assert row["transcoded_files"] == 2
+    assert row["transcoded_by_encoding"] == {"cp1252": 1, "latin-1": 1}
+    # The planted UTF-8 address and the Latin-1 one: both counted.
+    assert row["addresses_removed"] == 2
+    assert b"dupont" not in _all_bytes(out, "twiki-eos")
+
+
+def test_utf8_only_twiki_reports_zero_transcoded(built):
+    _, lock = built
+    row = lock["groups"]["twiki-eos"]
+    assert row["transcoded_files"] == 0 and row["transcoded_by_encoding"] == {}
+
+
+def test_cmssw_group_accepts_records_json_when_the_map_is_absent(tmp_path, sources):
+    group = sources["cmssw-releases"]
+    (group / "releases.map").unlink()
+    _write_json(
+        group / "records.json",
+        [
+            {"label": "CMSSW_14_0_1", "type": "Production", "state": "Announced",
+             "architecture": ["el8_amd64_gcc12"], "release_notes": "Notes by rel.manager@cern.ch",
+             "download_count": 7},
+            {"label": "CMSSW_14_0_2", "type": "Production", "state": "Announced"},
+        ],
+    )
+    (group / "meta.json").write_text('{"record_count": 2}')
+    out = tmp_path / "out"
+    lock = build(
+        load_config(write_config(tmp_path, sources, only=["cmssw-releases"])), out
+    )
+    row = lock["groups"]["cmssw-releases"]
+    assert row["input_file"] == "records.json"
+    assert row["record_count"] == 2 and row["addresses_removed"] == 1
+    members = read_archive(out / "cmssw-releases.tar.zst")
+    assert sorted(members) == ["data/cmssw-releases/records.json"]
+    records = json.loads(members["data/cmssw-releases/records.json"])
+    assert "download_count" not in records[0]
+    assert verify(out / LOCK_NAME, out).ok
+
+
+def test_cmssw_group_prefers_the_map_when_both_exist(tmp_path, sources):
+    _write_json(sources["cmssw-releases"] / "records.json", [{"label": "CMSSW_1_0_0"}])
+    out = tmp_path / "out"
+    lock = build(
+        load_config(write_config(tmp_path, sources, only=["cmssw-releases"])), out
+    )
+    assert lock["groups"]["cmssw-releases"]["input_file"] == "releases.map"
+    assert sorted(read_archive(out / "cmssw-releases.tar.zst")) == [
+        "data/cmssw-releases/releases.map"
+    ]
+
+
+def test_cmssw_group_with_neither_input_is_refused(tmp_path, sources):
+    (sources["cmssw-releases"] / "releases.map").unlink()
+    with pytest.raises(BuildRefused, match="neither releases.map nor records.json"):
+        build(
+            load_config(write_config(tmp_path, sources, only=["cmssw-releases"])),
+            tmp_path / "out",
+        )
+
+
+def test_malformed_cmssw_records_refuse_the_group(tmp_path, sources):
+    (sources["cmssw-releases"] / "releases.map").unlink()
+    _write_json(sources["cmssw-releases"] / "records.json", [{"type": "Production"}])
+    with pytest.raises(BuildRefused, match="record 0 is malformed: record has no label"):
+        build(
+            load_config(write_config(tmp_path, sources, only=["cmssw-releases"])),
+            tmp_path / "out",
+        )
 
 
 def test_wmstats_dn_is_removed_at_any_depth_even_when_its_field_is_kept(tmp_path, sources):

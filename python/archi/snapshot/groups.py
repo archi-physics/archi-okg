@@ -49,12 +49,15 @@ class JsonFile:
 class TextFiles:
     """Plain-text cache files: one exact name, or every match under the dir.
 
-    Every file must be UTF-8 without NUL bytes; anything else could hide an
-    address from the redactor, so it refuses the group.
+    A file with a NUL byte refuses the group (UTF-16 would hide an address
+    from the redactor). A file that is not UTF-8 refuses it too, unless
+    ``fallback_encodings`` names encodings to try in order; the file is then
+    stored re-encoded as UTF-8, and redaction runs on the decoded text.
     """
 
     pattern: str
     recursive: bool = False
+    fallback_encodings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,11 @@ class GroupSpec:
     #: Keys removed at every depth of every JSON file, whatever the schema
     #: and the config's keep_fields say.
     deep_drop_keys: frozenset[str] = field(default_factory=frozenset)
+    #: Alternative specs for the same group, tried in order: the first whose
+    #: ``primary_input`` exists in the source directory is used.
+    variants: tuple["GroupSpec", ...] = ()
+    #: The file whose presence selects this spec among a group's variants.
+    primary_input: Optional[str] = None
     #: Files another group owns that this reader refuses to run without.
     #: Staged (empty) for the validation run only, never archived: the other
     #: group's own archive carries the real ones.
@@ -145,13 +153,21 @@ def _cric_core(root: Path) -> Any:
     return CRICCoreSource(base=str(root))
 
 
-def _cmssw(root: Path) -> Any:
+def _cmssw_map(root: Path) -> Any:
     from archi.sources.cmssw import CMSSWReleaseSource
 
     return CMSSWReleaseSource(
         map_cache_path="data/cmssw-releases/releases.map",
         fetch=False,
         base=str(root),
+    )
+
+
+def _cmssw_records(root: Path) -> Any:
+    from archi.sources.cmssw import CMSSWReleaseSource
+
+    return CMSSWReleaseSource(
+        records_path="data/cmssw-releases/records.json", base=str(root)
     )
 
 
@@ -421,8 +437,39 @@ GROUPS: dict[str, GroupSpec] = {
         GroupSpec(
             "cmssw-releases",
             "data/cmssw-releases",
-            _cmssw,
-            text=TextFiles("releases.map"),
+            _cmssw_map,
+            # The cms-bot map when the cache has one (it fixes the release
+            # set's vintage); else the JSON release list the reader also reads.
+            variants=(
+                GroupSpec(
+                    "cmssw-releases",
+                    "data/cmssw-releases",
+                    _cmssw_map,
+                    text=TextFiles("releases.map"),
+                    primary_input="releases.map",
+                ),
+                GroupSpec(
+                    "cmssw-releases",
+                    "data/cmssw-releases",
+                    _cmssw_records,
+                    json_files=(
+                        JsonFile(
+                            "records.json",
+                            "list",
+                            _keys(
+                                "label",
+                                "type",
+                                "state",
+                                "architecture",
+                                "release_notes",
+                                "release_date",
+                            ),
+                            _require_text("label"),
+                        ),
+                    ),
+                    primary_input="records.json",
+                ),
+            ),
         ),
         GroupSpec(
             "jira",
@@ -521,7 +568,11 @@ GROUPS: dict[str, GroupSpec] = {
             "twiki-eos",
             "data/twiki-eos",
             _twiki,
-            text=TextFiles("*.txt", recursive=True),
+            # TWiki pages predate UTF-8: Jason's lead, 2026-09-28, decode them
+            # as cp1252 (the Windows superset of Latin-1), else Latin-1.
+            text=TextFiles(
+                "*.txt", recursive=True, fallback_encodings=("cp1252", "latin-1")
+            ),
         ),
         GroupSpec(
             "conddb-global-tags",

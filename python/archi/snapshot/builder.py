@@ -42,7 +42,7 @@ import socket
 import subprocess
 import tarfile
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
@@ -214,6 +214,8 @@ class PreparedGroup:
     dropped_fields: tuple[str, ...]
     kept_fields: tuple[str, ...]
     deep_dropped_keys: tuple[str, ...] = ()
+    input_file: Optional[str] = None
+    transcoded: dict[str, int] = field(default_factory=dict)
 
 
 def prepare_group(group: GroupConfig) -> PreparedGroup:
@@ -247,12 +249,24 @@ class _Counter:
         return clean
 
 
+def _select_variant(spec: GroupSpec, source: Path) -> GroupSpec:
+    if not spec.variants:
+        return spec
+    for variant in spec.variants:
+        assert variant.primary_input is not None
+        candidate = source / variant.primary_input
+        if candidate.exists() or candidate.is_symlink():
+            return variant
+    names = " nor ".join(v.primary_input or "?" for v in spec.variants)
+    raise GroupRefused(spec.name, f"neither {names} is in {source}")
+
+
 def _prepare_group(group: GroupConfig) -> PreparedGroup:
-    spec = GROUPS[group.name]
     if not group.path.is_dir():
         raise GroupRefused(group.name, f"source directory {group.path} does not exist")
     # The configured directory may itself be a link; nothing inside it may be.
     source = group.path.resolve(strict=True)
+    spec = _select_variant(GROUPS[group.name], source)
     deep = set(spec.deep_drop_keys)
     drop = set(spec.default_drop_fields) | set(group.drop_fields) | deep
     keep = (set(spec.default_keep_fields) | set(group.keep_fields)) - drop
@@ -286,9 +300,14 @@ def _prepare_group(group: GroupConfig) -> PreparedGroup:
             keep=keep if record_level else set(),
         )
         final[archive_path] = _dump_json(_drop_keys_deep(pruned, deep))
+    transcoded: dict[str, int] = {}
     if spec.text is not None:
         for rel, path in _text_files(spec, source):
-            text = _read_text(group.name, rel, path)
+            text, encoding = _read_text(
+                group.name, rel, path, spec.text.fallback_encodings
+            )
+            if encoding != "utf-8":
+                transcoded[encoding] = transcoded.get(encoding, 0) + 1
             data = counter.redact(text).encode("utf-8")
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
@@ -312,6 +331,8 @@ def _prepare_group(group: GroupConfig) -> PreparedGroup:
         dropped_fields=tuple(sorted(drop - deep)),
         kept_fields=tuple(sorted(keep)),
         deep_dropped_keys=tuple(sorted(deep)),
+        input_file=spec.primary_input,
+        transcoded=transcoded,
     )
 
 
@@ -474,15 +495,27 @@ def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
     return [(rel, _safe_file(spec.name, source, rel)) for rel in sorted(names)]
 
 
-def _read_text(group: str, rel: str, path: Path) -> str:
-    """The file as UTF-8. Anything else could hide an address from the redactor
-    (UTF-16 puts a NUL between the letters), so it refuses the group."""
+def _read_text(
+    group: str, rel: str, path: Path, fallbacks: tuple[str, ...] = ()
+) -> tuple[str, str]:
+    """The file's text and the encoding it was decoded with.
+
+    A NUL byte always refuses the group (UTF-16 puts a NUL between the letters
+    of an address, hiding it from the redactor). Text that is not UTF-8 is
+    decoded with the first of ``fallbacks`` that accepts it, or refuses the
+    group when there are none.
+    """
     data = path.read_bytes()
     if b"\0" in data:
         raise GroupRefused(group, f"{rel} contains NUL bytes (not UTF-8 text)")
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8"), "utf-8"
     except UnicodeDecodeError as exc:
+        for encoding in fallbacks:
+            try:
+                return data.decode(encoding), encoding
+            except UnicodeDecodeError:
+                continue
         raise GroupRefused(group, f"{rel} is not UTF-8: {exc}") from exc
 
 
@@ -726,6 +759,11 @@ def build(
             }
             if group.deep_dropped_keys:
                 row["dropped_keys_at_any_depth"] = list(group.deep_dropped_keys)
+            if group.input_file:
+                row["input_file"] = group.input_file
+            if GROUPS[group.name].text is not None or group.transcoded:
+                row["transcoded_files"] = sum(group.transcoded.values())
+                row["transcoded_by_encoding"] = dict(sorted(group.transcoded.items()))
             groups_lock[group.name] = row
         lock = {
             "lock_version": LOCK_VERSION,
