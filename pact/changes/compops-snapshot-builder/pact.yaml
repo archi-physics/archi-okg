@@ -121,14 +121,14 @@ requirements:
     in valid UTF-8 plus one stray 0x93 byte) all three addresses are removed and the valid
     UTF-8 is kept; a Latin-1 page with an accented-local-part address loses the address; a
     cp1252 page keeps its smart quotes as UTF-8; the third review''s four examples (a stray
-    0x93 before the @, 0x96 or 0xA0 inside the domain, an overlong 0xC0 0x80 next to the @) and
-    an address split by a C1 fallback byte are removed whole, by storing that page without its
-    invalid bytes (pages_bytes_dropped); 2,000 fuzzed pages leave no address found in the
-    dropped reading in the output; ANSI colour sequences are stripped before redaction; a page is
-    binary only with more than 1% and at least 16 control characters, \f and \v not counted;
-    the lock counts pages, fallback bytes and dropped-byte pages;
-    the CMSSW group reads records.json when releases.map is absent and prefers the map when
-    both exist. [evidence: executed_test]
+    0x93 before the @, 0x96 or 0xA0 inside the domain, an overlong 0xC0 0x80 next to the @)
+    and an address split by a C1 fallback byte are removed whole, by storing that page without
+    its invalid bytes (pages_bytes_dropped); 2,000 fuzzed pages leave no address found in
+    the dropped reading in the output; ANSI colour sequences are stripped before redaction;
+    a page is binary only with more than 1% and at least 16 control characters, \f and \v
+    not counted; the lock counts pages, fallback bytes and dropped-byte pages; the CMSSW group
+    reads records.json when releases.map is absent and prefers the map when both exist. [evidence:
+    executed_test]
 
     - acc.compops-snapshot-builder.wrong-export: a CRIC responsibilities.json shaped like
     the sites-compat export (other column names, or five fields per row), each of the 42 ways
@@ -140,10 +140,10 @@ requirements:
     is reported as a write failure. [evidence: executed_test]
 
     - acc.compops-snapshot-builder.file-dates: an optional per-group file_dates map is carried
-    into the lock and must name a file the group archives; an optional per-group note (at most
-    300 characters, refused if it holds an address) is carried into the lock, so the June CRIC
-    group records collected: 2026-04-09 with the note "files written 2026-06-12; fetched
-    2026-04-09" (lead decision, 2026-09-28). [evidence: executed_test]
+    into the lock and must name a file the group archives; an optional per-group note (at
+    most 300 characters, refused if it holds an address) is carried into the lock, so the
+    June CRIC group records collected: 2026-04-09 with the note "files written 2026-06-12;
+    fetched 2026-04-09" (lead decision, 2026-09-28). [evidence: executed_test]
 
     - acc.compops-snapshot-builder.unsafe-input: a symlinked file or directory, a dot path,
     UTF-16 or NUL-bearing text, non-UTF-8 text outside TWiki, an address in a file name, an
@@ -298,4 +298,29 @@ evidence:
   head: 22ce5d0ae36a47ba67fad6ce697be28cc1580fc1
   at: '2026-09-28T13:36:24+00:00'
   note: 13 passed at this head inside the 682-test suite; downloaders unchanged since 96a34d6.
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.snapshot
+  status: pass
+  command: python -m pytest python/tests -q
+  head: a9df45561705c51ff539721e973fbdf6513214a8
+  at: '2026-09-28T14:23:15+00:00'
+  note: '702 passed at this head (okg origin/dev 435ab285ac exported source, Python 3.12,
+    zstd v1.5.7, hatchling on the path), 179 snapshot tests. Third-review fixes: the four
+    examples (stray 0x93 before the @, 0x96 and 0xA0 inside the domain, overlong 0xC0 0x80
+    next to the @) lose the whole address and count as pages_bytes_dropped; a stray byte away
+    from an address keeps its cp1252 character; 2,000 fuzzed pages leave no address found
+    in the dropped reading (local part or domain) in the output; ANSI CSI sequences are stripped
+    before redaction; binary needs >1% and >=16 controls, \f and \v not counted; SIGTERM restores
+    SIG_DFL when none was set and ignores a second SIGTERM during cleanup; file_dates errors
+    name the entry; per-group note (<=300 chars, address-checked) carried into the lock. Mutations:
+    always the fallback reading 6 failed, no CSI strip 1, no 16-control minimum 1, counting
+    \f/\v 1, second SIGTERM not ignored 1, restoring None 1, no note address check 2. redact_email_addresses
+    output unchanged: 127 enrichment and JIRA tests pass on the span refactor.'
+- kind: executed_test
+  requirement: req.compops-snapshot-builder.downloaders
+  status: pass
+  command: python -m pytest python/tests/downloaders -q
+  head: a9df45561705c51ff539721e973fbdf6513214a8
+  at: '2026-09-28T14:23:15+00:00'
+  note: 13 passed at this head inside the 702-test suite; downloaders unchanged since 96a34d6.
 decisions: []
