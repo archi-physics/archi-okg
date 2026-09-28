@@ -1,9 +1,22 @@
-"""Download CERN JIRA issues into the CMS cache format.
+"""Download CERN JIRA issues into the cache ``archi.sources.jira`` reads.
 
-This is a CMS-local downloader because CERN JIRA auth uses the
-deployment-specific `jira` Python client path. It writes
-`records.json` and `meta.json` atomically so `cms_sources.jira` can
-ingest the cache without talking to the network.
+Moved from okg-deployments ``cms/scripts/download_jira.py`` (main
+``32f2b4e3c2``). It writes ``records.json`` and ``meta.json`` atomically,
+so the JIRA reader can ingest the cache without talking to the network.
+
+Run it from an operator environment that has the ``jira`` package::
+
+    CERN_JIRA_TOKEN=... python -m archi.downloaders.jira --output-dir <dir>
+
+Without ``--output-dir`` the cache goes to ``data/jira`` under
+``ARCHI_DATA_ROOT`` (or under the current directory when that variable is
+unset), the path the reader's defaults and ``docs/connector-caches.md`` name.
+
+Changes from the okg-deployments copy: the default output directory follows
+``ARCHI_DATA_ROOT`` instead of the old repository layout
+(``<repo>/data/cms/jira``), and a missing ``jira`` package stops with a
+message that names it. Records and metadata are written byte for byte as
+before.
 """
 from __future__ import annotations
 
@@ -18,8 +31,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "cms" / "jira"
+DATA_ROOT_ENV = "ARCHI_DATA_ROOT"
 DEFAULT_SERVER = "https://its.cern.ch/jira"
 DEFAULT_PROJECTS = (
     "CMSCOMPPR",
@@ -95,8 +107,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="Directory that will receive records.json and meta.json.",
+        default=None,
+        help=(
+            "Directory that will receive records.json and meta.json. "
+            "Default: data/jira under ARCHI_DATA_ROOT, or under the current "
+            "directory when ARCHI_DATA_ROOT is unset."
+        ),
     )
     parser.add_argument("--server", default=DEFAULT_SERVER)
     parser.add_argument(
@@ -131,7 +147,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Fetch according to the limit but do not write cache files.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.output_dir is None:
+        args.output_dir = str(default_output_dir())
+    return args
+
+
+def default_output_dir() -> Path:
+    """``data/jira`` under ``ARCHI_DATA_ROOT`` (else the current directory).
+
+    The same base ``archi.auth.cache.data_root`` resolves reader paths against.
+    """
+    raw = os.environ.get(DATA_ROOT_ENV)
+    base = Path(raw).expanduser() if raw else Path.cwd()
+    return base / "data" / "jira"
 
 
 def _token(env_names: Iterable[str]) -> str:
@@ -151,7 +180,13 @@ def _fetch_records(
     max_issues: int,
     include_comments: bool,
 ) -> Iterable[dict[str, Any]]:
-    from jira import JIRA
+    try:
+        from jira import JIRA
+    except ImportError as exc:
+        raise SystemExit(
+            "the 'jira' Python package is not installed in this environment; "
+            "install it (pip install jira) to download the JIRA cache"
+        ) from exc
 
     client = JIRA(server=server.rstrip("/"), token_auth=token)
     remaining = max_issues if max_issues > 0 else None

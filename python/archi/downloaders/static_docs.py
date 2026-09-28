@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
-"""Download CMS static documentation caches from the source manifest.
+"""Download static documentation caches from the source download manifest.
 
-This script is CMS-owned on purpose: it understands the CMS source manifest and
-emits records in the shape consumed by ``cms_sources.docs.DocumentationSource``.
-It merges new records into existing cache files by URL so an expansion run does
-not remove older cache entries that are outside the current manifest.
+Moved from okg-deployments ``cms/scripts/download_static_docs.py`` (main
+``32f2b4e3c2``). It understands the manifest shipped next to this module
+(``source-download-manifest.yaml``) and emits records in the shape
+``archi.sources.docs.DocumentationSource`` reads. It merges new records into
+existing cache files by URL, so an expansion run does not remove older cache
+entries that are outside the current manifest.
+
+    python -m archi.downloaders.static_docs [--manifest <file>]
+
+Outputs default to ``data/gitlab-docs/records.json`` and
+``data/docsite/records.json`` under ``ARCHI_DATA_ROOT`` (or the current
+directory when that variable is unset). GitLab reads use ``CERN_GITLAB_TOKEN``
+or ``GITLAB_CERN_TOKEN`` when set, and retry anonymously on 401/403.
+
+Changes from the okg-deployments copy: the default manifest is the packaged
+copy, the default outputs follow ``ARCHI_DATA_ROOT`` instead of the old
+``data/cms/...`` layout, ``main`` takes an ``argv`` list, and ``lxml`` is
+imported only when a public page is parsed (it is an okg dependency, not an
+archi one). Record shapes are unchanged.
 """
 from __future__ import annotations
 
@@ -20,25 +35,37 @@ from urllib.parse import quote, urlparse
 
 import requests
 import yaml
-from lxml import html as lxml_html
 
 
-DEFAULT_MANIFEST = Path("deployments/cms/docs/source-download-manifest.yaml")
-DEFAULT_GITLAB_OUTPUT = Path("data/cms/gitlab-docs/records.json")
-DEFAULT_DOCSITE_OUTPUT = Path("data/cms/docsite/records.json")
+DATA_ROOT_ENV = "ARCHI_DATA_ROOT"
+DEFAULT_MANIFEST = Path(__file__).with_name("source-download-manifest.yaml")
+GITLAB_OUTPUT = Path("data/gitlab-docs/records.json")
+DOCSITE_OUTPUT = Path("data/docsite/records.json")
 GITLAB_BASE = "https://gitlab.cern.ch"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def _data_root() -> Path:
+    raw = os.environ.get(DATA_ROOT_ENV)
+    return Path(raw).expanduser() if raw else Path.cwd()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
-    parser.add_argument("--gitlab-output", default=str(DEFAULT_GITLAB_OUTPUT))
-    parser.add_argument("--docsite-output", default=str(DEFAULT_DOCSITE_OUTPUT))
+    parser.add_argument("--gitlab-output", default=None)
+    parser.add_argument("--docsite-output", default=None)
     parser.add_argument("--max-bytes", type=int, default=512_000)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--skip-public", action="store_true")
     parser.add_argument("--skip-gitlab", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.gitlab_output is None:
+        args.gitlab_output = str(_data_root() / GITLAB_OUTPUT)
+    if args.docsite_output is None:
+        args.docsite_output = str(_data_root() / DOCSITE_OUTPUT)
 
     manifest_path = Path(args.manifest)
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
@@ -388,6 +415,8 @@ def _title_for_path(path: str, body: str) -> str:
 
 
 def _html_title_body(markup: str) -> tuple[str, str]:
+    from lxml import html as lxml_html
+
     doc = lxml_html.fromstring(markup)
     for bad in doc.xpath("//script|//style|//noscript"):
         parent = bad.getparent()

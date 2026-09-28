@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Interactive CERN SSO login — Kerberos + TOTP → session cookies.
+"""Interactive CERN SSO login: Kerberos + TOTP, saved as session cookies.
 
-Uses a single shared session so you only enter your TOTP code ONCE.
-After the first service authenticates, Keycloak reuses the SSO session
-for all subsequent services automatically.
+Moved from okg-deployments ``cms/scripts/sso-login.py`` (main ``32f2b4e3c2``).
+It uses one shared session, so you enter your TOTP code once: after the first
+service authenticates, Keycloak reuses the SSO session for the others. The
+cookie files it writes are the ones ``archi.auth.cookies`` reads.
 
-Usage:
-    uv run --extra cern python deployments/cms/scripts/sso-login.py
-    uv run --extra cern python deployments/cms/scripts/sso-login.py hypernews
-    uv run --extra cern python deployments/cms/scripts/sso-login.py --check
+Usage::
 
-Prerequisites:
     kinit <username>@CERN.CH
-    uv sync --extra cern
+    python -m archi.downloaders.sso_login                 # every service
+    python -m archi.downloaders.sso_login hypernews
+    python -m archi.downloaders.sso_login --check         # verify saved cookies
+
+Needs ``requests-kerberos`` (and ``python-dotenv`` if you keep settings such
+as ``CERN_GRID_CA`` in a ``.env`` file in the current directory).
+
+Changes from the okg-deployments copy: cookie files go to ``--cookie-dir``,
+else ``ARCHI_COOKIE_DIR``, else ``./.cookies`` (the old copy wrote to
+``<repo>/.cookies``), and ``.env`` is read from the current directory only
+(the old copy also read the repository and deployment directories). The login
+flow is unchanged.
 """
 
 import argparse
@@ -23,19 +31,25 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-SCRIPT_PATH = Path(__file__).resolve()
-DEPLOYMENT_DIR = SCRIPT_PATH.parents[1]
-REPO_ROOT = SCRIPT_PATH.parents[3]
-COOKIE_DIR = REPO_ROOT / ".cookies"
+COOKIE_DIR_ENV = "ARCHI_COOKIE_DIR"
+COOKIE_DIR = Path(".cookies")
 
-# Load .env so CERN_GRID_CA etc. are available.
-try:
-    from dotenv import load_dotenv
+
+def cookie_dir(explicit: str | None = None) -> Path:
+    """``--cookie-dir``, else ``ARCHI_COOKIE_DIR``, else ``./.cookies``."""
+    if explicit:
+        return Path(explicit).expanduser()
+    raw = os.environ.get(COOKIE_DIR_ENV)
+    return Path(raw).expanduser() if raw else COOKIE_DIR
+
+
+def _load_dotenv() -> None:
+    """Read ``./.env`` when python-dotenv is installed (optional convenience)."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
     load_dotenv()
-    load_dotenv(REPO_ROOT / ".env", override=False)
-    load_dotenv(DEPLOYMENT_DIR / ".env", override=False)
-except ImportError:
-    pass
 
 # Each service: url to trigger SSO, and a predicate that returns True on success.
 # Services that use CERN Keycloak SSO (Kerberos + TOTP).
@@ -134,10 +148,12 @@ def _complete_oidc(session, service_url: str, krb, *, totp_code: str | None = No
     return authenticated
 
 
-def _save_service_cookies(session, service_name: str, service_url: str) -> int:
+def _save_service_cookies(
+    session, service_name: str, service_url: str, *, directory: Path
+) -> tuple[int, int]:
     """Extract cookies for the service domain (+ auth.cern.ch) and save."""
-    COOKIE_DIR.mkdir(exist_ok=True)
-    cookie_file = COOKIE_DIR / f"{service_name}.txt"
+    directory.mkdir(parents=True, exist_ok=True)
+    cookie_file = directory / f"{service_name}.txt"
 
     service_domain = urlparse(service_url).hostname
     keep_domains = {service_domain, "auth.cern.ch"}
@@ -154,11 +170,11 @@ def _save_service_cookies(session, service_name: str, service_url: str) -> int:
     return len(jar), svc_count
 
 
-def _check_cookies(service_name: str, service: dict) -> bool:
+def _check_cookies(service_name: str, service: dict, *, directory: Path) -> bool:
     """Return True if existing cookies still authenticate the service."""
     import requests, time
 
-    cookie_file = COOKIE_DIR / f"{service_name}.txt"
+    cookie_file = directory / f"{service_name}.txt"
     if not cookie_file.exists():
         print(f"[{service_name}] No cookie file")
         return False
@@ -193,7 +209,7 @@ def _check_cookies(service_name: str, service: dict) -> bool:
         return False
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -202,7 +218,14 @@ def main() -> None:
         help=f"Services: {', '.join(SERVICES)} (default: all)",
     )
     parser.add_argument("--check", action="store_true", help="Verify existing cookies only")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--cookie-dir",
+        default=None,
+        help=f"Where cookie files go (default: ${COOKIE_DIR_ENV}, else ./.cookies)",
+    )
+    args = parser.parse_args(argv)
+    directory = cookie_dir(args.cookie_dir)
+    _load_dotenv()
 
     targets = list(SERVICES) if not args.services or args.services == ["all"] else args.services
     unknown = [s for s in targets if s not in SERVICES]
@@ -210,7 +233,7 @@ def main() -> None:
         parser.error(f"Unknown: {', '.join(unknown)}. Choose from: {', '.join(SERVICES)}")
 
     if args.check:
-        results = [_check_cookies(n, SERVICES[n]) for n in targets]
+        results = [_check_cookies(n, SERVICES[n], directory=directory) for n in targets]
         sys.exit(0 if all(results) else 1)
 
     # Verify Kerberos
@@ -265,8 +288,10 @@ def main() -> None:
             continue
 
         if ok:
-            total, svc_count = _save_service_cookies(session, name, svc["url"])
-            print(f"[{name}] ✓ {total} cookies saved ({svc_count} service-specific) → .cookies/{name}.txt")
+            total, svc_count = _save_service_cookies(
+                session, name, svc["url"], directory=directory
+            )
+            print(f"[{name}] ✓ {total} cookies saved ({svc_count} service-specific) → {directory / name}.txt")
             success.append(name)
         else:
             print(f"[{name}] ✗ Authentication failed")
@@ -275,11 +300,11 @@ def main() -> None:
     print(f"\n{'='*50}")
     if success:
         print(f"✓ Logged in: {', '.join(success)}")
-        print(f"\nCookie files saved to {COOKIE_DIR}/")
+        print(f"\nCookie files saved to {directory}/")
         print("Add to .env:")
         for name in success:
             env_var = ENV_VARS.get(name, f"{name.upper()}_COOKIE_FILE")
-            print(f"  {env_var}={COOKIE_DIR / name}.txt")
+            print(f"  {env_var}={directory / name}.txt")
     if failed:
         print(f"✗ Failed:    {', '.join(failed)}")
 
