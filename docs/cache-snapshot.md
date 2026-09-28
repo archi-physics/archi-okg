@@ -97,70 +97,75 @@ For every group the build:
    characters of ANSI colour sequences (`ESC[32m`).
 
    Before anything is stripped or redacted, each text file, each JSON
-   string and key, and each archive path is checked for hidden characters
-   in or next to an address. Hidden characters are those control
-   characters plus every invisible format character (Unicode category Cf,
-   such as U+200E, U+2068 or U+FEFF), except soft hyphen, zero-width space,
-   zero-width non-joiner, zero-width joiner and word joiner, which the
-   redactor already reads as part of an address. The check has two rules,
-   and either one refuses the group:
+   string and key, and each archive path is checked for addresses that
+   hidden or look-alike characters keep from the redactor. The check reads
+   the value twice, keeping a map from every character read back to the
+   raw value:
 
-   - **Word rule.** The value is split into words at whitespace (space,
-     tab, newline, carriage return, vertical tab, form feed, no-break
-     space, U+2028, U+2029). From each word, the hidden characters and
-     also the five invisible characters the redactor reads (soft hyphen,
+   - as a terminal shows it: terminal sequences removed, hidden characters
+     removed, and NFKC applied to each remaining character (NFKC turns
+     full-width and other compatibility forms, such as `＠`, `．` or `ﬁ`,
+     into their plain forms);
+   - when the value has a terminal sequence, also as a program that ignores
+     control characters sees it: only the hidden characters removed, NFKC
+     applied.
+
+   Hidden characters are the control characters above (including `ESC`
+   and U+009B) and every Unicode format character (category Cf, such as
+   U+200E, U+2068, U+FEFF, soft hyphen and zero-width space). Terminal
+   sequences are, tried in this order: CSI (`ESC [` or U+009B, parameters,
+   a final byte); OSC, DCS, SOS, PM and APC strings (`ESC ]`, `ESC P`,
+   `ESC X`, `ESC ^`, `ESC _` or their 8-bit forms, a body of at most 4,096
+   characters with no control character in it, ended by BEL, `ESC \` or
+   U+009C); and any other `ESC` + optional intermediate bytes + a final
+   byte (`ESC ( B`, `ESC >`, `ESC \`). An opening character with no valid
+   body and ending is a lone hidden character, which keeps the check linear
+   on unterminated strings.
+
+   Both redactors, with all their forms (`@`, `[at]`, `_at_`, `%40`,
+   `&#64;`, `NOSPAM` and the rest), match each reading, and each match is
+   mapped back to the raw value. Then:
+
+   - **Refused:** the match contains, or sits directly next to, a control
+     character, `ESC`, a character of a terminal sequence, or a Cf
+     character other than the five the redactor reads itself (soft hyphen,
      zero-width space, zero-width non-joiner, zero-width joiner, word
-     joiner) are removed, and NFKC is applied, which turns full-width
-     forms into ASCII. If the result has an `@` or a bracketed `at` or
-     `dot` (`[at]`, `(at)`, `{at}`, `[dot]`, `(dot)`, `{dot}`, any case),
-     and the word had one of those removed characters or NFKC changed it
-     beyond plain NFC composition, the group is refused. This rule needs
-     no knowledge of terminal sequences. It refuses
-     `jdoe<ESC>(é@example.org`, `jdoe[<U+200E>at]laptop`,
-     `jdoe<U+200B>[at]example.org`, `jdoe(<U+200B>at)example(dot)org`,
-     `jdoe［at］example.org` and `jdoe＠example.org`. Plain ASCII words, and
-     accented words in composed or decomposed form, are not affected.
-   - **Match rule.** Both redactors match three copies of the value: one
-     with its hidden characters removed; one that also drops the character
-     after each `ESC` that starts a terminal sequence (the `[` of `ESC [`);
-     and one that also drops every terminal sequence whole. Terminal
-     sequences here are, tried in this order: CSI (`ESC [` or U+009B,
-     parameters, a final byte); OSC strings (`ESC ]` or U+009D, ended by
-     BEL, `ESC \` or U+009C); DCS, SOS, PM and APC strings (`ESC P`,
-     `ESC X`, `ESC ^`, `ESC _` or their 8-bit forms, ended by `ESC \` or
-     U+009C); and any other `ESC` + optional intermediate bytes + a final
-     byte (`ESC ( B`, `ESC >`, `ESC \`). If any match contains, or sits
-     directly next to, a hidden character or any character of a terminal
-     sequence, the group is refused.
+     joiner). So `jdoe<DEL>x@example.org`, `jdoe@example<ESC>.org`,
+     `jdoe<U+200E>x@example.org`, `<U+2068>jdoe<U+2069>@example.org`, an
+     address wrapped directly in colour codes (`ESC[31mjdoe@example.org
+     ESC[0m`, including a coloured shell prompt with a dotted host) and a
+     string where a control character only joins a word to an address
+     (`word<control>jdoe@example.org`) refuse the group.
+   - **Removed whole:** otherwise, if the match contains one of those five
+     invisible characters or a character NFKC changed, the raw text from
+     the match's first character to its last is removed, and the lock
+     counts it in `normalized_addresses_removed`. So `jdoe＠example.org`,
+     `jdoe [at] example．org`, `jdoe<U+200B> [at] example.org`, an address
+     with a ligature (`ﬁ`) in it and one with a soft hyphen in its domain
+     are removed with no fragment left.
+   - **Redacted normally:** otherwise the match is left to the normal
+     redaction. A character NFKC changes that only sits next to a match
+     (`：jdoe@example.org`, `jdoe@example.org…`) or is in text that is not
+     an address (`@example™`, `user@host²`) has no effect.
 
-   So `jdoe<DEL>x@example.org`, `j<DEL>doe.x(at)example(dot)org`,
-   `jdoe@example<ESC>.org`, `jdoe<ESC>\@example.org`,
-   `jdoe<U+009B>@example.org`, `jdoe<U+200E>x@example.org`,
-   `<U+2068>jdoe<U+2069>@example.org` and a file named
-   `jdoe<U+200E>@example.org.txt` are refused. Accepted consequences: an
-   address wrapped directly in colour codes (`ESC[31mjdoe@example.org
-   ESC[0m`) is refused rather than cleaned; so is a string where a control
-   character only joins a word to an address
-   (`word<control>jdoe@example.org`); so is any word that mixes a hidden
-   or invisible character with an `@`, such as a coloured shell prompt
-   (`ESC[32mjdoe@laptop ESC[0m:~$`), even when it is not an address; and
-   an address with a soft hyphen or zero-width character in it
-   (`jdoe<U+200B>x@example.org`) or written in full-width characters
-   (`jdoe＠example.org`), which the redactor alone would have removed. A
-   hidden character in a word with no `@` or bracketed `at`/`dot` is left
-   to the match rule and otherwise kept (or stripped, for a CSI colour
-   code). Tab, newline, vertical tab, form feed, carriage return and the
-   Unicode line and paragraph separators (U+2028, U+2029) are not hidden
-   characters: they show as breaks, so `jdoe<CR>x@example.org` stores
-   `jdoe<CR>` as two separate words would.
+   An archive path with any refused or removed match is refused, since a
+   file cannot be renamed. The check runs on the raw value and again after
+   the colour codes are stripped, since stripping can join text. Afterwards
+   every stored string, and the configured `note` (which is checked but
+   not redacted), must be left unchanged by both redactors in both
+   readings, or the group is refused. A value no reading shows as an
+   address passes, as its plain-text equivalent would:
+   `jdoe<ESC>[@example.org` is stored as `jdoeexample.org`, and a shell
+   prompt whose host has no dot (`jdoe@laptop`) is kept, as it is without
+   colour codes. Tab, newline, vertical tab, form feed, carriage return
+   and the Unicode line and paragraph separators (U+2028, U+2029) are not
+   hidden characters: they show as breaks, so `jdoe<CR>x@example.org`
+   stores `jdoe<CR>` as two separate words would.
 
-   Only a value that passes this check has its ANSI CSI sequences
-   (`ESC [` + parameters + a final byte) removed and is then redacted. A
-   lone `ESC` or U+009B that starts no such sequence is kept, with the text
-   after it. The lock counts the removed sequences as
-   `ansi_sequences_stripped` for every group. The configured `note`, which
-   is checked but not redacted, is refused when an address appears in it
-   once its hidden characters are removed.
+   Only then are ANSI CSI sequences (`ESC [` + parameters + a final byte)
+   removed and the value redacted. A lone `ESC` or U+009B that starts no
+   such sequence is kept, with the text after it. The lock counts the
+   removed sequences as `ansi_sequences_stripped` for every group.
 2. **Refuses malformed input.** A missing file, invalid JSON, the wrong
    top-level shape, or one record the reader would skip or silently drop (no
    identity key, not an object, a non-numeric GOCDB `downtime_id`, a CRIC
@@ -187,7 +192,8 @@ For every group the build:
    forms) with `redact_obfuscated_email_addresses`; free prose such as
    `john.doe at cern.ch` is kept. It repeats both until neither changes the
    text, checks that no string still changes under either, and records the
-   counts (`addresses_removed`, `obfuscated_addresses_removed`) in the lock.
+   counts (`addresses_removed`, `obfuscated_addresses_removed`, and
+   `normalized_addresses_removed` for step 1's whole removals) in the lock.
 4. **Drops every field the reader does not read**, plus the group's
    `drop_fields`. For example Indico chairs and speakers keep only their name
    fields, JIRA people keep only `displayName`/`name`/`key`, and a
@@ -214,7 +220,8 @@ same input with the same zstd version give byte-identical archives.
 The lock records, per group: `collected`, `file_dates` and `note` (when
 configured), `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
-`addresses_removed`, `obfuscated_addresses_removed`, `input_file` (for CMSSW, which input was used),
+`addresses_removed`, `obfuscated_addresses_removed`,
+`normalized_addresses_removed`, `input_file` (for CMSSW, which input was used),
 `text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs` and
 `fallback_bytes` (TWiki),
 `contents_sha256` (a digest of the unpacked files), `archive_dir`, and the

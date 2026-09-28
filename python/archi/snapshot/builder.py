@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import bisect
 import errno
+import functools
 import fnmatch
 import hashlib
 import io
@@ -50,7 +52,6 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 
 import yaml
 
-from archi.enrichment.anonymizer import _INVISIBLE as _REDACTOR_INVISIBLE
 from archi.enrichment.anonymizer import (
     email_address_spans,
     obfuscated_email_address_spans,
@@ -268,6 +269,9 @@ class PreparedGroup:
     addresses_removed: int
     obfuscated_removed: int
     ansi_stripped: int
+    #: Addresses removed whole because only NFKC or an invisible character
+    #: (soft hyphen, zero-width space or joiners, word joiner) hid them.
+    normalized_removed: int
     dropped_fields: tuple[str, ...]
     kept_fields: tuple[str, ...]
     deep_dropped_keys: tuple[str, ...] = ()
@@ -312,6 +316,7 @@ class _Counter:
         self.removed = 0
         self.obfuscated = 0
         self.ansi = 0
+        self.normalized = 0
 
     def strip_ansi(self, text: str) -> str:
         clean, count = _CSI_RE.subn("", text)
@@ -408,8 +413,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                         text_stats["pages_bytes_dropped"] += 1
                 else:
                     text_stats["pages_valid_utf8"] += 1
-            _refuse_hidden_address(group.name, rel, text)
-            data = counter.redact(counter.strip_ansi(text)).encode("utf-8")
+            data = _clean(group.name, rel, text, counter).encode("utf-8")
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
             final[archive_path] = data
@@ -417,7 +421,12 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         raise GroupRefused(group.name, f"no cache files found in {source}")
 
     for archive_path in final:
-        _refuse_hidden_address(group.name, f"file path {archive_path}", archive_path)
+        if _hidden_address_spans(group.name, f"file path {archive_path}", archive_path):
+            raise GroupRefused(
+                group.name,
+                f"file path {archive_path}: an address in it is written with "
+                "full-width or invisible characters",
+            )
         if redact_email_addresses(archive_path) != archive_path:
             raise GroupRefused(
                 group.name, f"a file path contains an email address: {archive_path}"
@@ -440,6 +449,7 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         addresses_removed=counter.removed,
         obfuscated_removed=counter.obfuscated,
         ansi_stripped=counter.ansi,
+        normalized_removed=counter.normalized,
         dropped_fields=tuple(sorted(drop - deep)),
         kept_fields=tuple(sorted(keep)),
         deep_dropped_keys=tuple(sorted(deep)),
@@ -547,17 +557,50 @@ def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
             )
 
 
+def _clean(group: str, where: str, text: str, counter: _Counter) -> str:
+    """Check ``text`` for hidden addresses, strip its colour codes, redact it.
+
+    The check runs on the raw text and again on the stripped text, since
+    stripping can join what it separated. Addresses hidden only by NFKC or
+    an invisible character are removed whole first (see
+    :func:`_hidden_address_spans`).
+    """
+    text = _remove_normalized(group, where, text, counter)
+    stripped = counter.strip_ansi(text)
+    if stripped != text:
+        stripped = _remove_normalized(group, where, stripped, counter)
+    return counter.redact(stripped)
+
+
+def _remove_normalized(group: str, where: str, text: str, counter: _Counter) -> str:
+    for _ in range(_REDACTION_ROUNDS):
+        spans = _hidden_address_spans(group, where, text)
+        if not spans:
+            return text
+        counter.normalized += len(spans)
+        pieces = []
+        last = 0
+        for start, end in spans:
+            pieces.append(text[last:start])
+            last = end
+        pieces.append(text[last:])
+        text = "".join(pieces)
+    if _hidden_address_spans(group, where, text):
+        raise GroupRefused(
+            group, f"{where}: an address is still hidden after removing others"
+        )
+    return text
+
+
 def _redact_json(group: str, file_name: str, value: Any, counter: _Counter) -> Any:
     if isinstance(value, str):
-        _refuse_hidden_address(group, file_name, value)
-        return counter.redact(counter.strip_ansi(value))
+        return _clean(group, file_name, value, counter)
     if isinstance(value, list):
         return [_redact_json(group, file_name, item, counter) for item in value]
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            _refuse_hidden_address(group, file_name, key)
-            clean_key = counter.redact(counter.strip_ansi(key))
+            clean_key = _clean(group, file_name, key, counter)
             if clean_key in out:
                 raise GroupRefused(
                     group,
@@ -626,17 +669,15 @@ def _text_files(spec: GroupSpec, source: Path) -> list[tuple[str, Path]]:
 #: C0 controls other than tab, newline, vertical tab, form feed and carriage
 #: return; DEL; and C1. Counted by the binary guard.
 _CONTROL_RE = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
-#: What the hidden-address check removes: the control characters above and
-#: every invisible format character (Unicode category Cf, such as U+200E or
-#: U+2068) except the ones the redactor already reads as part of an address
-#: (soft hyphen, zero-width space and joiners, word joiner).
+#: Hidden characters: the control characters above and every invisible
+#: format character (Unicode category Cf, such as U+200E, U+2068, U+FEFF,
+#: and also soft hyphen, zero-width space and joiners, and word joiner).
 _HIDDEN_RE = re.compile(
     "[\x00-\x08\x0e-\x1f\x7f-\x9f"
     + "".join(
         re.escape(chr(code))
         for code in range(0x110000)
         if unicodedata.category(chr(code)) == "Cf"
-        and chr(code) not in _REDACTOR_INVISIBLE
     )
     + "]"
 )
@@ -647,33 +688,43 @@ CONTROL_MIN_COUNT = 16
 #: ANSI CSI escape sequences (terminal colours pasted from logs), removed
 #: from text after the hidden-address check and before redaction.
 _CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
+#: Longest body of an OSC, DCS, SOS, PM or APC string the hidden-address
+#: check reads as one sequence. Past it, or at a control character inside
+#: the body, the opening character is a lone hidden character; this keeps
+#: the scan linear on unterminated strings.
+STRING_SEQUENCE_CAP = 4096
 #: Terminal escape sequences, for the hidden-address check only (they are
 #: not stripped), tried in this order: CSI in its 7-bit and 8-bit (U+009B)
-#: forms; OSC strings (``ESC ] 0;title BEL``); DCS, SOS, PM and APC strings
-#: (``ESC P`` ... ``ESC \``, 7-bit or 8-bit); and any other ``ESC`` +
+#: forms; OSC, DCS, SOS, PM and APC strings (``ESC ] 0;title BEL``,
+#: ``ESC P`` ... ``ESC \``, 7-bit or 8-bit); and any other ``ESC`` +
 #: optional intermediates + a final byte (``ESC ( B`` from ``tput sgr0``,
 #: ``ESC >``, ``ESC \``).
 _SEQUENCE_RE = re.compile(
     r"(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]"
-    r"|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
-    r"|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c)"
+    r"|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])"
+    rf"[^\x00-\x07\x0e-\x1f\x7f-\x9f]{{0,{STRING_SEQUENCE_CAP}}}"
+    r"(?:\x07|\x1b\\|\x9c)"
     r"|\x1b[\x20-\x2f]*[\x30-\x7e]"
 )
-#: What the word rule of the hidden-address check removes from a word: the
-#: hidden characters and also the invisible characters the redactor reads
-#: (``jdoe<U+200B>[at]example.org`` and ``(<U+200B>at)`` must not pass).
-_WORD_HIDDEN_RE = re.compile(
-    _HIDDEN_RE.pattern[:-1]
-    + "".join(re.escape(char) for char in sorted(_REDACTOR_INVISIBLE))
-    + "]"
-)
-#: What separates words for the word rule of the hidden-address check.
-_WORD_BREAK_RE = re.compile("[ \t\n\r\x0b\x0c\u00a0\u2028\u2029]+")
-#: An address separator in a word: ``@`` (also full-width and small), or a
-#: bracketed ``at`` or ``dot`` (``[at]``, ``(at)``, ``{at}``, ``[dot]``, ...).
-_SEPARATOR_RE = re.compile(
-    r"[@\uff20\ufe6b]|[\[({]\s*(?:at|dot)\s*[\])}]", re.IGNORECASE
-)
+#: Text the hidden-address check can pass over unread: printable ASCII and
+#: tab, newline, vertical tab, form feed and carriage return.
+_PLAIN_RE = re.compile(r"[\x09-\x0d\x20-\x7e]*")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
+
+
+@functools.lru_cache(maxsize=65536)
+def _fold(char: str) -> str:
+    return unicodedata.normalize("NFKC", char)
+
+
+def _reads_as_itself(text: str) -> bool:
+    """Whether both readings of :func:`_canonical` are ``text`` itself: no
+    hidden character, no terminal sequence, nothing NFKC changes."""
+    if _PLAIN_RE.fullmatch(text):
+        return True
+    if _HIDDEN_RE.search(text) or _SEQUENCE_RE.search(text):
+        return False
+    return all(_fold(char) == char for char in set(_NON_ASCII_RE.findall(text)))
 
 
 @dataclass
@@ -720,76 +771,150 @@ def _redaction_mask(text: str) -> bytearray:
     return mask
 
 
-def _refuse_hidden_address(group: str, where: str, text: str) -> None:
-    """Refuse ``text`` when an address has a hidden character in or next to it.
+#: Invisible characters the redactor itself reads inside an address (soft
+#: hyphen, zero-width space, non-joiner and joiner, word joiner). Hidden, but
+#: an address that only they (or NFKC) hide is removed whole, not refused.
+_SOFT_HIDDEN = frozenset("\u00ad\u200b\u200c\u200d\u2060")
+_HARD = 1
+_SOFT = 2
 
-    Runs on the input, before terminal sequences are stripped. First, without
-    any grammar: the text is split into words at whitespace (space, tab, LF,
-    CR, VT, FF, no-break space, U+2028, U+2029). A word refuses the group
-    when, with its hidden and invisible characters (:data:`_WORD_HIDDEN_RE`)
-    removed and NFKC applied, it has an ``@`` or a bracketed ``at`` or
-    ``dot`` (:data:`_SEPARATOR_RE`), and it had such a character or NFKC
-    changed it beyond NFC (full-width ``<U+FF3B>at<U+FF3D>`` or
-    ``<U+FF20>``). Then both
-    redactors (addresses, then spelled-out addresses, repeated) match three
-    copies of the text:
 
-    - with every hidden character (:data:`_HIDDEN_RE`) removed;
-    - also without the second character (``[``, ``(``, ``]``) of each
-      terminal sequence (:data:`_SEQUENCE_RE`), so ``jdoe ESC [ @example.org``
-      reads ``jdoe@example.org``;
-    - also without every match of :data:`_SEQUENCE_RE`
-      (``jdoe ESC ( B x@example.org`` reads ``jdoex@example.org``).
+@dataclass
+class _Canonical:
+    """``text`` as the hidden-address check reads it, mapped back to ``text``.
 
-    A matched stretch refuses the group when, in ``text``, it contains or
-    directly touches a hidden character or any character of a terminal
-    sequence. So ``jdoe<DEL>x@example.org``, ``jdoe@example<ESC>.org`` and
-    ``<ESC>[31mjdoe@example.org<ESC>[0m`` all refuse: nothing that sits in
-    or next to an address is stripped and re-matched.
+    ``text`` minus its removed characters (hidden characters and, with
+    ``sequences``, every terminal sequence), with NFKC applied to each
+    remaining character. ``removed[i]`` is ``_HARD`` for a control
+    character, a terminal-sequence character or a Cf character, ``_SOFT``
+    for one of :data:`_SOFT_HIDDEN`, else 0. ``starts[k]`` is where segment
+    ``k`` begins in the canonical text and ``sources[k]`` where it comes
+    from in the raw text; a segment is a run copied one for one
+    (``widths[k] == 1``), or one raw character that NFKC changed (listed in
+    ``changed``).
     """
-    if text.isascii() and not _HIDDEN_RE.search(text):
-        return
-    for word in _WORD_BREAK_RE.split(text):
-        bare = _WORD_HIDDEN_RE.sub("", word)
-        folded = unicodedata.normalize("NFKC", bare)
-        full_width = folded != unicodedata.normalize("NFC", bare)
-        if (bare != word or full_width) and _SEPARATOR_RE.search(folded):
-            raise GroupRefused(
-                group,
-                f"{where}: an address is split by a control character (a word "
-                "with a hidden or full-width character has an @ or a "
-                "spelled-out separator)",
-            )
-    hidden = bytearray(len(text))
+
+    text: str
+    removed: bytearray
+    starts: list[int]
+    sources: list[int]
+    widths: list[int]
+    changed: list[int]
+
+    def raw(self, index: int) -> int:
+        k = bisect.bisect_right(self.starts, index) - 1
+        if self.widths[k] == 1:
+            return self.sources[k] + index - self.starts[k]
+        return self.sources[k]
+
+
+def _canonical(text: str, *, sequences: bool = True) -> _Canonical:
+    removed = bytearray(len(text))
     for match in _HIDDEN_RE.finditer(text):
-        hidden[match.start()] = 1
-    if not any(hidden):
-        return
-    suspect = bytearray(hidden)
-    introducers = bytearray(hidden)
-    for match in _SEQUENCE_RE.finditer(text):
-        start, end = match.span()
-        suspect[start:end] = b"\x01" * (end - start)
-        if text[start] == "\x1b":
-            introducers[start + 1] = 1
-    for removed in (hidden, introducers, suspect):
-        kept = [i for i, flag in enumerate(removed) if not flag]
-        mask = _redaction_mask("".join(text[i] for i in kept))
-        index = 0
-        while index < len(mask):
-            if not mask[index]:
+        removed[match.start()] = _SOFT if match.group() in _SOFT_HIDDEN else _HARD
+    if sequences:
+        for match in _SEQUENCE_RE.finditer(text):
+            start, end = match.span()
+            removed[start:end] = bytes([_HARD]) * (end - start)
+    parts: list[str] = []
+    starts: list[int] = []
+    sources: list[int] = []
+    widths: list[int] = []
+    changed: list[int] = []
+    length = 0
+    index = 0
+    while index < len(text):
+        end = _PLAIN_RE.match(text, index).end()
+        while index < end:
+            # A run of plain characters, cut where a removed one sits.
+            if removed[index]:
                 index += 1
                 continue
-            end = index
-            while end < len(mask) and mask[end]:
-                end += 1
-            if any(suspect[max(kept[index] - 1, 0) : kept[end - 1] + 2]):
+            stops = (removed.find(_HARD, index, end), removed.find(_SOFT, index, end))
+            stop = min((stop for stop in stops if stop >= 0), default=end)
+            parts.append(text[index:stop])
+            starts.append(length)
+            sources.append(index)
+            widths.append(1)
+            length += stop - index
+            index = stop
+        if index >= len(text):
+            break
+        if not removed[index]:
+            char = text[index]
+            folded = _fold(char)
+            parts.append(folded)
+            starts.append(length)
+            sources.append(index)
+            if folded == char:
+                widths.append(1)
+            else:
+                widths.append(0)
+                changed.append(index)
+            length += len(folded)
+        index += 1
+    return _Canonical("".join(parts), removed, starts, sources, widths, changed)
+
+
+def _hidden_address_spans(group: str, where: str, text: str) -> list[tuple[int, int]]:
+    """Refuse ``text`` if a control character hides an address in it; return
+    the raw spans of addresses that only NFKC or an invisible character hide.
+
+    Runs on the raw value, before terminal sequences are stripped. The value
+    is read as :func:`_canonical` does: terminal sequences (:data:`_SEQUENCE_RE`)
+    and hidden characters (:data:`_HIDDEN_RE`) removed and NFKC applied per
+    character, as a terminal shows it; and, when it has a terminal sequence,
+    with only the hidden characters removed, as a program that ignores
+    control characters sees it. Both redactors (addresses, then spelled-out
+    addresses, repeated) match each reading, and each match is mapped back
+    to the raw value:
+
+    - it refuses the group when it contains or directly touches a control
+      character, ``ESC``, a terminal-sequence character or a Cf character
+      other than :data:`_SOFT_HIDDEN`;
+    - else, when it contains a :data:`_SOFT_HIDDEN` character or a character
+      NFKC changed (``jdoe<U+FF20>example.org``, ``jdoe [at]
+      example<U+FF0E>org``), its raw span, first character to last, is
+      returned for removal;
+    - else it is left to the normal redaction. A character NFKC changed or
+      an invisible one that only touches a match (``<U+FF1A>jdoe@example.org``,
+      ``jdoe@example.org<U+2026>``) has no effect.
+
+    A value that reads as itself (:func:`_reads_as_itself`) returns no
+    spans at once: the normal redaction sees exactly what the readings see.
+    """
+    if _reads_as_itself(text):
+        return []
+    readings = [True]
+    if _SEQUENCE_RE.search(text):
+        readings.append(False)
+    spans: list[tuple[int, int]] = []
+    for sequences in readings:
+        view = _canonical(text, sequences=sequences)
+        if not view.changed and not any(view.removed):
+            return []
+        mask = bytes(_redaction_mask(view.text))
+        for run in re.finditer(b"\x01+", mask):
+            low = view.raw(run.start())
+            high = view.raw(run.end() - 1)
+            if _HARD in view.removed[max(low - 1, 0) : high + 2]:
                 raise GroupRefused(
                     group,
-                    f"{where}: an address is split by a control character "
-                    "or touches one",
+                    f"{where}: an address is split by a control character or "
+                    "touches one",
                 )
-            index = end
+            first = bisect.bisect_left(view.changed, low)
+            if _SOFT in view.removed[low : high + 1] or (
+                first < len(view.changed) and view.changed[first] <= high
+            ):
+                spans.append((low, high + 1))
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _decode_with_fallback(data: bytes) -> _Page:
@@ -881,11 +1006,12 @@ def _strings(value: Any) -> Iterator[str]:
 
 
 def _check_no_addresses(group: str, files: Mapping[str, bytes]) -> None:
-    """Every string must be a fixed point of the redactor, also with its
-    hidden characters (:data:`_HIDDEN_RE`) removed: a control character
-    inside an address (for example a C1 control from the Latin-1 fallback in
-    ``a.b@c<U+0081>d.ch``) hides it from the redactor, so such a string
-    refuses the group."""
+    """Every string must be a fixed point of both redactors, also in both
+    readings of :func:`_canonical` (terminal sequences and hidden characters
+    removed, or only hidden characters removed, NFKC applied): a control
+    character inside an address (for example a C1 control from the Latin-1
+    fallback in ``a.b@c<U+0081>d.ch``) hides it from the redactor, so such a
+    string refuses the group."""
     for path, data in files.items():
         text = data.decode("utf-8")
         strings = _strings(json.loads(text)) if path.endswith(".json") else [text]
@@ -900,14 +1026,19 @@ def _check_string(group: str, where: str, value: str) -> None:
         raise GroupRefused(
             group, f"{where}: a spelled-out address survived redaction"
         )
-    if _HIDDEN_RE.search(value):
-        bare = _HIDDEN_RE.sub("", value)
+    if _reads_as_itself(value):
+        return
+    readings = [True, False] if _SEQUENCE_RE.search(value) else [True]
+    for sequences in readings:
+        reading = _canonical(value, sequences=sequences).text
         if (
-            redact_email_addresses(bare) != bare
-            or redact_obfuscated_email_addresses(bare) != bare
+            redact_email_addresses(reading) != reading
+            or redact_obfuscated_email_addresses(reading) != reading
         ):
             raise GroupRefused(
-                group, f"{where}: an address is split by a control character"
+                group,
+                f"{where}: an address is split by a control character (it "
+                "shows once hidden characters are removed and NFKC applied)",
             )
 
 
@@ -1150,6 +1281,7 @@ def build(
                 "addresses_removed": group.addresses_removed,
                 "obfuscated_addresses_removed": group.obfuscated_removed,
                 "ansi_sequences_stripped": group.ansi_stripped,
+                "normalized_addresses_removed": group.normalized_removed,
                 "contents_sha256": contents_digest(group.files),
                 "archive_dir": GROUPS[group.name].archive_dir,
                 "dropped_fields": list(group.dropped_fields),
