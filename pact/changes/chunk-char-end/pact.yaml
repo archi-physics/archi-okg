@@ -1,0 +1,66 @@
+pact_version: 5
+id: chunk-char-end
+title: Chunks carry exact source positions so readers can cut the overlap
+tier: 2
+why: 'Found on real data by okg lane A (cms-kb dev graph kb76, okg dev f5f7c81ca3). A whole-page
+  text read of twiki:CMS:EXO16010 returned 41,169 characters for a 39,173-character page: the
+  200-character overlap between neighbouring chunks came back twice. The stored chunk text is
+  exact. The cause is here: _chunks (docs.py, and its copy in indico.py) strips each 4,000-character
+  window but reports the unstripped window offset as char_offset, and no emitter writes char_end.
+  okg cuts a repeated overlap only when both neighbours are exact (char_end - char_offset equals
+  the text length, offsets increasing and overlapping, and the previous text really ends with the
+  cut characters), so it could never cut an archi overlap.
+
+
+  DECISION (worker, 2026-09-29): _chunks returns the start of the stored text (window offset plus
+  the leading whitespace strip removed); every emitter (twiki, docs, jira, hypernews, indico)
+  writes char_end = char_offset + len(text) and keeps char_length. Chunk text, index, id and
+  content_sha256 do not change. _pg_text only turns NUL into a space, which keeps the length, so
+  the positions stay exact; no NUL reached chunked text in any real cache checked, so nothing
+  more is done for it. Redaction (TWiki and JIRA email removal) runs before chunking, so the
+  positions are in the redacted text the graph holds. char_end is already declared on
+  DocumentChunk in okg''s extraction ontology, so no archi schema change is needed.'
+affected_code:
+- python/archi/sources/docs.py
+- python/archi/sources/indico.py
+- python/archi/sources/twiki.py
+- python/archi/sources/jira.py
+- python/archi/sources/hypernews.py
+- python/tests/sources/test_chunk_char_end.py
+requirements:
+- id: req.chunk-char-end.positions
+  statement: 'Every document_chunk archi emits carries char_offset = the index where its stored
+    text starts in the chunked text, and char_end = char_offset + len(text); chunk ids and
+    content_sha256 are unchanged.
+
+
+    Acceptance:
+
+    - acc.chunk-char-end.unit: both _chunks copies return a start with
+    text[start:start+len(chunk)] == chunk when windows start and end on whitespace; stitching the
+    chunks by okg''s overlap rule gives text.strip(); index and chunk text equal the old chunker''s.
+    [evidence: executed_test]
+
+    - acc.chunk-char-end.emitters: the twiki, docs, jira, hypernews and indico readers emit
+    char_end == char_offset + len(text) on a long record whose windows hit whitespace, and every
+    neighbouring pair passes okg''s overlap rule; these tests fail on main. [evidence: executed_test]
+
+    - acc.chunk-char-end.real: on real caches, rebuilding every record from its emitted chunks
+    with okg dev''s order_segments + trim_overlap gives the chunked text for every multi-chunk
+    TWiki page (the rest differ only by page-edge whitespace no chunk stores), EXO16010 comes
+    back at 39,173 characters byte-identical, and chunk ids and hashes match main.
+    [evidence: executed_test]'
+tasks:
+- id: task.chunk-char-end.deliver
+  requirement: req.chunk-char-end.positions
+  verification: 'Return the stripped start from both _chunks copies; add char_end to the five
+    emitters; add python/tests/sources/test_chunk_char_end.py (fails on main). Run the full
+    archi suite on submit76 on main and on this branch against the CI okg pin. Run the real-data
+    probe read-only on submit76 for main and branch.
+
+
+    Test plan:
+
+    - python/tests [evidence: pytest]'
+evidence: []
+decisions: []

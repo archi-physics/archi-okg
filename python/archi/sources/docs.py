@@ -979,6 +979,7 @@ def _facts_for_records(
                     "text": chunk_text,
                     "char_offset": offset,
                     "char_length": len(chunk_text),
+                    "char_end": offset + len(chunk_text),
                     "chunker_name": chunker_name,
                     "heading_path": record.title,
                 },
@@ -1335,15 +1336,25 @@ def _endpoint_host(value: str) -> str:
 
 
 def _chunks(text: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(index, start, chunk)`` over overlapping windows of ``text``.
+
+    ``start`` is where the stored chunk begins in ``text``: the window's
+    offset plus the leading whitespace ``strip`` removed. So
+    ``text[start:start + len(chunk)]`` is the chunk (``_pg_text`` only
+    turns NUL into a space, which keeps the length), and a reader can
+    cut the overlap two neighbouring chunks repeat.
+    """
     if not text:
         return
     step = max(1, _CHUNK_SIZE - _CHUNK_OVERLAP)
     idx = 0
     offset = 0
     while offset < len(text):
-        chunk = _pg_text(text[offset:offset + _CHUNK_SIZE].strip())
+        window = text[offset:offset + _CHUNK_SIZE]
+        chunk = _pg_text(window.strip())
         if chunk:
-            yield idx, offset, chunk
+            start = offset + len(window) - len(window.lstrip())
+            yield idx, start, chunk
             idx += 1
         if offset + _CHUNK_SIZE >= len(text):
             break
