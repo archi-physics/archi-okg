@@ -485,6 +485,22 @@ class TwikiEOSSource:
                         f" ({len(walk.missing_seeds)} seeds missing from "
                         "the snapshot)"
                     )
+            if not files and not (
+                self.seed_topics is not None and walk.missing_seeds
+            ):
+                # Same verdict run() reaches: a present but empty
+                # snapshot is a missing cache, not an empty wiki.
+                return PreflightResult(
+                    source_name=self.name,
+                    status="cache_missing",
+                    mode="filesystem",
+                    required=self.required,
+                    credential_refs=credential_refs,
+                    cache_path=str(root),
+                    record_count=0,
+                    reason=self._empty_snapshot_reason(root),
+                    checked_at=_checked_at(),
+                )
             return PreflightResult(
                 source_name=self.name,
                 status="ok",
@@ -532,6 +548,32 @@ class TwikiEOSSource:
                     ),
                 )
             records, missing_seeds = self._records_from_root(root)
+            if not records and not missing_seeds:
+                # The directory is there but holds no topic (a failed
+                # sync, an empty mount point). That is a missing cache,
+                # never an empty wiki: with completed_scope=True the
+                # registry's missing_from_completed_scope semantics
+                # would retract every page ingested before. Checked
+                # before the physics filter, which has its own guard
+                # below. All-seeds-missing is reported by the seed
+                # branch further down, with the seed names.
+                return ConnectorRun(
+                    facts=(),
+                    completed_scope=False,
+                    run_mode=mode,
+                    health=ConnectorHealth(
+                        status="cache_missing",
+                        mode="filesystem",
+                        credential_refs=(self.eos_root_env,),
+                        cache_path=str(root),
+                        record_count=0,
+                        reason=(
+                            f"{self._empty_snapshot_reason(root)}; no "
+                            "facts emitted and no complete scope claimed"
+                        ),
+                        checked_at=_checked_at(),
+                    ),
+                )
             records = self._physics_scoped(records)
         content_hash = _records_hash(records)
         revision = {
@@ -584,6 +626,36 @@ class TwikiEOSSource:
                     ),
                 ),
             )
+        report = self.last_physics_report if self.physics_filter else None
+        if report is not None and report.input_total and not records:
+            # Topics were read, and the physics filter kept none. For a
+            # real CMS snapshot that means the wrong web is mounted or
+            # the allow-list moved, not that physics left the wiki; a
+            # complete scope over zero kept pages would retract every
+            # physics page ingested before. The closed status vocabulary
+            # has no 'degraded', so report endpoint_failed (as jira does
+            # for a cache that disagrees with its own metadata).
+            return ConnectorRun(
+                facts=(),
+                completed_scope=False,
+                run_mode=mode,
+                health=ConnectorHealth(
+                    status="endpoint_failed",
+                    mode="filesystem" if self._records is None else "fixture",
+                    credential_refs=(
+                        (self.eos_root_env,) if self._records is None else ()
+                    ),
+                    record_count=0,
+                    content_hash=content_hash,
+                    reason=(
+                        f"physics filter kept 0 of {report.input_total} "
+                        f"TWiki topics ({report.blacklist_dropped} on the "
+                        "computing-operations blacklist); no facts emitted "
+                        "and no complete scope claimed"
+                    ),
+                    checked_at=_checked_at(),
+                ),
+            )
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(mode in {"scope_complete", "reconcile"}),
@@ -598,6 +670,18 @@ class TwikiEOSSource:
                 content_hash=content_hash,
                 reason="TWiki EOS snapshot read from local filesystem",
             ),
+        )
+
+    def _empty_snapshot_reason(self, root: Path) -> str:
+        if self.seed_topics is None:
+            return (
+                f"TWiki EOS snapshot directory {root} is present but "
+                "holds no TWiki topics"
+            )
+        return (
+            f"TWiki EOS snapshot directory {root} is present but its "
+            f"{len(self.seed_topics)} configured seed topics yield no "
+            "TWiki topics"
         )
 
     def _paths(self) -> list[Path]:

@@ -96,6 +96,35 @@ def test_filter_on_scopes_the_snapshot_to_physics(tmp_path):
     assert run.health.status == "ok"
 
 
+def test_filter_that_keeps_nothing_withholds_scope(tmp_path):
+    # The snapshot was read (two real pages), but none is physics. For the
+    # CMS mirror that never happens legitimately: it means the wrong web
+    # is mounted or the allow-list moved. A complete scope over zero kept
+    # pages would retract every physics page ingested before, so the run
+    # emits nothing and says why instead of claiming the empty scope.
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "CompOpsTransferTeam.txt").write_text(_topic())
+    (root / "RandomUnrelatedPage.txt").write_text(_topic())
+    source = TwikiEOSSource(eos_root=str(root), physics_filter=True)
+    titles, run = _titles(source)
+    assert titles == set()
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert run.health.record_count == 0
+    assert "physics filter kept 0 of 2" in run.health.reason
+    assert "no complete scope claimed" in run.health.reason
+    assert source.last_physics_report.input_total == 2
+
+
+def test_filter_that_keeps_something_claims_scope(tmp_path):
+    root = _snapshot(tmp_path)
+    _titles_, run = _titles(
+        TwikiEOSSource(eos_root=str(root), physics_filter=True)
+    )
+    assert run.completed_scope is True
+
+
 def test_filter_report_carries_the_stage_counts(tmp_path):
     root = _snapshot(tmp_path)
     source = TwikiEOSSource(eos_root=str(root), physics_filter=True)
@@ -145,9 +174,15 @@ def test_filter_composes_with_seed_topics(tmp_path):
     )
     run = source.run("run-1", mode="scope_complete")
     # The walk reads the seed; the filter then drops it as CompOps. The
-    # seed was present, so scope is still complete.
+    # seed was present, so this is not a missing-seed failure -- but zero
+    # kept pages is never claimed as a complete scope (that would retract
+    # the whole source). Emptying a source on purpose is a teardown, not
+    # a filter setting. Composition itself is proven by the report: the
+    # walk read one topic and the filter saw exactly that one.
     assert run.health.record_count == 0
-    assert run.completed_scope is True
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert source.last_physics_report.input_total == 1
 
 
 def test_flag_is_part_of_the_change_probe_config(tmp_path):
