@@ -72,13 +72,14 @@ class CacheUnusable(Exception):
 def read_cache_json(
     path: str | Path,
     *,
-    expect: type,
+    expect: type | tuple[type, ...],
     base: str | Path | None = None,
     allow_empty: bool = False,
 ) -> Any:
     """Load a JSON cache file or raise :class:`CacheUnusable`.
 
-    ``expect`` is ``list`` or ``dict``. An empty container raises
+    ``expect`` is ``list`` or ``dict``, or a tuple of both. An empty
+    container raises
     unless ``allow_empty`` — set only by a source whose upstream can
     genuinely be empty and which then refuses to claim a complete
     scope itself.
@@ -118,7 +119,7 @@ def read_cache_json(
         raise CacheUnusable(
             resolved,
             f"holds a JSON {_json_kind(payload)} where a JSON "
-            f"{_json_kind(expect())} was expected (drifted or "
+            f"{_expected_kind(expect)} was expected (drifted or "
             "error-shaped payload)",
             status="endpoint_failed",
         )
@@ -189,6 +190,11 @@ def unusable_cache_preflight(
         checked_at=_checked_at(),
         **extra,
     )
+
+
+def _expected_kind(expect: type | tuple[type, ...]) -> str:
+    kinds = expect if isinstance(expect, tuple) else (expect,)
+    return " or ".join(_json_kind(kind()) for kind in kinds)
 
 
 def _json_kind(value: Any) -> str:

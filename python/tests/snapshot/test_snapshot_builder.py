@@ -2479,3 +2479,80 @@ def test_a_json_refusal_names_the_record_and_field(tmp_path, sources):
     with pytest.raises(BuildRefused) as caught:
         build(load_config(write_config(tmp_path, sources, only=["jira"])), tmp_path / "out")
     assert "records.json [0].description, line 2: span rule" in str(caught.value)
+
+
+# --- wmstats-collection-shape ---------------------------------------------
+# The Aug 31 collector writes records.json as {cutoff_utc, status_payloads:
+# {status: {"result": [{name: record}]}}} next to an authority.json with its
+# record_count. Fake data in that structure.
+
+
+def _collection(sources, *, count=None, extra_status=None):
+    """Rewrite the wmstats fixture into the collection shape."""
+    path = sources["wmstats"] / "records.json"
+    (record,) = json.loads(path.read_text())
+    second = {
+        **record,
+        "RequestName": "fakeuser_ReReco_Run2026A_FakePD_000002",
+        "RequestStatus": "assigned",
+    }
+    payload = {
+        "cutoff_utc": "2026-01-01T00:00:00Z",
+        "status_payloads": {
+            "new": {"result": []},
+            "assigned": {"result": [{second["RequestName"]: second}]},
+            "running-open": {"result": [{record["RequestName"]: record}]},
+            **(extra_status or {}),
+        },
+    }
+    path.write_text(json.dumps(payload))
+    if count is not None:
+        (sources["wmstats"] / "authority.json").write_text(
+            json.dumps({"record_count": count, "complete": True, "scope": "fake"})
+        )
+
+
+def test_wmstats_collection_shape_builds_and_checks_the_authority_count(tmp_path, sources):
+    _collection(sources, count=2)
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["wmstats"])), out)
+    assert lock["groups"]["wmstats"]["record_count"] == 2
+    members = read_archive(out / "wmstats.tar.zst")
+    assert json.loads(members["data/wmstats-workflows/authority.json"]) == {"record_count": 2}
+    records = json.loads(members["data/wmstats-workflows/records.json"])
+    assert set(records) == {"status_payloads"}  # cutoff_utc is not read
+    (entry,) = records["status_payloads"]["running-open"]["result"]
+    (record,) = entry.values()
+    assert record["Requestor"] == "pdmvserv"
+    assert "RequestorDN" not in record and "RequestTransition" not in record
+    assert records["status_payloads"]["new"] == {"result": []}
+    data = _all_bytes(out, "wmstats")
+    assert DN.encode() not in data and PLANTED["wmstats"].encode() not in data
+    assert verify(out / LOCK_NAME, out).ok
+
+
+@pytest.mark.parametrize(
+    "case, expected",
+    [
+        ("count-mismatch", "counts 3"),
+        ("no-workflow", "no workflow under status_payloads"),
+        ("malformed-record", "status 'failed' result 0 entry 'x' is malformed"),
+        ("no-result", "status 'failed' has no result list"),
+    ],
+)
+def test_wmstats_collection_shape_refuses_a_broken_export(tmp_path, sources, case, expected):
+    if case == "count-mismatch":
+        _collection(sources, count=3)
+    elif case == "no-workflow":
+        (sources["wmstats"] / "records.json").write_text(
+            json.dumps({"cutoff_utc": "2026-01-01T00:00:00Z", "status_payloads": {}})
+        )
+    elif case == "malformed-record":
+        _collection(sources, extra_status={"failed": {"result": [{"x": {"Campaign": "x"}}]}})
+    else:
+        _collection(sources, extra_status={"failed": {"error": "timeout"}})
+    with pytest.raises(BuildRefused) as info:
+        build(load_config(write_config(tmp_path, sources, only=["wmstats"])), tmp_path / "out")
+    assert [r.group for r in info.value.refusals] == ["wmstats"]
+    assert expected in info.value.refusals[0].reason
+    assert not (tmp_path / "out").exists()

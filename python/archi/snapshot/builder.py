@@ -525,11 +525,42 @@ def _load_json(group: str, path: Path) -> Any:
         raise GroupRefused(group, f"{path.name} is not valid JSON: {exc}") from exc
 
 
+def _status_payload_records(
+    group: str, spec: JsonFile, payload: Any
+) -> list[tuple[str, Any]]:
+    """The records of a WMStats collection object (see ``JsonFile.shape``)."""
+    by_status = payload.get("status_payloads") if isinstance(payload, dict) else None
+    if not isinstance(by_status, dict):
+        raise GroupRefused(
+            group, f"{spec.name}: expected a JSON list or a status_payloads object"
+        )
+    records: list[tuple[str, Any]] = []
+    for status, body in by_status.items():
+        result = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(result, list):
+            raise GroupRefused(
+                group, f"{spec.name}: status {status!r} has no result list"
+            )
+        for index, entry in enumerate(result):
+            where = f"status {status!r} result {index}"
+            if not isinstance(entry, dict):
+                records.append((where, entry))
+                continue
+            records.extend(
+                (f"{where} entry {key!r}", item) for key, item in entry.items()
+            )
+    return records
+
+
 def _check_shape(group: str, spec: JsonFile, payload: Any) -> None:
-    if spec.shape == "list":
+    if spec.shape == "status_payloads" and not isinstance(payload, list):
+        items: Iterable[tuple[str, Any]] = _status_payload_records(
+            group, spec, payload
+        )
+    elif spec.shape in {"list", "status_payloads"}:
         if not isinstance(payload, list):
             raise GroupRefused(group, f"{spec.name}: expected a JSON list")
-        items: Iterable[tuple[str, Any]] = (
+        items = (
             (f"record {index}", item) for index, item in enumerate(payload)
         )
     elif spec.shape == "mapping":
@@ -669,8 +700,23 @@ def _prune_file(spec: JsonFile, payload: Any, *, drop: set[str], keep: set[str])
             pruned = {k: v for k, v in pruned.items() if k not in drop}
         return pruned
 
-    if spec.shape == "list":
+    if spec.shape in {"list", "status_payloads"} and isinstance(payload, list):
         return [record(item) for item in payload]
+    if spec.shape == "status_payloads":
+        # Only the containers the reader walks survive (cutoff_utc goes).
+        return {
+            "status_payloads": {
+                status: {
+                    "result": [
+                        {key: record(item) for key, item in entry.items()}
+                        if isinstance(entry, dict)
+                        else entry
+                        for entry in body["result"]
+                    ]
+                }
+                for status, body in payload["status_payloads"].items()
+            }
+        }
     if spec.shape == "mapping":
         return {key: record(item) for key, item in payload.items()}
     return record(payload)
