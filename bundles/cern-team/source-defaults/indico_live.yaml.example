@@ -1,0 +1,68 @@
+# Indico connector — live API read, no pre-built cache.
+#
+# The sibling `indico.yaml.example` reads a records.json that something
+# else must produce; nothing in archi or okg-deployments does. This one
+# talks to Indico directly, so it works with nothing but a scope and
+# (for non-public categories) a cookie file.
+#
+# AUTHENTICATION. The connector never logs in. It reads a Netscape
+# cookie file whose PATH comes from the environment variable named in
+# `cookie_file_env` -- the value never appears here or in the manifest.
+# Produce the file out of band with CERN's Kerberos-backed tool:
+#
+#     kinit <user>@CERN.CH
+#     auth-get-sso-cookie -u https://indico.cern.ch -o ~/.indico-cookies.txt
+#     export ARCHI_INDICO_COOKIES=~/.indico-cookies.txt
+#
+# Public categories need none of that; leave cookie_file_env unset.
+#
+# Rename to indico_live.yaml and set a real scope: a source with neither
+# event_ids nor category_ids is refused at construction rather than
+# harvesting nothing quietly.
+indico_live:
+  module: archi.sources.indico_live
+  class: IndicoLiveAdapter
+  ownership_id: ${deployment_name}.indico-live
+  admission_policy:
+    producer_id: ${deployment_name}.indico-live
+    producer_kind: source
+    trust_label: implicit_legacy_trusted
+    admission_mode: fast_track
+    authority_scope:
+      source_family: cern-team
+      source_name: indico_live
+    output_signature:
+      nodes:
+        - {subtype: meeting_minutes}
+        - {subtype: document}
+        - {subtype: document_chunk}
+      edges:
+        - {src_subtype: meeting_minutes, edge_type: contains, dst_subtype: document}
+        - {src_subtype: document_chunk, edge_type: member_of, dst_subtype: document}
+    output_scope_summary:
+      summary: Indico events and their contributions, read live from the API
+      nodes: [meeting_minutes, document, document_chunk]
+      edges:
+        - meeting_minutes contains document
+        - document_chunk member_of document
+  source_class: discovery_crawl
+  record_identity_kind: scoped_locator
+  record_identity_fields: [event_id]
+  source_revision_kind: content_hash
+  deletion_semantics: missing_from_completed_scope
+  publication_mode: published_generation
+  required_for_baseline: false
+  params:
+    base_url: https://indico.cern.ch
+    # One or both. Category walks expand to the events they contain.
+    event_ids: []
+    category_ids: []
+    # cookie_file_env: ARCHI_INDICO_COOKIES
+    required: false
+    # max_events bounds a category walk while trying it out. A bounded
+    # run never claims complete scope, so leave it unset in production.
+    # max_events: 25
+  sync:
+    triggers: [manual, reconcile]
+    default_event_mode: scope_complete
+    reconcile_mode: scope_complete
