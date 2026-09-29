@@ -21,11 +21,11 @@ why: 'Issue #15. The physics filter''s parent-topic closure (stage 3 in archi.so
   string.
 
 
-  DECISION, view URLs (lead, 2026-09-28): a parent that is a TWiki view URL, path
-  .../twiki/bin/view/<Web>[/<SubWeb>]/<Topic> (viewauth too), is read as <Web>[.<SubWeb>].<Topic>
-  under the same known-web rule. TWiki often stores such a value rewritten, with the dots before
-  the last slash turned into slashes and that slash into a dot; both forms are read. Every
-  other URL (another web, oops, a query string, a trailing slash, another path) is left alone.'
+  DECISION, view URLs (lead, 2026-09-28): a parent that is a TWiki view URL, path .../twiki/bin/view/<Web>[/<SubWeb>]/<Topic>
+  (viewauth too), is read as <Web>[.<SubWeb>].<Topic> under the same known-web rule. TWiki
+  often stores such a value rewritten, with the dots before the last slash turned into slashes
+  and that slash into a dot; both forms are read. Every other URL (another web, oops, a query
+  string, a trailing slash, another path) is left alone.'
 affected_code:
 - python/archi/sources/_twiki_physics.py
 - python/tests/sources/test_twiki_physics.py
@@ -39,10 +39,10 @@ requirements:
 
     - acc.twiki-web-qualified-parent.closure: a child whose parent is <Web>.<seed> or <Web>.<SubWeb>.<topic>
     joins the closure; a parent qualified by an unknown web, with any unknown part, or with
-    nothing after the dot does not; a view URL into a known web (raw or TWiki-rewritten,
-    view or viewauth) joins the closure, and a view URL into another web, an oops URL, or a
-    URL with a query does not; through the connector, the webs come from the snapshot''s web
-    root and web directories. [evidence: executed_test]'
+    nothing after the dot does not; a view URL into a known web (raw or TWiki-rewritten, view
+    or viewauth) joins the closure, and a view URL into another web, an oops URL, or a URL
+    with a query does not; through the connector, the webs come from the snapshot''s web root
+    and web directories. [evidence: executed_test]'
 tasks:
 - id: task.twiki-web-qualified-parent.deliver
   requirement: req.twiki-web-qualified-parent.main
@@ -71,4 +71,18 @@ evidence:
     check, read-only on submit76, Aug 31 twiki-eos stage: 43,744 topics, 51 web names, 5,896
     dotted parents, 119 qualified by a snapshot web; physics filter kept 15,655 before and
     15,738 after (+83, 0 lost), seeds 6,627 both, closure 13,194 -> 13,287.'
+- kind: executed_test
+  requirement: req.twiki-web-qualified-parent.main
+  status: pass
+  command: cd python && python -m pytest tests -q
+  head: ad10e1d76393d7791cf8a5839e0df31d604bffa6
+  at: '2026-09-29T03:31:59+00:00'
+  note: '1563 passed at this commit. 7 new view-URL cases use fake data: the 3 known-web URL
+    cases and the extended connector snapshot test fail at the previous head e73b66b7 and
+    pass here; the 4 stay-out cases (another web raw and rewritten, oops, query string) pass
+    on both as controls. Real-data check, read-only on submit76, Aug 31 twiki-eos stage: 43,744
+    topics, 51 web names; 152 URL parents, 142 now followed (the other 10 point at other webs,
+    an oops page, a query, a trailing slash or a non-TWiki path); 261 parents followed in
+    all; physics filter kept 15,655 on main and 15,757 here (+102, 0 lost), seeds 6,627 both,
+    closure 13,194 -> 13,307.'
 decisions: []
