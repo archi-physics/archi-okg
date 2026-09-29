@@ -27,6 +27,7 @@ affected_code:
 - python/archi/sources/jira.py
 - python/archi/sources/hypernews.py
 - python/tests/sources/test_chunk_char_end.py
+- pact/changes/chunk-char-end/probe_chunks.py
 requirements:
 - id: req.chunk-char-end.positions
   statement: 'Every document_chunk archi emits carries char_offset = the index where its stored
