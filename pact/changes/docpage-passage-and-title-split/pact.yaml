@@ -59,5 +59,18 @@ tasks:
     Test plan:
 
     - python/tests [evidence: pytest]'
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.docpage-passage-and-title-split.main
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 34f5204bc50bad5dedc06e37b32c91746deafeff
+  at: '2026-09-29T10:55:00+00:00'
+  note: 'submit75, Python 3.12, okg at the CI pin ac078aabd5. 1569 passed, 1 failed. The failure
+    is test_redact_email_addresses_quoted_local_part_is_linear, a wall-clock budget (1.20 s
+    against 1.0 s on a host at load 46); this change touches neither the test nor the anonymizer,
+    and the test passes locally in 0.5 s. The 7 new cases and the 4 in test_bridge_portability
+    pass at the pin; with main''s sources.yaml restored in both copies, all 7 new cases fail.
+    okg deployment lint (static) on probe deployments for the cern-team and cms-compops module
+    sets reports no catalog finding; its only blocker is the probe''s missing source_registry.'
 decisions: []
