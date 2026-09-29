@@ -51,10 +51,13 @@ EOS snapshot reading (empty-cache-fails-loudly, 2026-09): the snapshot
 walk skips hidden files and folders (``.TopicA.txt``, ``.sync/...`` —
 sync-tool metadata, never TWiki topics). A snapshot root that cannot be
 listed is ``cache_missing`` ("could not be read"), never an empty wiki.
-A folder or topic file that cannot be read, or a zero-byte topic file
-(an interrupted sync of that topic), is left out and the run claims no
-complete scope (``endpoint_failed``, with counts and samples), so the
-last good copy of those pages is kept rather than blanked or retracted.
+A folder or topic file that cannot be read, or a topic file that is
+zero bytes or holds only whitespace/NUL bytes (an interrupted sync of
+that topic), is left out and the run claims no complete scope
+(``endpoint_failed``, with counts and samples), so the last good copy
+of those pages is kept rather than blanked or retracted. A
+``max_files`` cap that leaves topics out reports ``ok`` but claims no
+complete scope either.
 ``preflight()`` reaches the same verdict as ``run()`` for every such
 case and for missing seeds; the one thing it does not do is apply the
 optional physics filter, which needs every topic parsed.
@@ -328,15 +331,18 @@ class _EOSSeedWalk:
 class _SnapshotListing:
     """Whole-tree listing of an EOS snapshot.
 
-    ``paths`` are the readable, non-empty real topic files (sorted,
+    ``paths`` are the readable, non-blank real topic files (sorted,
     capped at ``max_files``); ``unreadable`` are folders or files the
-    walk could not read; ``empty`` are zero-byte topic files. Both are
-    snapshot-relative paths.
+    walk could not read; ``empty`` are topic files that are zero bytes
+    or hold only whitespace/NUL bytes. Both are snapshot-relative
+    paths.
     """
 
     paths: tuple[Path, ...]
     unreadable: tuple[str, ...] = ()
     empty: tuple[str, ...] = ()
+    #: Real topics left out by ``max_files`` (0 when the cap cut nothing).
+    capped: int = 0
 
 
 @dataclass(frozen=True)
@@ -347,6 +353,7 @@ class _SnapshotRead:
     missing_seeds: tuple[str, ...] = ()
     unreadable: tuple[str, ...] = ()
     empty: tuple[str, ...] = ()
+    capped: int = 0
 
 
 class TwikiEOSSource:
@@ -523,6 +530,7 @@ class TwikiEOSSource:
                 files = list(listing.paths)
                 missing_seeds: tuple[str, ...] = ()
                 unreadable, empty = listing.unreadable, listing.empty
+                capped = listing.capped
                 reason = "local TWiki EOS snapshot directory present"
             else:
                 # Seeded scope: count/hash the seeded closure, not the
@@ -531,6 +539,7 @@ class TwikiEOSSource:
                 files = [root / record.source_path for record in walk.records]
                 missing_seeds = walk.missing_seeds
                 unreadable, empty = walk.unreadable, walk.empty
+                capped = 0
                 reason = (
                     f"local TWiki EOS snapshot directory present; seeded "
                     f"closure: {len(files)} topics from "
@@ -547,6 +556,7 @@ class TwikiEOSSource:
                 missing_seeds=missing_seeds,
                 unreadable=unreadable,
                 empty=empty,
+                capped=capped,
             )
             if verdict is not None:
                 status, problem = verdict
@@ -639,6 +649,7 @@ class TwikiEOSSource:
                 missing_seeds=read.missing_seeds,
                 unreadable=read.unreadable,
                 empty=read.empty,
+                capped=read.capped,
             )
             if verdict is not None and not records:
                 # Nothing readable: a failed sync, an empty or
@@ -779,6 +790,7 @@ class TwikiEOSSource:
         missing_seeds: tuple[str, ...],
         unreadable: tuple[str, ...],
         empty: tuple[str, ...],
+        capped: int = 0,
     ) -> tuple[str, str] | None:
         """(status, reason) when the snapshot read cannot claim its
         scope, else None. Shared by preflight() and run() so the two
@@ -804,20 +816,34 @@ class TwikiEOSSource:
             )
         if empty:
             problems.append(
-                f"{len(empty)} topic files are zero bytes (an "
-                f"interrupted sync), e.g. {', '.join(empty[:3])}"
+                f"{len(empty)} topic files are zero bytes or only "
+                "whitespace/NUL bytes (an interrupted sync), e.g. "
+                f"{', '.join(empty[:3])}"
             )
         if not found:
             reason = self._empty_snapshot_reason(root)
             if problems:
                 reason += "; " + "; ".join(problems)
             return ("cache_missing", reason)
+        cap_note = ""
+        if capped:
+            cap_note = (
+                f"max_files={self.max_files} left out {capped} of "
+                f"{found + capped} topics"
+            )
         if problems:
+            if cap_note:
+                problems.append(cap_note)
             return (
                 "endpoint_failed",
                 f"{'; '.join(problems)}; {found} readable topics emitted, "
                 "no complete scope claimed",
             )
+        if cap_note:
+            # A configured cap is not a failure, but the topics past it
+            # were not read: a complete scope would retract them. Same
+            # rule as docs.py's max_pages truncation (ok, no scope).
+            return ("ok", f"{cap_note}; no complete scope claimed")
         return None
 
     def _paths(self) -> list[Path]:
@@ -858,17 +884,26 @@ class TwikiEOSSource:
                     continue
                 if not os.access(path, os.R_OK):
                     unreadable.append(rel)
-                elif size == 0:
+                    continue
+                try:
+                    blank = size == 0 or _is_blank(path)
+                except OSError:
+                    unreadable.append(rel)
+                    continue
+                if blank:
                     empty.append(rel)
                 else:
                     paths.append(path)
         paths.sort(key=lambda p: p.relative_to(root).as_posix())
-        if self.max_files is not None:
+        capped = 0
+        if self.max_files is not None and len(paths) > self.max_files:
+            capped = len(paths) - self.max_files
             paths = paths[:self.max_files]
         return _SnapshotListing(
             paths=tuple(paths),
             unreadable=tuple(sorted(unreadable)),
             empty=tuple(sorted(empty)),
+            capped=capped,
         )
 
     def _records_from_root(self, root: Path) -> _SnapshotRead:
@@ -886,6 +921,7 @@ class TwikiEOSSource:
                 records=records,
                 unreadable=tuple(sorted(unreadable)),
                 empty=listing.empty,
+                capped=listing.capped,
             )
         walk = self._seed_walk(root)
         return _SnapshotRead(
@@ -941,7 +977,7 @@ class TwikiEOSSource:
                 continue
             rel = path.relative_to(root).as_posix()
             try:
-                if path.stat().st_size == 0:
+                if path.stat().st_size == 0 or _is_blank(path):
                     empty.append(rel)
                     continue
                 record = self._record_for_path(root, path)
@@ -1440,6 +1476,23 @@ def _unreadable_dir_reason(root: Path) -> str | None:
             f"not be read ({exc.strerror or exc})"
         )
     return None
+
+
+_BLANK_BYTES = b" \t\r\n\x0b\x0c\x00"
+
+
+def _is_blank(path: Path) -> bool:
+    """True when *path* holds only whitespace and NUL bytes.
+
+    Reads in chunks and stops at the first non-blank byte, so a real
+    topic costs one small read; a large NUL-filled file (a preallocated
+    file an interrupted sync never wrote) is read to the end.
+    """
+    with path.open("rb") as handle:
+        while chunk := handle.read(65536):
+            if chunk.strip(_BLANK_BYTES):
+                return False
+    return True
 
 
 def _relative(root: Path, filename: Any) -> str:

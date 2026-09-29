@@ -216,7 +216,7 @@ def test_docs_urlless_items_stop_the_scope_claim(tmp_path):
     assert source.run("run-1", mode="scope_complete").completed_scope is True
 
 
-# --- GOCDB: an empty downtime list is accepted but never claims scope ---------
+# --- GOCDB --------------------------------------------------------------------
 
 GOCDB_RECORDS = "data/gocdb-downtimes/records.json"
 GOCDB_SITES = "data/cric/sites.json"
@@ -238,17 +238,28 @@ def _gocdb(tmp_path, records: bytes, *, sites: bytes = b'{"T2_XX_Fake": {}}',
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_gocdb_empty_downtime_list_never_claims_scope(tmp_path, mode):
+def test_gocdb_empty_downtime_list_is_cache_missing(tmp_path, mode):
+    # Review of #21: an empty downtime list follows the operator rule
+    # (an empty cache is a loud failure), not skipped_optional.
     source = _gocdb(tmp_path, b"[]")
-    run = source.run("run-1", mode=mode)
-    assert list(run.facts) == []
-    assert run.completed_scope is False
-    assert run.health.status == "skipped_optional"
-    assert "lists no downtimes" in run.health.reason
-    assert "no complete scope claimed" in run.health.reason
-    preflight = source.preflight()
-    assert preflight.status == "skipped_optional"
-    assert preflight.record_count == 0
+    _assert_refused(source, tmp_path / GOCDB_RECORDS, "cache_missing", mode)
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("which", [GOCDB_SITES, GOCDB_SERVICES])
+def test_gocdb_empty_topology_is_cache_missing(tmp_path, which, mode):
+    # An empty topology dropped every affects edge while the run still
+    # claimed a complete scope, retracting the edges.
+    source = _gocdb(tmp_path, json.dumps([FAKE_DOWNTIME]).encode())
+    _write(tmp_path, which, b"{}")
+    _assert_refused(source, tmp_path / which, "cache_missing", mode)
+
+
+@pytest.mark.parametrize("which", [GOCDB_SITES, GOCDB_SERVICES])
+def test_gocdb_topology_error_body_is_endpoint_failed(tmp_path, which):
+    source = _gocdb(tmp_path, json.dumps([FAKE_DOWNTIME]).encode())
+    _write(tmp_path, which, b'{"error": {"code": 403}}')
+    _assert_refused(source, tmp_path / which, "endpoint_failed", "scope_complete")
 
 
 @pytest.mark.parametrize("case", ["zero-bytes", "truncated-json"])
@@ -383,3 +394,118 @@ def test_cric_full_caches_still_claim_scope(tmp_path, kind):
     assert run.completed_scope is True
     assert run.health.status == "ok"
     assert source.preflight().status == "ok"
+
+
+# --- CRIC: error bodies, non-object entries, malformed rows (review of #21) ---
+
+ERROR_BODY = b'{"error": {"code": 403, "message": "Forbidden"}}'
+# Every name -> object cache (responsibilities is a row list; above).
+OBJECT_CRIC = [
+    (kind, rel) for kind, rel in ALL_CRIC
+    if not rel.endswith("responsibilities.json")
+]
+
+
+@pytest.mark.parametrize("kind,rel", OBJECT_CRIC)
+def test_cric_error_body_object_is_endpoint_failed(tmp_path, kind, rel):
+    # 64ed7e74: the "error" key was read as one entry named "error", and
+    # the run claimed a complete scope, retracting every real record.
+    _write_all(tmp_path, _files(kind), {rel: ERROR_BODY})
+    source = _cric(kind)(base=str(tmp_path))
+    _assert_refused(source, tmp_path / rel, "endpoint_failed", "scope_complete")
+    assert "error body" in source.preflight().reason
+
+
+def test_cric_sites_without_a_cms_site_name_is_endpoint_failed(tmp_path):
+    rel = "data/cric/sites.json"
+    _write_all(tmp_path, CRIC_FILES, {rel: b'{"status": {"ok": false}}'})
+    _assert_refused(
+        CRICSource(base=str(tmp_path)), tmp_path / rel, "endpoint_failed",
+        "scope_complete",
+    )
+
+
+@pytest.mark.parametrize("value", ['"Forbidden"', "[1, 2]", "null", "7"])
+@pytest.mark.parametrize("kind,rel", OBJECT_CRIC)
+def test_cric_only_non_object_values_is_endpoint_failed(
+    tmp_path, kind, rel, value
+):
+    # 64ed7e74: AttributeError out of run() and preflight().
+    key = "T2_XX_Broken" if rel.endswith("cric/sites.json") else "broken"
+    _write_all(tmp_path, _files(kind), {rel: f'{{"{key}": {value}}}'.encode()})
+    source = _cric(kind)(base=str(tmp_path))
+    _assert_refused(source, tmp_path / rel, "endpoint_failed", "scope_complete")
+
+
+@pytest.mark.parametrize("kind,rel", OBJECT_CRIC)
+def test_cric_one_non_object_entry_is_skipped_and_stops_the_claim(
+    tmp_path, kind, rel
+):
+    payload = dict(_files(kind)[rel])
+    payload["T2_XX_Broken" if rel.endswith("cric/sites.json") else "broken"] = (
+        "not an object"
+    )
+    _write_all(tmp_path, _files(kind), {rel: json.dumps(payload).encode()})
+    source = _cric(kind)(base=str(tmp_path))
+    run = source.run("run-1", mode="scope_complete")
+    assert list(run.facts)
+    assert run.completed_scope is False
+    assert run.health.status == "ok"
+    assert f"1 in {tmp_path / rel}" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert "no complete scope claimed" in preflight.reason
+
+
+@pytest.mark.parametrize(
+    "rows", [[[]], [["fakeuser", "Fake Site"]], ["not a row"], [None]]
+)
+def test_cric_no_three_field_row_is_endpoint_failed(tmp_path, rows):
+    # 64ed7e74: {"result": [[]]} was skipped silently under a complete
+    # scope, retracting every operator.
+    rel = "data/cric/responsibilities.json"
+    _write_all(tmp_path, CRIC_FILES, {rel: json.dumps({"result": rows}).encode()})
+    _assert_refused(
+        CRICSource(base=str(tmp_path)), tmp_path / rel, "endpoint_failed",
+        "reconcile",
+    )
+
+
+def test_cric_malformed_row_among_good_ones_stops_the_claim(tmp_path):
+    rel = "data/cric/responsibilities.json"
+    rows = CRIC_FILES[rel]["result"] + [["fakeuser", "Fake Site"],
+                                        ["x", "y", "z", "extra"]]
+    _write_all(tmp_path, CRIC_FILES, {rel: json.dumps({"result": rows}).encode()})
+    source = CRICSource(base=str(tmp_path))
+    run = source.run("run-1", mode="scope_complete")
+    assert list(run.facts)
+    assert run.completed_scope is False
+    assert f"2 in {tmp_path / rel}" in run.health.reason
+    assert "no complete scope claimed" in source.preflight().reason
+
+
+def test_cric_null_username_or_site_stays_a_plain_drop(tmp_path):
+    # Real exports carry rows with a null site; those are not drift.
+    rel = "data/cric/responsibilities.json"
+    rows = CRIC_FILES[rel]["result"] + [["someone", None, "Site Admin"]]
+    _write_all(tmp_path, CRIC_FILES, {rel: json.dumps({"result": rows}).encode()})
+    run = CRICSource(base=str(tmp_path)).run("run-1", mode="scope_complete")
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+
+
+@pytest.mark.parametrize("kind,rel,payload", [
+    ("cric", "data/cric/facilities.json", {"FakeFacility": {"cmssites": 5}}),
+    ("cric_core", "data/cric-core/rcsites.json", {"FAKE-RC": {"sites": 5}}),
+    ("cric_core", "data/cric-core/federations.json",
+     {"XX-FAKE": {"vos": ["cms"], "pledges": {"2026": "not an object"}}}),
+])
+def test_cric_unexpected_nested_shape_never_crashes(tmp_path, kind, rel, payload):
+    _write_all(tmp_path, _files(kind), {rel: json.dumps(payload).encode()})
+    source = _cric(kind)(base=str(tmp_path))
+    run = source.run("run-1", mode="scope_complete")
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert "unexpected shape" in run.health.reason
+    assert source.preflight().status == "endpoint_failed"

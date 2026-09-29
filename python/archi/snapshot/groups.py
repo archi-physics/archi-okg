@@ -638,10 +638,15 @@ GROUPS: dict[str, GroupSpec] = {
                     _gocdb_identity,
                 ),
             ),
-            # The reader matches hostnames against CRIC; it requires both.
+            # The reader matches hostnames against CRIC; it requires both,
+            # and refuses an empty one (it would drop every affects edge),
+            # so each stub holds one entry that matches no real host.
             validation_stubs={
-                "data/cric/sites.json": b"{}\n",
-                "data/cric-core/services.json": b"{}\n",
+                "data/cric/sites.json": b'{"T0_ZZ_SnapshotStub": {}}\n',
+                "data/cric-core/services.json": (
+                    b'{"snapshot-stub.invalid": '
+                    b'{"endpoint": "https://snapshot-stub.invalid"}}\n'
+                ),
             },
         ),
         GroupSpec(

@@ -13,13 +13,15 @@ part of ``cache_paths`` (probe/preflight hash them). They are not
 optional reference targets here because ``affects`` edges are only
 emitted to nodes those caches prove exist.
 
-Empty-cache-fails-loudly: a missing, unreadable, truncated or
-error-shaped downtime or topology cache is ``cache_missing`` / ``endpoint_failed`` with no facts and
-``completed_scope=False`` from both ``preflight()`` and ``run()`` (the
-original raised ``FileNotFoundError`` from ``run()`` only). An empty
-downtime *list* is the one accepted empty result — GOCDB can truly
-have no downtime in the window — so it reports ``skipped_optional``,
-emits nothing and never claims a complete scope.
+Empty-cache-fails-loudly: a missing, unreadable, zero-byte, truncated
+or empty downtime list is ``cache_missing``, and so is a missing or
+empty CRIC topology cache (an empty one would drop every ``affects``
+edge under a complete scope); an error-shaped payload is
+``endpoint_failed``. Each gives no facts and ``completed_scope=False``
+from both ``preflight()`` and ``run()`` (the original raised
+``FileNotFoundError`` from ``run()`` only and claimed a complete scope
+over ``[]``). Topology entries that are not objects are skipped and
+stop the scope claim, as unparseable downtimes do.
 
 Registry-entry template — same three prerequisites as
 ``archi/sources/jira.py``'s template; ``downtime``, ``site``, and
@@ -93,6 +95,7 @@ from archi.sources._cache_report import (
     unusable_cache_run,
 )
 from archi.sources._sdk_adapter import ReaderAdapter
+from archi.sources.cric import _CMS_SITE_NAME, _Skipped, _read_objects
 
 
 @dataclass(frozen=True)
@@ -152,7 +155,7 @@ class GoCDBDowntimeSource:
         # Same verdict run() reaches for the same caches.
         try:
             records, skipped = self._records_with_skips()
-            self._topology()
+            _sites, _services, topo_skipped = self._topology()
         except CacheUnusable as exc:
             return unusable_cache_preflight(
                 exc, source_name=self.name, required=True
@@ -160,7 +163,7 @@ class GoCDBDowntimeSource:
         status, reason, _complete = _verdict(
             "local GOCDB downtime cache present",
             record_count=len(records),
-            skipped_count=skipped,
+            skipped_count=skipped + topo_skipped,
             records_path=self.records_path,
         )
         return PreflightResult(
@@ -177,7 +180,7 @@ class GoCDBDowntimeSource:
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
         try:
             records, skipped = self._records_with_skips()
-            known_sites, service_lookup = self._topology()
+            known_sites, service_lookup, topo_skipped = self._topology()
         except CacheUnusable as exc:
             return unusable_cache_run(exc, mode=mode)
         revision = {
@@ -199,7 +202,7 @@ class GoCDBDowntimeSource:
         status, reason, complete = _verdict(
             "local GOCDB downtime cache used",
             record_count=len(records),
-            skipped_count=skipped,
+            skipped_count=skipped + topo_skipped,
             records_path=self.records_path,
         )
         return ConnectorRun(
@@ -217,35 +220,36 @@ class GoCDBDowntimeSource:
             ),
         )
 
-    def _topology(self) -> tuple[set[str], dict[str, str]]:
+    def _topology(self) -> tuple[set[str], dict[str, str], int]:
         """The required CRIC topology caches (see the module note).
 
-        Both are read with the shared cache reader, so a missing,
-        unreadable, truncated or error-shaped topology cache refuses
-        the run the same way in preflight() and run(). An empty
-        topology object is accepted: it is an edge-target lookup, not
-        this source's scope (the downtimes are), and the snapshot
-        builder validates the downtime cache against ``{}`` stubs
-        (archi.snapshot.groups). With it no ``affects`` edge is
-        emitted; the downtimes themselves are unaffected.
+        Read like the CRIC source reads them: a missing, unreadable,
+        truncated or empty cache is ``cache_missing``, an API error body
+        or a sites cache with no CMS site name is ``endpoint_failed``,
+        in preflight() and run() alike. An empty topology is refused
+        rather than accepted: it would drop every ``affects`` edge while
+        the run claimed a complete scope. Returns the lookups plus the
+        number of non-object entries skipped (which stops the claim).
         """
-        sites = read_cache_json(
-            self.sites_path, expect=dict, base=self.base, allow_empty=True
+        skipped = _Skipped()
+        sites = _read_objects(
+            self.sites_path, base=self.base, skipped=skipped,
+            key_pattern=_CMS_SITE_NAME,
         )
-        services = read_cache_json(
-            self.services_path, expect=dict, base=self.base, allow_empty=True
+        services = _read_objects(
+            self.services_path, base=self.base, skipped=skipped
         )
-        return _known_sites(sites), _service_lookup(services)
+        return _known_sites(sites), _service_lookup(services), skipped.total
 
     def _records(self) -> list[DowntimeRecord]:
         return self._records_with_skips()[0]
 
     def _records_with_skips(self) -> tuple[list[DowntimeRecord], int]:
-        # An empty downtime list is allowed here: GOCDB can truly have
-        # no downtime in the fetched window. _verdict() then refuses to
-        # claim a complete scope, so it can never retract silently.
+        # An empty downtime list is refused as cache_missing (operator
+        # decision 2026-09-28: an empty cache is a loud failure). The
+        # snapshot builder already refuses an empty gocdb group.
         payload = read_cache_json(
-            self.records_path, expect=list, base=self.base, allow_empty=True
+            self.records_path, expect=list, base=self.base
         )
         grouped: dict[int, dict[str, Any]] = {}
         skipped = 0
@@ -307,24 +311,9 @@ def _verdict(
     skipped_count: int,
     records_path: str,
 ) -> tuple[str, str, bool]:
-    """(status, reason, may claim a complete scope) for one cache read.
-
-    Zero downtimes from an empty list is the one empty result this
-    package accepts as possibly true, so it is not a failure; but it is
-    also indistinguishable from a fetch that wrote ``[]``, so it never
-    claims a complete scope. It reports ``skipped_optional`` (the
-    status archi.sources.monit uses for a zero-bucket read) and the
-    previously ingested downtimes stay until a non-empty cache
-    replaces them.
-    """
-    if not record_count and not skipped_count:
-        return (
-            "skipped_optional",
-            f"GOCDB downtime cache {records_path} lists no downtimes; "
-            "no facts emitted and no complete scope claimed, so "
-            "previously ingested downtimes are kept",
-            False,
-        )
+    """(status, reason, may claim a complete scope) for one cache read,
+    shared by preflight() and run(). An empty downtime list never gets
+    here (read_cache_json refuses it)."""
     status, reason = skipped_items_status(
         status="ok",
         reason=ok_reason,
