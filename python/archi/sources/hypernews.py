@@ -539,6 +539,7 @@ class HyperNewsSource:
                             "text": chunk_text,
                             "char_offset": offset,
                             "char_length": len(chunk_text),
+                            "char_end": offset + len(chunk_text),
                             "chunker_name": self.chunker_name,
                             "heading_path": record.title,
                         },
