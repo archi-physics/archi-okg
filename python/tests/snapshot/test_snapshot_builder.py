@@ -402,6 +402,9 @@ def test_build_writes_every_group_with_lock_rows(built):
     assert lock["groups"]["jira"]["file_count"] == 2
     assert lock["groups"]["twiki-eos"]["record_count"] == 2
     assert lock["groups"]["twiki-eos"]["file_count"] == 2  # the .png is not read
+    assert lock["groups"]["twiki-eos"]["empty_topic_files"] == 0
+    assert lock["groups"]["twiki-eos"]["empty_topic_names"] == []
+    assert "empty_topic_files" not in lock["groups"]["jira"]
     assert lock["archive_format"]["compressor"] == "zstd"
     assert verify(out / LOCK_NAME, out).ok
 
@@ -645,6 +648,92 @@ def test_text_with_nul_bytes_refuses_the_group(tmp_path, sources, content):
         build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
     reason = info.value.refusals[0].reason
     assert reason == "Odd.txt contains NUL bytes (not UTF-8 text)"
+
+
+def _add_twiki_topics(directory: Path, count: int) -> None:
+    for index in range(count):
+        (directory / f"Filler{index:03d}.txt").write_text(
+            f"---+ Filler {index}\nBody {index}.\n", encoding="utf-8"
+        )
+
+
+def test_two_empty_twiki_topics_are_left_out_and_listed(tmp_path, sources):
+    # The real snapshot holds two topics empty upstream. They used to
+    # refuse the group (the reader claimed no scope), so every release
+    # snapshot needed a hand-staged copy without them.
+    twiki = sources["twiki-eos"]
+    _add_twiki_topics(twiki, 40)
+    (twiki / "EmptyUpstream.txt").write_bytes(b"")
+    (twiki / "Sub" / "NulOnly.txt").write_bytes(b"\x00" * 64 + b"\n \t")
+    out = tmp_path / "out"
+    lock = build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    row = lock["groups"]["twiki-eos"]
+    assert row["empty_topic_files"] == 2
+    assert row["empty_topic_names"] == ["EmptyUpstream.txt", "Sub/NulOnly.txt"]
+    assert row["record_count"] == 42
+    assert row["file_count"] == 42
+    members = read_archive(out / "twiki-eos.tar.zst")
+    assert "data/twiki-eos/EmptyUpstream.txt" not in members
+    assert "data/twiki-eos/Sub/NulOnly.txt" not in members
+    on_disk = yaml.safe_load((out / LOCK_NAME).read_text(encoding="utf-8"))
+    assert on_disk["groups"]["twiki-eos"]["empty_topic_names"] == row["empty_topic_names"]
+    result = verify(out / LOCK_NAME, out)
+    assert result.ok, result.lines
+
+
+def test_many_empty_twiki_topics_refuse_the_group(tmp_path, sources):
+    # 2 real + 11 empty = 13 text files: max(10, 0.1%) allows 10.
+    twiki = sources["twiki-eos"]
+    for index in range(11):
+        (twiki / f"Empty{index:02d}.txt").write_bytes(b"")
+    with pytest.raises(BuildRefused) as info:
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+    reason = info.value.refusals[0].reason
+    assert reason.startswith(
+        "11 of 13 text files are zero bytes or only whitespace/NUL bytes, "
+        "more than the 10 allowed (an interrupted sync), e.g. Empty00.txt"
+    )
+    assert not (tmp_path / "out").exists()
+
+
+def test_ten_empty_twiki_topics_are_within_the_limit(tmp_path, sources):
+    twiki = sources["twiki-eos"]
+    for index in range(10):
+        (twiki / f"Empty{index:02d}.txt").write_bytes(b"  \n")
+    lock = build(
+        load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out"
+    )
+    assert lock["groups"]["twiki-eos"]["empty_topic_files"] == 10
+
+
+def test_an_all_empty_twiki_tree_refuses_the_group(tmp_path, sources):
+    twiki = sources["twiki-eos"]
+    for path in twiki.rglob("*.txt"):
+        path.write_bytes(b"")
+    with pytest.raises(BuildRefused) as info:
+        build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), tmp_path / "out")
+    assert info.value.refusals[0].reason.startswith(
+        "all 2 text files are zero bytes or only whitespace/NUL bytes"
+    )
+
+
+def test_verify_catches_an_empty_topic_list_that_disagrees(tmp_path, sources):
+    (sources["twiki-eos"] / "EmptyUpstream.txt").write_bytes(b"")
+    out = tmp_path / "out"
+    build(load_config(write_config(tmp_path, sources, only=["twiki-eos"])), out)
+    lock_path = out / LOCK_NAME
+    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+    lock["groups"]["twiki-eos"]["empty_topic_files"] = 3
+    lock_path.write_text(yaml.safe_dump(lock, sort_keys=False), encoding="utf-8")
+    result = verify(lock_path, out)
+    assert not result.ok
+    assert "lock says 3 empty topic files" in result.lines[0]
+    lock["groups"]["twiki-eos"]["empty_topic_files"] = 1
+    lock["groups"]["twiki-eos"]["empty_topic_names"] = ["CompOpsGuide.txt"]
+    lock_path.write_text(yaml.safe_dump(lock, sort_keys=False), encoding="utf-8")
+    result = verify(lock_path, out)
+    assert not result.ok
+    assert "empty topic file CompOpsGuide.txt is in the archive" in result.lines[0]
 
 
 def test_non_utf8_text_without_a_fallback_refuses_the_group(tmp_path, sources):

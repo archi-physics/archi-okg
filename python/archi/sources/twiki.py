@@ -51,12 +51,19 @@ EOS snapshot reading (empty-cache-fails-loudly, 2026-09): the snapshot
 walk skips hidden files and folders (``.TopicA.txt``, ``.sync/...`` —
 sync-tool metadata, never TWiki topics). A snapshot root that cannot be
 listed is ``cache_missing`` ("could not be read"), never an empty wiki.
-A folder or topic file that cannot be read, or a topic file that is
-zero bytes or holds only whitespace/NUL bytes (an interrupted sync of
-that topic), is left out and the run claims no complete scope
-(``endpoint_failed``, with counts and samples), so the last good copy
-of those pages is kept rather than blanked or retracted. A
-``max_files`` cap that leaves topics out reports ``ok`` but claims no
+A folder or topic file that cannot be read is left out and the run
+claims no complete scope (``endpoint_failed``, with counts and
+samples), so the last good copy of those pages is kept rather than
+blanked or retracted. A topic file that is zero bytes or holds only
+whitespace/NUL bytes is never emitted (it would blank the page). A few
+such files are topics that are empty upstream (twiki-empty-topics,
+2026-09-29: the real CMS snapshot holds two): they are skipped and
+named in the health reason and ``last_empty_topics``, and the run still
+claims its scope, so those pages are retracted as absent. More than
+``empty_topic_limit(topic files)`` of them — max(10, 0.1%) — looks like
+an interrupted sync and keeps the refusal (``endpoint_failed``, no
+complete scope). A snapshot of only empty topics is ``cache_missing``.
+A ``max_files`` cap that leaves topics out reports ``ok`` but claims no
 complete scope either.
 ``preflight()`` reaches the same verdict as ``run()`` for every such
 case and for missing seeds; the one thing it does not do is apply the
@@ -438,6 +445,10 @@ class TwikiEOSSource:
         # the whole snapshot, exactly as before this option existed.
         self.physics_filter = bool(physics_filter)
         self.last_physics_report: PhysicsFilterReport | None = None
+        #: Snapshot-relative paths of the empty topic files the last
+        #: preflight() or run() skipped (zero bytes, or only
+        #: whitespace/NUL bytes), whether or not they refused the scope.
+        self.last_empty_topics: tuple[str, ...] = ()
         self._records = records
         self.base = base
         self.change_probe = ContentHashProbe(
@@ -574,6 +585,9 @@ class TwikiEOSSource:
                     reason=problem,
                     checked_at=_checked_at(),
                 )
+            note = self._empty_note(
+                found=len(files), empty=empty, capped=capped
+            )
             return PreflightResult(
                 source_name=self.name,
                 status="ok",
@@ -583,7 +597,7 @@ class TwikiEOSSource:
                 cache_path=str(root),
                 record_count=len(files),
                 content_hash=_listing_hash(root, files),
-                reason=reason,
+                reason=f"{reason}; {note}" if note else reason,
                 checked_at=_checked_at(),
             )
         return file_preflight(
@@ -595,6 +609,7 @@ class TwikiEOSSource:
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
         verdict: tuple[str, str] | None = None
+        empty_note: str | None = None
         if self._records is not None:
             records = self._physics_scoped(self._records)
         else:
@@ -677,6 +692,9 @@ class TwikiEOSSource:
                         checked_at=_checked_at(),
                     ),
                 )
+            empty_note = self._empty_note(
+                found=len(records), empty=read.empty, capped=read.capped
+            )
             records = self._physics_scoped(records)
         content_hash = _records_hash(records)
         revision = {
@@ -703,8 +721,8 @@ class TwikiEOSSource:
 
         if verdict is not None:
             # Part of the scope was not read: a configured seed without
-            # a snapshot file, an unreadable folder or topic file, a
-            # zero-byte topic. Emit what was read, never claim a
+            # a snapshot file, an unreadable folder or topic file, more
+            # empty topics than empty_topic_limit(). Emit what was read, never claim a
             # complete scope — it would retract every page the run
             # failed to read. (Only operator-configured seeds count as
             # missing; followed-link targets missing from the snapshot
@@ -766,7 +784,10 @@ class TwikiEOSSource:
                 ),
                 record_count=len(records),
                 content_hash=content_hash,
-                reason="TWiki EOS snapshot read from local filesystem",
+                reason=(
+                    "TWiki EOS snapshot read from local filesystem"
+                    + (f"; {empty_note}" if empty_note else "")
+                ),
             ),
         )
 
@@ -798,9 +819,13 @@ class TwikiEOSSource:
 
         Zero topics read is ``cache_missing``; topics read while some
         of the scope was not (a missing seed, an unreadable folder or
-        file, a zero-byte topic) is ``endpoint_failed`` — the closed
-        status vocabulary has no 'degraded'.
+        file, more empty topics than :func:`empty_topic_limit` allows)
+        is ``endpoint_failed`` — the closed status vocabulary has no
+        'degraded'. Empty topics within the limit are no problem: they
+        are named in the reason (here when another problem refuses the
+        scope, else by the caller through :meth:`_empty_note`).
         """
+        self.last_empty_topics = tuple(empty)
         problems: list[str] = []
         if missing_seeds:
             total = len(self.seed_topics or ())
@@ -814,11 +839,21 @@ class TwikiEOSSource:
                 f"{len(unreadable)} snapshot folders or topic files could "
                 f"not be read, e.g. {', '.join(unreadable[:3])}"
             )
-        if empty:
+        tolerated_note = self._empty_note(
+            found=found, empty=empty, capped=capped
+        )
+        if empty and tolerated_note is None:
+            total = found + capped + len(empty)
+            why = (
+                "and no readable topic"
+                if not found else
+                f"more than the {empty_topic_limit(total)} empty topics "
+                f"allowed among {total} topic files"
+            )
             problems.append(
                 f"{len(empty)} topic files are zero bytes or only "
-                "whitespace/NUL bytes (an interrupted sync), e.g. "
-                f"{', '.join(empty[:3])}"
+                f"whitespace/NUL bytes, {why} (an interrupted sync), "
+                f"e.g. {', '.join(empty[:3])}"
             )
         if not found:
             reason = self._empty_snapshot_reason(root)
@@ -834,6 +869,8 @@ class TwikiEOSSource:
         if problems:
             if cap_note:
                 problems.append(cap_note)
+            if tolerated_note:
+                problems.append(tolerated_note)
             return (
                 "endpoint_failed",
                 f"{'; '.join(problems)}; {found} readable topics emitted, "
@@ -843,8 +880,32 @@ class TwikiEOSSource:
             # A configured cap is not a failure, but the topics past it
             # were not read: a complete scope would retract them. Same
             # rule as docs.py's max_pages truncation (ok, no scope).
+            if tolerated_note:
+                cap_note += f"; {tolerated_note}"
             return ("ok", f"{cap_note}; no complete scope claimed")
         return None
+
+    def _empty_note(
+        self, *, found: int, empty: tuple[str, ...], capped: int = 0
+    ) -> str | None:
+        """The health-reason note for empty topics skipped within the
+        limit, or None when there are none, none were readable (the
+        snapshot is then ``cache_missing``), or there are too many."""
+        if not empty or not found:
+            return None
+        total = found + capped + len(empty)
+        if not empty_topics_tolerated(len(empty), total):
+            return None
+        shown = ", ".join(empty[:EMPTY_TOPIC_NAMES_SHOWN])
+        more = len(empty) - EMPTY_TOPIC_NAMES_SHOWN
+        if more > 0:
+            shown += f", and {more} more"
+        return (
+            f"{len(empty)} empty topic files skipped (zero bytes or only "
+            "whitespace/NUL bytes; taken as empty upstream, at most "
+            f"{empty_topic_limit(total)} allowed among {total} topic "
+            f"files): {shown}"
+        )
 
     def _paths(self) -> list[Path]:
         return list(self._listing().paths)
@@ -1479,6 +1540,33 @@ def _unreadable_dir_reason(root: Path) -> str | None:
 
 
 _BLANK_BYTES = b" \t\r\n\x0b\x0c\x00"
+
+#: A topic emptied upstream leaves one or two blank topic files; an
+#: interrupted sync leaves many. Up to max(EMPTY_TOPIC_FLOOR, 0.1% of
+#: the topic files) blank topics are skipped with the scope still
+#: claimed; more refuse it. The snapshot builder applies the same rule.
+EMPTY_TOPIC_FLOOR = 10
+EMPTY_TOPIC_PER_MILLE = 1
+#: Empty topic files named in a health reason; the rest are counted.
+EMPTY_TOPIC_NAMES_SHOWN = 10
+
+
+def empty_topic_limit(topic_files: int) -> int:
+    """Most empty topic files a snapshot of ``topic_files`` topic files
+    (empty ones included) may hold and still claim its scope."""
+    return max(EMPTY_TOPIC_FLOOR, topic_files * EMPTY_TOPIC_PER_MILLE // 1000)
+
+
+def empty_topics_tolerated(empty: int, topic_files: int) -> bool:
+    """True when ``empty`` blank topics among ``topic_files`` read as
+    topics empty upstream, not as an interrupted sync."""
+    return empty <= empty_topic_limit(topic_files)
+
+
+def is_blank_topic(data: bytes) -> bool:
+    """True when a topic file's bytes are only whitespace and NUL bytes
+    (zero bytes included) — the reader skips such a file."""
+    return not data.strip(_BLANK_BYTES)
 
 
 def _is_blank(path: Path) -> bool:

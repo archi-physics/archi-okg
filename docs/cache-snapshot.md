@@ -99,6 +99,14 @@ For every group the build:
    tab, form feed and carriage return do not count, and neither do the
    characters of ANSI colour sequences (`ESC[32m`).
 
+   **Empty TWiki topics.** A TWiki topic file that is zero bytes or holds
+   only whitespace and NUL bytes is left out of the archive (the reader
+   skips it too) and listed in the lock as `empty_topic_files` (a count)
+   and `empty_topic_names`. A topic that is empty upstream leaves one or
+   two such files (the Aug 31 snapshot has two); an interrupted sync
+   leaves many, so more than max(10, 0.1% of the group's text files)
+   refuses the group, and so does a tree whose every text file is empty.
+
    Before anything is stripped or redacted, each text file, each JSON
    string and key, and each archive path is checked for addresses that
    hidden or look-alike characters keep from the redactor. A JSON string
@@ -244,8 +252,8 @@ configured), `archive`, `sha256`, `bytes`,
 `file_count`, `record_count` (records as that group's reader counts them),
 `addresses_removed`, `obfuscated_addresses_removed`,
 `normalized_addresses_removed`, `input_file` (for CMSSW, which input was used),
-`text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs` and
-`fallback_bytes` (TWiki),
+`text_pages`, `pages_valid_utf8`, `pages_with_fallback_runs`,
+`fallback_bytes`, `empty_topic_files` and `empty_topic_names` (TWiki),
 `contents_sha256` (a digest of the unpacked files), `archive_dir`, and the
 dropped and extra kept fields. It also records who built it, when, on which
 host, the archi version and commit, and the zstd version and level.
@@ -258,7 +266,9 @@ python -m archi.snapshot verify --lock snapshot.lock.yaml --archives <dir>
 
 For every group in the lock it checks the archive's size and SHA-256, then
 decompresses it and checks the member count, that every member is a plain
-file under the group's directory, and the contents digest. It prints one
+file under the group's directory, and the contents digest; for TWiki, also
+that `empty_topic_files` counts `empty_topic_names` and that no named empty
+topic is in the archive. It prints one
 `ok` or `FAIL` line per group and exits 1 if any group fails. Unpack only
 after it exits 0, for example `zstd -d -c <group>.tar.zst | tar -x -C "$ARCHI_DATA_ROOT"`.
 

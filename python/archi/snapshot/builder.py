@@ -21,7 +21,10 @@ deterministic ``<group>.tar.zst`` (sorted members, fixed owner, mode and
 mtime, PAX format, ``zstd -T1`` at a fixed level) and ``snapshot.lock.yaml``
 records, per group, its collection date, archive SHA-256 and size, file
 count, record count (as the reader counts records) and a digest of the
-unpacked contents.
+unpacked contents. For TWiki it also records the empty topic files it left
+out (zero bytes or only whitespace/NUL bytes): ``empty_topic_files`` (a
+count) and ``empty_topic_names``. More than the reader's limit
+(max(10, 0.1% of the topic files)) refuses the group.
 
 ``verify`` checks archives against a lock file on a machine that has only the
 archives: size and SHA-256 of each archive, then its members (count, paths
@@ -282,6 +285,9 @@ class PreparedGroup:
     text_stats: Optional[dict[str, Any]] = None
     file_dates: tuple[tuple[str, str], ...] = ()
     note: Optional[str] = None
+    #: For groups that skip empty text files (TWiki): the ones left out,
+    #: by path in the source directory. None for other groups.
+    empty_files: Optional[tuple[str, ...]] = None
 
 
 def prepare_group(
@@ -391,8 +397,16 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         )
         final[archive_path] = _dump_json(_drop_keys_deep(pruned, deep))
     text_stats: Optional[dict[str, Any]] = None
+    empty_files: Optional[list[str]] = None
     if spec.text is not None:
         fallback = spec.text.fallback_invalid_bytes
+        text_files = _text_files(spec, source)
+        if spec.text.skip_empty:
+            # Imported here, as groups.py imports the readers: verify runs
+            # without the readers' dependencies.
+            from archi.sources.twiki import is_blank_topic
+
+            empty_files = []
         if fallback:
             text_stats = {
                 "text_pages": 0,
@@ -401,8 +415,12 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
                 "pages_bytes_dropped": 0,
                 "fallback_bytes": {"cp1252": 0, "latin-1": 0},
             }
-        for rel, path in _text_files(spec, source):
-            page = _read_text(group.name, rel, path, fallback=fallback)
+        for rel, path in text_files:
+            data = path.read_bytes()
+            if empty_files is not None and is_blank_topic(data):
+                empty_files.append(rel)
+                continue
+            page = _read_text(group.name, rel, path, fallback=fallback, data=data)
             text = page.text
             if text_stats is not None:
                 text_stats["text_pages"] += 1
@@ -418,6 +436,8 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
             archive_path = f"{spec.archive_dir}/{rel}"
             redacted[archive_path] = data
             final[archive_path] = data
+        if empty_files:
+            _check_empty_files(group.name, empty_files, len(text_files))
     if not final:
         raise GroupRefused(group.name, f"no cache files found in {source}")
 
@@ -464,7 +484,29 @@ def _prepare_group(group: GroupConfig, tmp_dir: str | Path | None) -> PreparedGr
         text_stats=text_stats,
         file_dates=group.file_dates,
         note=group.note,
+        empty_files=None if empty_files is None else tuple(empty_files),
     )
+
+
+def _check_empty_files(group: str, empty: list[str], total: int) -> None:
+    """Refuse the group when its empty text files look like an interrupted
+    sync rather than topics empty upstream (the reader's rule)."""
+    from archi.sources.twiki import empty_topic_limit, empty_topics_tolerated
+
+    if len(empty) == total:
+        raise GroupRefused(
+            group,
+            f"all {total} text files are zero bytes or only whitespace/NUL "
+            f"bytes, e.g. {', '.join(empty[:3])}",
+        )
+    if not empty_topics_tolerated(len(empty), total):
+        raise GroupRefused(
+            group,
+            f"{len(empty)} of {total} text files are zero bytes or only "
+            "whitespace/NUL bytes, more than the "
+            f"{empty_topic_limit(total)} allowed (an interrupted sync), "
+            f"e.g. {', '.join(empty[:3])}",
+        )
 
 
 def _safe_file(group: str, root: Path, rel: str) -> Path:
@@ -1203,7 +1245,14 @@ def _decode_with_fallback(data: bytes) -> _Page:
     return _Page(fallback_view, counts)
 
 
-def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _Page:
+def _read_text(
+    group: str,
+    rel: str,
+    path: Path,
+    *,
+    fallback: bool = False,
+    data: Optional[bytes] = None,
+) -> _Page:
     """The file's text, decoded and checked.
 
     A NUL byte always refuses the group (UTF-16 puts a NUL between the letters
@@ -1214,7 +1263,8 @@ def _read_text(group: str, rel: str, path: Path, *, fallback: bool = False) -> _
     returned with its colour sequences; they are stripped after the
     hidden-address check.
     """
-    data = path.read_bytes()
+    if data is None:
+        data = path.read_bytes()
     if b"\0" in data:
         raise GroupRefused(group, f"{rel} contains NUL bytes (not UTF-8 text)")
     if fallback:
@@ -1545,6 +1595,9 @@ def build(
                 row["input_file"] = group.input_file
             if group.text_stats is not None:
                 row.update(group.text_stats)
+            if group.empty_files is not None:
+                row["empty_topic_files"] = len(group.empty_files)
+                row["empty_topic_names"] = list(group.empty_files)
             groups_lock[group.name] = row
         lock = {
             "lock_version": LOCK_VERSION,
@@ -1654,4 +1707,14 @@ def _verify_group(name: str, row: Any, directory: Path) -> Optional[str]:
         return f"member outside {prefix}: {outside[0]}"
     if contents_digest(members) != row.get("contents_sha256"):
         return "unpacked contents do not match the lock's contents_sha256"
+    if "empty_topic_files" in row or "empty_topic_names" in row:
+        names = row.get("empty_topic_names")
+        if not isinstance(names, list) or row.get("empty_topic_files") != len(names):
+            return (
+                f"lock says {row.get('empty_topic_files')!r} empty topic files "
+                f"but names {names!r}"
+            )
+        archived = sorted(n for n in names if f"{prefix}{n}" in members)
+        if archived:
+            return f"empty topic file {archived[0]} is in the archive"
     return None
