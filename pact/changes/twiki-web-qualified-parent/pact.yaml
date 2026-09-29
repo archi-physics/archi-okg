@@ -1,0 +1,60 @@
+pact_version: 5
+id: twiki-web-qualified-parent
+title: The TWiki physics filter follows web-qualified parent topics
+tier: 2
+why: 'Issue #15. The physics filter''s parent-topic closure (stage 3 in
+  archi.sources._twiki_physics) looked up %META:TOPICPARENT by the raw string,
+  while topics are keyed by bare name. A parent written web-qualified
+  (CMS.<topic>) therefore matched nothing, the chain stopped, and an in-scope
+  subtree was dropped. The twiki-physics-filter port carried this on purpose and
+  asserted it in a test, deferring the fix to a change with a diffed page count.
+
+
+  Measured read-only on the Aug 31 twiki-eos stage on submit76 (43,744 topics,
+  51 web names): 5,896 topics have a dotted parent; 119 of them are qualified by a
+  web the snapshot has. With the physics filter on, the kept count goes from
+  15,655 to 15,738 (+83, none lost); seeds are unchanged at 6,627 and the closure
+  grows from 13,194 to 13,287.
+
+
+  DECISION, which prefixes are stripped: only a prefix whose every dotted part is
+  a web the snapshot has (its web root, or a directory a page sits under). A
+  parent in another web (TWiki., Main., CMSPublic., ...) names a different topic
+  and is left alone, as is any other dotted string.
+
+
+  NOT CHANGED: parents written as a full view URL are still not followed; that is
+  a separate parse question, not a web prefix.'
+affected_code:
+- python/archi/sources/_twiki_physics.py
+- python/tests/sources/test_twiki_physics.py
+requirements:
+- id: req.twiki-web-qualified-parent.main
+  statement: 'The closure resolves a web-qualified parent to its bare topic when
+    the qualifier is a web the snapshot has, and leaves every other parent as is.
+
+
+    Acceptance:
+
+    - acc.twiki-web-qualified-parent.closure: a child whose parent is
+    <Web>.<seed> or <Web>.<SubWeb>.<topic> joins the closure; a parent qualified by
+    an unknown web, with any unknown part, or with nothing after the dot does not;
+    through the connector, the webs come from the snapshot''s web root and web
+    directories. [evidence: executed_test]'
+tasks:
+- id: task.twiki-web-qualified-parent.deliver
+  requirement: req.twiki-web-qualified-parent.main
+  verification: 'Strip a known-web prefix before the parent lookup; replace the
+    limitation test; cover the chain and the left-alone cases with fake data.
+
+
+    Proof: the new tests fail on main and pass on the branch; the full archi suite
+    passes; the patched filter, run read-only on the real Aug 31 snapshot, keeps
+    more topics and loses none.
+
+
+    Test plan:
+
+    - python/tests [evidence: pytest]'
+evidence: []
+decisions: []

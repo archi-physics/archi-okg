@@ -22,14 +22,13 @@ are physics. The filter runs in four stages:
      still kept when its name classifies as documentation worth having
      (howto, faq, tutorial, glossary, ...).
 
-Known limitation, carried verbatim from cms-kb rather than silently
-"fixed" here: stage 3 matches ``%META:TOPICPARENT{name="..."}`` against
-bare topic names. A parent recorded web-qualified (``CMS.HiggsPhysics``)
-does not match a topic keyed ``HiggsPhysics``, so its children do not
-enter the closure. The production CMS snapshot records bare names, which
-is why the fork never hit this. Changing it would change which pages a
-cms-kb build ingests, so it belongs in its own change with a diffed
-page count, not in a port whose point is parity.
+A parent may be recorded web-qualified (``%META:TOPICPARENT{name=
+"CMS.HiggsPhysics"}%``) while topics are keyed by bare name. Stage 3
+strips a leading ``<Web>.`` before the lookup, but only when every
+dotted part before the topic names a web the snapshot actually has
+(its web root or one of its web directories), so a dotted name that is
+not web-qualified is left alone. cms-kb matched the raw string, so a
+web-qualified parent stopped the chain and dropped its subtree.
 
 Nothing here touches the ontology: the filter only ever *selects*
 records the connector already produces. Physics-specific vocabulary
@@ -134,16 +133,35 @@ def classify_page_type(title: str, parent_topic: str) -> str:
 
 # ── Stage 3: parent-topic transitive closure ────────────────────────────
 
+def bare_parent_topic(parent: str, web_names: frozenset[str]) -> str:
+    """``parent`` without a leading ``<Web>.``, when that prefix is a web.
+
+    ``CMS.HiggsPhysics`` becomes ``HiggsPhysics`` when ``CMS`` is in
+    ``web_names``; ``CMS.HiggsWG.Page`` needs both ``CMS`` and
+    ``HiggsWG``. Anything else is returned unchanged.
+    """
+    web, dot, topic = parent.rpartition(".")
+    if dot and web and topic and all(
+        part in web_names for part in web.split(".")
+    ):
+        return topic
+    return parent
+
+
 def compute_keep_set(
     topics: Sequence[str],
     parent_topic_map: dict[str, str],
+    web_names: Iterable[str] = (),
 ) -> tuple[set[str], set[str]]:
     """Return ``(seed_set, kept_set)``.
 
     ``seed_set`` is stage 1. ``kept_set`` is ``seed_set`` plus every
-    topic whose parent chain reaches a seed. Cycles are tolerated: each
-    topic's answer is memoised, so an ancestor walk visits a topic once.
+    topic whose parent chain reaches a seed. A parent qualified by one
+    of ``web_names`` is looked up by its bare topic name. Cycles are
+    tolerated: each topic's answer is memoised, so an ancestor walk
+    visits a topic once.
     """
+    webs = frozenset(web_names)
     seed_set: set[str] = {topic for topic in topics if passes_allow_list(topic)}
     resolved: dict[str, bool] = {}
 
@@ -161,7 +179,8 @@ def compute_keep_set(
                 outcome = False
                 break
             walked.append(current)
-            current = parent_topic_map.get(current) or None
+            parent = parent_topic_map.get(current) or ""
+            current = bare_parent_topic(parent, webs) or None
         else:
             outcome = False
         for topic_name in walked:
@@ -218,7 +237,15 @@ def filter_records(
 
     topics = [record.title for record in survivors]
     parent_map = {record.title: record.parent_topic for record in survivors}
-    seed_set, closure_kept = compute_keep_set(topics, parent_map)
+    # The webs are the directories a page id sits under, plus the web
+    # root; the last page-id part is the topic itself, never a web.
+    web_names = {
+        part
+        for record in survivors
+        for part in [*record.web_root.split("/"), *record.page_id.split("/")[:-1]]
+        if part
+    }
+    seed_set, closure_kept = compute_keep_set(topics, parent_map, web_names)
 
     kept: list["TwikiRecord"] = []
     dropped: list[str] = []
