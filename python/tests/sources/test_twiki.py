@@ -1450,11 +1450,13 @@ def test_eos_unreadable_topic_file_refuses_scope(tmp_path):
         (root / "TopicTwo.txt").chmod(0o644)
 
 
-def test_eos_zero_byte_topic_is_skipped_and_refuses_scope(tmp_path):
-    # Review item 4. Decision: a zero-byte topic is an interrupted sync
-    # of that page. It is not emitted (that would blank the page) and
-    # the run claims no scope (that would retract it), so the last good
-    # copy stays; the other pages still update.
+def test_eos_zero_byte_topic_is_skipped_and_claims_scope(tmp_path):
+    # Review item 4 said a zero-byte topic is an interrupted sync and
+    # refused the scope. The real CMS snapshot holds two topics that are
+    # empty upstream, so that rule refused every real ingest
+    # (twiki-empty-topics, 2026-09-29). A few empty topics are skipped
+    # (never emitted: that would blank the page), named, and the scope
+    # is still claimed, so the page is retracted as absent.
     root = _write_snapshot(tmp_path)
     (root / "TopicTwo.txt").write_bytes(b"")
     source = TwikiEOSSource(eos_root=str(root))
@@ -1462,15 +1464,19 @@ def test_eos_zero_byte_topic_is_skipped_and_refuses_scope(tmp_path):
     assert _page_ids(run) == {
         "twiki:CMS:TopicOne", "twiki:CMS:Sub:SubTopicPage",
     }
-    assert run.completed_scope is False
-    assert run.health.status == "endpoint_failed"
-    assert "1 topic files are zero bytes" in run.health.reason
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert run.health.record_count == 2
+    assert "1 empty topic files skipped" in run.health.reason
+    assert run.health.reason.endswith(": TopicTwo.txt")
+    assert source.last_empty_topics == ("TopicTwo.txt",)
     preflight = source.preflight()
-    assert preflight.status == "endpoint_failed"
+    assert preflight.status == "ok"
     assert preflight.record_count == 2
+    assert "TopicTwo.txt" in preflight.reason
 
 
-def test_eos_zero_byte_seed_topic_is_skipped_and_refuses_scope(tmp_path):
+def test_eos_zero_byte_seed_topic_is_skipped_and_claims_scope(tmp_path):
     root = _write_snapshot(tmp_path)
     (root / "TopicTwo.txt").write_bytes(b"")
     source = TwikiEOSSource(
@@ -1478,9 +1484,123 @@ def test_eos_zero_byte_seed_topic_is_skipped_and_refuses_scope(tmp_path):
     )
     run = source.run("r", mode="scope_complete")
     assert _page_ids(run) == {"twiki:CMS:TopicOne"}
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert "TopicTwo.txt" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert "TopicTwo.txt" in preflight.reason
+
+
+def _write_many_topics(root, count):
+    for index in range(count):
+        (root / f"Filler{index:03d}.txt").write_text(
+            f"---+ Filler {index}\nBody {index}.\n"
+        )
+
+
+def test_eos_two_empty_topics_among_many_claim_scope_and_are_named(tmp_path):
+    # The real case: two topics empty upstream in a large snapshot.
+    root = _write_snapshot(tmp_path)
+    _write_many_topics(root, 40)
+    (root / "EmptyUpstream.txt").write_bytes(b"")
+    (root / "Sub" / "Blank.txt").write_bytes(b" \n\x00\n")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert len(_page_ids(run)) == 43
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert run.health.record_count == 43
+    assert (
+        "2 empty topic files skipped (zero bytes or only whitespace/NUL "
+        "bytes; taken as empty upstream, at most 10 allowed among 45 "
+        "topic files): EmptyUpstream.txt, Sub/Blank.txt"
+    ) in run.health.reason
+    assert source.last_empty_topics == ("EmptyUpstream.txt", "Sub/Blank.txt")
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert preflight.record_count == 43
+    assert "EmptyUpstream.txt, Sub/Blank.txt" in preflight.reason
+
+
+def test_eos_empty_topics_at_the_limit_claim_scope(tmp_path):
+    root = _write_snapshot(tmp_path)
+    for index in range(10):
+        (root / f"Empty{index:02d}.txt").write_bytes(b"")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert "10 empty topic files skipped" in run.health.reason
+    assert source.preflight().status == "ok"
+
+
+@pytest.mark.parametrize("seeded", [False, True], ids=["tree", "seeded"])
+def test_eos_many_empty_topics_refuse_scope(tmp_path, seeded):
+    # Above max(10, 0.1%) empty topics the snapshot looks like an
+    # interrupted sync: skip them, emit the rest, claim no scope.
+    root = _write_snapshot(tmp_path)
+    names = [f"Empty{index:02d}" for index in range(11)]
+    for name in names:
+        (root / f"{name}.txt").write_bytes(b"")
+    kwargs = (
+        {"seed_topics": ["TopicOne", *names], "max_depth": 0}
+        if seeded else {}
+    )
+    source = TwikiEOSSource(eos_root=str(root), **kwargs)
+    run = source.run("r", mode="scope_complete")
+    assert "twiki:CMS:TopicOne" in _page_ids(run)
     assert run.completed_scope is False
     assert run.health.status == "endpoint_failed"
+    assert "11 topic files are zero bytes" in run.health.reason
+    assert "more than the 10 empty topics allowed" in run.health.reason
+    assert "interrupted sync" in run.health.reason
+    assert "no complete scope claimed" in run.health.reason
+    assert len(source.last_empty_topics) == 11
+    preflight = source.preflight()
+    assert preflight.status == "endpoint_failed"
+    assert preflight.reason == run.health.reason
+
+
+def test_eos_tolerated_empty_topics_are_named_when_another_problem_refuses(
+    tmp_path,
+):
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").write_bytes(b"")
+    source = TwikiEOSSource(
+        eos_root=str(root), seed_topics=["TopicOne", "NoSuchSeed"],
+        max_depth=1,
+    )
+    run = source.run("r", mode="scope_complete")
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert "NoSuchSeed" in run.health.reason
+    assert "1 empty topic files skipped" in run.health.reason
     assert source.preflight().status == "endpoint_failed"
+
+
+def test_eos_empty_topic_names_are_capped_in_the_reason(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(twiki_mod, "EMPTY_TOPIC_NAMES_SHOWN", 1)
+    root = _write_snapshot(tmp_path)
+    for index in range(3):
+        (root / f"Empty{index:02d}.txt").write_bytes(b"")
+    run = TwikiEOSSource(eos_root=str(root)).run("r", mode="scope_complete")
+    assert run.completed_scope is True
+    assert run.health.reason.endswith(": Empty00.txt, and 2 more")
+
+
+@pytest.mark.parametrize(
+    ("topic_files", "limit"),
+    [(0, 10), (45, 10), (10999, 10), (11000, 11), (43746, 43)],
+)
+def test_empty_topic_limit_is_max_of_ten_and_a_tenth_of_a_percent(
+    topic_files, limit
+):
+    assert twiki_mod.empty_topic_limit(topic_files) == limit
+    assert twiki_mod.empty_topics_tolerated(limit, topic_files)
+    assert not twiki_mod.empty_topics_tolerated(limit + 1, topic_files)
 
 
 def test_eos_snapshot_of_only_zero_byte_topics_is_cache_missing(tmp_path):
@@ -1494,6 +1614,8 @@ def test_eos_snapshot_of_only_zero_byte_topics_is_cache_missing(tmp_path):
     assert run.completed_scope is False
     assert run.health.status == "cache_missing"
     assert "2 topic files are zero bytes" in run.health.reason
+    assert "and no readable topic" in run.health.reason
+    assert "allowed" not in run.health.reason
     assert source.preflight().status == "cache_missing"
 
 
@@ -1561,7 +1683,7 @@ def test_eos_max_files_that_cuts_nothing_still_claims_scope(tmp_path):
     "content", [b"   \n\t \r\n", b"\x00" * 70000, b"\n\x00 \x00\n"],
     ids=["whitespace", "nul-bytes", "mixed"],
 )
-def test_eos_blank_topic_is_skipped_and_refuses_scope(tmp_path, content):
+def test_eos_blank_topic_is_skipped_and_claims_scope(tmp_path, content):
     # Whitespace-only or NUL-filled topics were ingested as real pages,
     # blanking their content. Treated like zero-byte files.
     root = _write_snapshot(tmp_path)
@@ -1569,13 +1691,16 @@ def test_eos_blank_topic_is_skipped_and_refuses_scope(tmp_path, content):
     source = TwikiEOSSource(eos_root=str(root))
     run = source.run("r", mode="scope_complete")
     assert "twiki:CMS:TopicTwo" not in _page_ids(run)
-    assert run.completed_scope is False
-    assert run.health.status == "endpoint_failed"
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
     assert "TopicTwo.txt" in run.health.reason
-    assert source.preflight().status == "endpoint_failed"
+    assert twiki_mod.is_blank_topic(content)
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert "TopicTwo.txt" in preflight.reason
 
 
-def test_eos_blank_seed_topic_is_skipped_and_refuses_scope(tmp_path):
+def test_eos_blank_seed_topic_is_skipped_and_claims_scope(tmp_path):
     root = _write_snapshot(tmp_path)
     (root / "TopicTwo.txt").write_bytes(b"\x00\x00\n")
     source = TwikiEOSSource(
@@ -1583,6 +1708,6 @@ def test_eos_blank_seed_topic_is_skipped_and_refuses_scope(tmp_path):
     )
     run = source.run("r", mode="scope_complete")
     assert _page_ids(run) == {"twiki:CMS:TopicOne"}
-    assert run.completed_scope is False
-    assert run.health.status == "endpoint_failed"
-    assert source.preflight().status == "endpoint_failed"
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert source.preflight().status == "ok"

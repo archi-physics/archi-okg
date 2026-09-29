@@ -82,6 +82,11 @@ class TextFiles:
     pattern: str
     recursive: bool = False
     fallback_invalid_bytes: bool = False
+    #: Leave out files that are zero bytes or only whitespace/NUL bytes
+    #: (TWiki topics empty upstream; the reader skips them too) and list
+    #: them in the lock. More than the reader's ``empty_topic_limit`` of
+    #: them refuses the group, as the reader refuses its scope.
+    skip_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -682,7 +687,10 @@ GROUPS: dict[str, GroupSpec] = {
             # TWiki pages predate UTF-8 (lead decision, 2026-09-28): invalid
             # byte runs decode as cp1252, the Windows superset of Latin-1.
             text=TextFiles(
-                "*.txt", recursive=True, fallback_invalid_bytes=True
+                "*.txt",
+                recursive=True,
+                fallback_invalid_bytes=True,
+                skip_empty=True,
             ),
         ),
         GroupSpec(
