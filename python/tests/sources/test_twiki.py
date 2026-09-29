@@ -566,6 +566,59 @@ def test_eos_missing_root_is_safe(monkeypatch, tmp_path):
     assert result.record_count == 3
 
 
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_eos_empty_snapshot_dir_refuses_scope(tmp_path, mode):
+    # A snapshot directory that exists but holds nothing (a failed sync,
+    # an unmounted volume left as an empty mount point) is a missing
+    # cache, not an empty wiki. Claiming a complete scope over it would
+    # order the retraction of every page ingested before.
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode=mode)
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "cache_missing"
+    assert run.health.mode == "filesystem"
+    assert run.health.record_count == 0
+    assert run.health.cache_path == str(root)
+    assert "no TWiki topics" in run.health.reason
+    assert "no complete scope claimed" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "cache_missing"
+    assert preflight.record_count == 0
+    assert preflight.cache_path == str(root)
+
+
+def test_eos_snapshot_of_only_skipped_pages_refuses_scope(tmp_path):
+    # Structural pages and junk files are dropped before any record is
+    # built, so a snapshot holding only those is as empty as no files.
+    root = tmp_path / "snapshot"
+    (root / "Sub").mkdir(parents=True)
+    (root / "WebChanges.txt").write_text("structural page")
+    (root / "12345.txt").write_text("junk")
+    (root / "Sub" / "notes.md").write_text("not a topic")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "cache_missing"
+    assert source.preflight().status == "cache_missing"
+
+
+def test_eos_one_topic_snapshot_still_claims_scope(tmp_path):
+    # The guard is about zero topics, not few: one real page is a scope.
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "TopicOne.txt").write_text(TOPIC_ONE)
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert len(_nodes(list(run.facts), "documentation_page")) == 1
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert source.preflight().status == "ok"
+
+
 def test_eos_completed_scope_by_mode_and_chunker_param(tmp_path):
     root = _write_snapshot(tmp_path)
     source = TwikiEOSSource(eos_root=str(root), chunker_name="my_twiki_v2")
