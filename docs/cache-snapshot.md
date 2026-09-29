@@ -88,7 +88,10 @@ For every group the build:
    any character that redaction removes from that reading (an address or a
    spelled-out address such as `jdoe[at]cern.ch`) would survive redaction of
    the fallback reading, the page is stored without its invalid bytes
-   instead. The lock records `text_pages`, `pages_valid_utf8`,
+   instead. The same happens when redaction of the fallback reading removes
+   a C1 control that an invalid byte became (`a.b@c` + `0x81` + `d.ch`):
+   the redactor reads control characters as part of an address, but the
+   check below would refuse an address holding one. The lock records `text_pages`, `pages_valid_utf8`,
    `pages_with_fallback_runs`, `pages_bytes_dropped`, `fallback_bytes` (per
    decoding). A text file with more than 1% control characters, and at
    least 16 of them, is refused as binary. Control characters here are C0
@@ -142,9 +145,11 @@ For every group the build:
 
    - **Refused:** the match contains, or sits directly next to, a control
      character, `ESC`, a character of a terminal sequence, or a Cf
-     character other than the five the redactor reads itself (soft hyphen,
+     character other than five common invisible ones (soft hyphen,
      zero-width space, zero-width non-joiner, zero-width joiner, word
-     joiner). So `jdoe<DEL>x@example.org`, `jdoe@example<ESC>.org`,
+     joiner). The redactor itself reads every Cf and control character as
+     part of an address, so these are refused here rather than stored
+     partly redacted. So `jdoe<DEL>x@example.org`, `jdoe@example<ESC>.org`,
      `jdoe<U+200E>x@example.org`, `<U+2068>jdoe<U+2069>@example.org`, an
      address wrapped directly in colour codes (`ESC[31mjdoe@example.org
      ESC[0m`) and a
