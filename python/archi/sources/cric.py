@@ -33,6 +33,9 @@ verbatim; the only changes:
   entry or non-3-field row is skipped and counted, and the run then
   claims no complete scope. Rows with a null username or site stay a
   plain drop, as in real exports.
+- Re-review of #21: responsibility rows that yield no operator at all
+  (every site null, or no site title matching the sites cache) are
+  ``endpoint_failed``; a complete scope would retract every operator.
 
 Registry-entry templates — same three prerequisites as
 ``archi/sources/jira.py``'s template (compose the deployment schema
@@ -331,6 +334,20 @@ class CRICSource:
                 responsibilities=responsibilities,
             ),
         )
+        if not any(record.kind == "operator" for record in records):
+            # Rows were read but none became an operator: every row has
+            # a null user or site, or no site title matches the sites
+            # cache (the title format changed). A complete scope would
+            # retract every operator ingested before.
+            with_site = sum(1 for row in responsibilities if row[0] and row[1])
+            raise CacheUnusable(
+                responsibilities_path,
+                f"holds {len(responsibilities)} responsibility rows and "
+                f"none maps to an operator ({with_site} have a user and a "
+                f"site title, 0 of those titles match the {len(sites)} "
+                "sites in the sites cache); drifted titles or payload",
+                status="endpoint_failed",
+            )
         return records, skipped
 
 

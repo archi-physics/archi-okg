@@ -509,3 +509,31 @@ def test_cric_unexpected_nested_shape_never_crashes(tmp_path, kind, rel, payload
     assert run.health.status == "endpoint_failed"
     assert "unexpected shape" in run.health.reason
     assert source.preflight().status == "endpoint_failed"
+
+
+@pytest.mark.parametrize("rows", [
+    [["fakeuser", None, "Site Admin"], ["other", None, "Site Executive"]],
+    [["fakeuser", "Renamed Fake Site", "Site Admin"]],
+], ids=["all-null-site", "no-title-matches"])
+def test_cric_rows_that_yield_no_operator_are_endpoint_failed(tmp_path, rows):
+    # Re-review of #21: rows present but zero operators claimed a
+    # complete scope and would retract every operator.
+    rel = "data/cric/responsibilities.json"
+    _write_all(tmp_path, CRIC_FILES, {rel: json.dumps({"result": rows}).encode()})
+    source = CRICSource(base=str(tmp_path))
+    _assert_refused(source, tmp_path / rel, "endpoint_failed", "scope_complete")
+    assert "none maps to an operator" in source.preflight().reason
+
+
+def test_cric_rows_with_some_null_sites_still_claim_scope(tmp_path):
+    # Control: real-like rows, some with a null site, one that maps.
+    rel = "data/cric/responsibilities.json"
+    rows = [["fakeuser", "Fake Site", "Site Admin"],
+            ["other", None, "Site Admin"],
+            ["third", "Unknown Title", "Site Executive"]]
+    _write_all(tmp_path, CRIC_FILES, {rel: json.dumps({"result": rows}).encode()})
+    source = CRICSource(base=str(tmp_path))
+    run = source.run("run-1", mode="scope_complete")
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert source.preflight().status == "ok"
