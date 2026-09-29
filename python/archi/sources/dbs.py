@@ -8,8 +8,11 @@ helpers come from :mod:`archi.auth.cache` /
 and the hardcoded ``data/cms/dbs-datasets/records.json`` path is a
 parameter (default keeps the cms layout minus the ``cms/`` segment).
 As in the original the source is optional (``required=False``) and
-offline-only; a missing cache raises ``FileNotFoundError`` from
-``run()`` (only ``preflight`` reports it), matching the original.
+offline-only; a missing, unreadable, truncated or
+empty records cache is ``cache_missing`` with ``completed_scope=False`` from
+both ``preflight`` and ``run()`` (empty-cache-fails-loudly; the original
+raised from ``run()`` on a missing cache and reported an empty one as
+``skipped_optional``, which okg accepts as a complete scope to retract).
 
 Registry-entry template — same three prerequisites as
 ``archi/sources/jira.py``'s template; the ``dataset`` subtype comes
@@ -69,11 +72,14 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
-    load_json,
 )
 from archi.sources._cache_report import (
+    CacheUnusable,
     cache_preflight_result,
     cache_source_health,
+    read_cache_json,
+    unusable_cache_preflight,
+    unusable_cache_run,
 )
 from archi.sources._sdk_adapter import ReaderAdapter
 
@@ -127,10 +133,14 @@ class DBSDatasetSource:
         return (self.records_path,)
 
     def preflight(self, mode: str = "live") -> PreflightResult:
+        # Same verdict run() reaches: a missing, unreadable, truncated
+        # or empty cache is cache_missing, never an empty success.
         try:
-            records = self._records()
-        except FileNotFoundError:
-            records = None
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=False
+            )
         return cache_preflight_result(
             source_name=self.name,
             description="DBS dataset",
@@ -138,10 +148,18 @@ class DBSDatasetSource:
             records=records,
             required=False,
             base=self.base,
+            skipped_count=skipped,
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records, skipped = self._records_with_skips()
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            # An empty cache is a failed fetch, not an empty catalog: a
+            # complete scope over zero records would retract every
+            # record ingested before (okg honours that order for
+            # skipped_optional health too), so report cache_missing.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -172,11 +190,9 @@ class DBSDatasetSource:
         return self._records_with_skips()[0]
 
     def _records_with_skips(self) -> tuple[list[DBSDatasetRecord], int]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of datasets"
-            )
+        payload = read_cache_json(
+            self.records_path, expect=list, base=self.base
+        )
         records: list[DBSDatasetRecord] = []
         skipped = 0
         for item in payload:

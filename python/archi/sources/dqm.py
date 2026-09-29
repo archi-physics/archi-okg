@@ -71,10 +71,14 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
-    load_json,
-    resolve_repo_path,
 )
-from archi.sources._cache_report import skipped_items_status
+from archi.sources._cache_report import (
+    CacheUnusable,
+    read_cache_json,
+    skipped_items_status,
+    unusable_cache_preflight,
+    unusable_cache_run,
+)
 from archi.sources._sdk_adapter import ReaderAdapter
 
 _GROUP_RE = re.compile(r"Cert_((?:Collisions|Cosmics|Commissioning)\d+)")
@@ -128,31 +132,38 @@ class DQMSource:
         return (self.records_path,)
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        path = resolve_repo_path(self.records_path, base=self.base)
-        if not path.is_file():
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=True,
-                cache_path=str(path),
-                reason="DQM certification cache file is missing",
-                checked_at=_checked_at(),
+        # Same verdict run() reaches for the same cache.
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=True
             )
-        records = self._records()
+        status, reason = skipped_items_status(
+            status="ok",
+            reason="local DQM certification cache present",
+            record_count=len(records),
+            skipped_count=skipped,
+        )
         return PreflightResult(
             source_name=self.name,
-            status="ok",
+            status=status,
             mode="cache",
             required=True,
             record_count=len(records),
             content_hash=content_hash(self.cache_paths, base=self.base),
-            reason="local DQM certification cache present",
+            reason=reason,
             checked_at=_checked_at(),
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records, skipped = self._records_with_skips()
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            # A missing, truncated or empty cache is a failed fetch,
+            # never an empty catalog: a complete scope over zero
+            # records would retract every record ingested before.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -187,11 +198,9 @@ class DQMSource:
         return self._records_with_skips()[0]
 
     def _records_with_skips(self) -> tuple[list[DQMRecord], int]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of DQM records"
-            )
+        payload = read_cache_json(
+            self.records_path, expect=list, base=self.base
+        )
         records: list[DQMRecord] = []
         skipped = 0
         for item in payload:

@@ -13,6 +13,17 @@ verbatim; the only changes:
   keep the cms layout minus the ``cms/`` segment (``data/cric/...``,
   ``data/cric-core/...``) so the registry template below matches the
   reference-target paths already documented in jira.py/docs.py.
+- 2026-09 (empty-cache-fails-loudly): every cache file is read with
+  :func:`archi.sources._cache_report.read_cache_json`. A missing,
+  unreadable, zero-byte, truncated or empty cache file (``{}``, or a
+  responsibilities payload whose ``result`` list is empty) is
+  ``cache_missing``; valid JSON of the wrong shape (a list where an
+  object belongs, a responsibilities payload without ``result``) is
+  ``endpoint_failed``. Either way ``run()`` emits nothing and claims
+  no complete scope, and ``preflight()`` reaches the same verdict. The
+  originals claimed a complete scope over ``{}`` caches (retracting the
+  whole topology) and crashed on a ``[]`` cache. A CRIC-core
+  federations cache with no CMS federation is ``endpoint_failed`` too.
 
 Registry-entry templates — same three prerequisites as
 ``archi/sources/jira.py``'s template (compose the deployment schema
@@ -117,6 +128,7 @@ and ``schemas/bridges/``; ``output_scope_summary`` must accompany
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Literal
 
@@ -131,8 +143,13 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
-    load_json,
     resolve_repo_path,
+)
+from archi.sources._cache_report import (
+    CacheUnusable,
+    read_cache_json,
+    unusable_cache_preflight,
+    unusable_cache_run,
 )
 from archi.sources._sdk_adapter import ReaderAdapter
 
@@ -206,31 +223,12 @@ class CRICSource:
         )
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        missing = [
-            str(resolve_repo_path(p, base=self.base))
-            for p in self.cache_paths
-            if not resolve_repo_path(p, base=self.base).is_file()
-        ]
-        if missing:
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=True,
-                cache_path=", ".join(missing),
-                reason="one or more CRIC cache files are missing",
-                checked_at=_checked_at(),
-            )
+        # Same verdict run() reaches for the same caches.
         try:
             records = self._records()
-        except ValueError as exc:
-            return PreflightResult(
-                source_name=self.name,
-                status="endpoint_failed",
-                mode="cache",
-                required=True,
-                reason=str(exc),
-                checked_at=_checked_at(),
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=True
             )
         return PreflightResult(
             source_name=self.name,
@@ -244,7 +242,13 @@ class CRICSource:
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records = self._records()
+        try:
+            records = self._records()
+        except CacheUnusable as exc:
+            # A missing, truncated, drifted or empty cache file is a
+            # failed fetch, never an empty topology: a complete scope
+            # over it would retract every site, endpoint and operator.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -271,15 +275,45 @@ class CRICSource:
         )
 
     def _records(self) -> list[CRICRecord]:
+        _raise_if_missing(self.cache_paths, base=self.base, what="CRIC")
         return _build_records(
-            sites=load_json(self.sites_path, base=self.base),
-            storage_units=load_json(self.storage_units_path, base=self.base),
-            compute_units=load_json(self.compute_units_path, base=self.base),
-            facilities=load_json(self.facilities_path, base=self.base),
+            sites=_read_dict(self.sites_path, base=self.base),
+            storage_units=_read_dict(self.storage_units_path, base=self.base),
+            compute_units=_read_dict(self.compute_units_path, base=self.base),
+            facilities=_read_dict(self.facilities_path, base=self.base),
             responsibilities=_responsibilities_result(
-                load_json(self.responsibilities_path, base=self.base),
-                self.responsibilities_path,
+                read_cache_json(
+                    self.responsibilities_path, expect=dict, base=self.base
+                ),
+                resolve_repo_path(self.responsibilities_path, base=self.base),
             ),
+        )
+
+
+def _read_dict(path: str, *, base: str | None) -> dict[str, Any]:
+    return read_cache_json(path, expect=dict, base=base)
+
+
+def _raise_if_missing(
+    paths: tuple[str, ...], *, base: str | None, what: str
+) -> None:
+    """Name every missing cache file at once, not just the first."""
+    missing = [
+        resolve_repo_path(p, base=base)
+        for p in paths
+        if not resolve_repo_path(p, base=base).is_file()
+    ]
+    if missing:
+        others = ""
+        if len(missing) > 1:
+            others = " (also missing: " + ", ".join(
+                str(p) for p in missing[1:]
+            ) + ")"
+        raise CacheUnusable(
+            missing[0],
+            f"is missing{others}; {len(missing)} of {len(paths)} "
+            f"{what} cache files are missing",
+            status="cache_missing",
         )
 
 
@@ -287,25 +321,37 @@ def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _responsibilities_result(payload: Any, path: str) -> list[list[Any]]:
-    """Extract the ``result`` rows, failing loudly on schema drift.
+def _responsibilities_result(payload: Any, path: Path) -> list[list[Any]]:
+    """Extract the ``result`` rows, failing loudly on drift or emptiness.
 
     The former ``.get("result", [])`` default silently read an
     error-shaped or drifted payload as "no responsibilities", which a
     completed-scope run would then commit by retracting every operator
-    record. A payload without a ``result`` list must abort the run
-    instead of emptying it.
+    record. A payload without a ``result`` list refuses the run
+    (``endpoint_failed``); an empty ``result`` list refuses it as an
+    empty cache (``cache_missing``).
     """
     if not isinstance(payload, dict) or "result" not in payload:
-        raise ValueError(
-            f"{path}: expected a dict with a 'result' list of "
-            "responsibility rows; refusing to treat a drifted or "
-            "error-shaped payload as zero responsibilities"
+        raise CacheUnusable(
+            path,
+            "holds no 'result' list of responsibility rows; refusing to "
+            "treat a drifted or error-shaped payload as zero "
+            "responsibilities",
+            status="endpoint_failed",
         )
     result = payload["result"]
     if not isinstance(result, list):
-        raise ValueError(
-            f"{path}: 'result' must be a list of responsibility rows"
+        raise CacheUnusable(
+            path,
+            "has a 'result' that is not a list of responsibility rows",
+            status="endpoint_failed",
+        )
+    if not result:
+        raise CacheUnusable(
+            path,
+            "holds an empty 'result' list of responsibilities; a failed "
+            "or unsynced fetch, not zero operators",
+            status="cache_missing",
         )
     return result
 
@@ -556,22 +602,13 @@ class CRICCoreSource:
         )
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        missing = [
-            str(resolve_repo_path(p, base=self.base))
-            for p in self.cache_paths
-            if not resolve_repo_path(p, base=self.base).is_file()
-        ]
-        if missing:
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=True,
-                cache_path=", ".join(missing),
-                reason="one or more CRIC core cache files are missing",
-                checked_at=_checked_at(),
+        # Same verdict run() reaches for the same caches.
+        try:
+            records = self._records()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=True
             )
-        records = self._records()
         return PreflightResult(
             source_name=self.name,
             status="ok",
@@ -584,7 +621,13 @@ class CRICCoreSource:
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records = self._records()
+        try:
+            records = self._records()
+        except CacheUnusable as exc:
+            # A missing, truncated, drifted or empty cache file is a
+            # failed fetch: a complete scope over it would retract
+            # every service and federation.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -611,11 +654,26 @@ class CRICCoreSource:
         )
 
     def _records(self) -> list[CRICCoreRecord]:
-        return _build_core_records(
-            services=load_json(self.services_path, base=self.base),
-            rcsites=load_json(self.rcsites_path, base=self.base),
-            federations=load_json(self.federations_path, base=self.base),
+        _raise_if_missing(
+            self.cache_paths, base=self.base, what="CRIC core"
         )
+        federations = _read_dict(self.federations_path, base=self.base)
+        records = _build_core_records(
+            services=_read_dict(self.services_path, base=self.base),
+            rcsites=_read_dict(self.rcsites_path, base=self.base),
+            federations=federations,
+        )
+        if not any(record.kind == "federation" for record in records):
+            # Every federation was dropped as non-CMS. The CMS VO does
+            # not leave WLCG; the cache holds the wrong VO or drifted,
+            # and a complete scope would retract every federation.
+            raise CacheUnusable(
+                resolve_repo_path(self.federations_path, base=self.base),
+                f"lists {len(federations)} federations and none serves "
+                "CMS (no 'cms' VO or pledge); drifted or wrong-VO payload",
+                status="endpoint_failed",
+            )
+        return records
 
 
 def _build_rcsite_to_cms_sites(

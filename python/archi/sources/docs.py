@@ -41,6 +41,16 @@ Changes from the original:
   previously mis-ingested binary is then correctly retracted).
 - ``DocumentationSource.run`` reports ``cache_missing`` health when the
   records cache is absent instead of raising from ``load_json``.
+- 2026-09 (empty-cache-fails-loudly): ``DocumentationSource`` also
+  reports ``cache_missing`` (no facts, no complete scope) for a records
+  cache that is unreadable, zero bytes, truncated JSON or an empty
+  list, and ``endpoint_failed`` for a non-list payload; items that are
+  not objects or have no ``url`` are skipped per item but stop the run
+  claiming a complete scope (duplicate URLs are deduplication, not
+  skips). ``preflight()`` reaches the same verdict. An
+  ``SSOCookieDocsSource`` crawl that yields zero pages is
+  ``endpoint_failed`` with no complete scope instead of an ``ok``
+  empty scope that would retract every page.
 - The reference-target caches (sites / releases / jira / services) are
   optional (default ``None`` -> no reference edges of that kind). As in
   the original, a *configured* sites/releases/services path whose file
@@ -285,6 +295,13 @@ from okg.deployment import (
     ConnectorRun,
 )
 
+from archi.sources._cache_report import (
+    CacheUnusable,
+    read_cache_json,
+    skipped_items_status,
+    unusable_cache_preflight,
+    unusable_cache_run,
+)
 from archi.sources._sdk_adapter import ReaderAdapter
 from archi.auth.cache import (
     cache_or_forced_live_change_probe,
@@ -384,48 +401,38 @@ class DocumentationSource:
         return (self.records_path,)
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        path = resolve_repo_path(self.records_path, base=self.base)
-        if not path.is_file():
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=self.required,
-                cache_path=str(path),
-                reason=f"{self.name} records cache file is missing",
-                checked_at=_checked_at(),
+        # Same verdict run() reaches for the same cache.
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=self.required
             )
-        records = self._records()
+        status, reason = skipped_items_status(
+            status="ok",
+            reason=f"local {self.name} documentation cache present",
+            record_count=len(records),
+            skipped_count=skipped,
+        )
         return PreflightResult(
             source_name=self.name,
-            status="ok",
+            status=status,
             mode="cache",
             required=self.required,
             record_count=len(records),
             content_hash=content_hash(self.cache_paths, base=self.base),
-            reason=f"local {self.name} documentation cache present",
+            reason=reason,
             checked_at=_checked_at(),
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        path = resolve_repo_path(self.records_path, base=self.base)
-        if not path.is_file():
-            return ConnectorRun(
-                facts=(),
-                completed_scope=False,
-                run_mode=mode,
-                health=ConnectorHealth(
-                    status="cache_missing",
-                    mode="cache",
-                    cache_path=str(path),
-                    reason=(
-                        f"{self.name} records cache is absent; "
-                        "no facts emitted"
-                    ),
-                    checked_at=_checked_at(),
-                ),
-            )
-        records = self._records()
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            # Missing, unreadable, truncated or empty: a failed crawl,
+            # never an empty site. A complete scope over zero pages
+            # would retract every page ingested before.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -442,16 +449,24 @@ class DocumentationSource:
                 chunker_name=self.chunker_name,
             )
 
+        status, reason = skipped_items_status(
+            status="ok",
+            reason=f"local {self.name} documentation cache used",
+            record_count=len(records),
+            skipped_count=skipped,
+        )
         return ConnectorRun(
             facts=_facts(),
-            completed_scope=(mode in {"scope_complete", "reconcile"}),
+            completed_scope=(
+                mode in {"scope_complete", "reconcile"} and not skipped
+            ),
             run_mode=mode,
             health=ConnectorHealth(
-                status="ok",
+                status=status,
                 mode="cache",
                 record_count=len(records),
                 content_hash=revision["content_hash"],
-                reason=f"local {self.name} documentation cache used",
+                reason=reason,
             ),
         )
 
@@ -465,12 +480,10 @@ class DocumentationSource:
             base=self.base,
         )
 
-    def _records(self) -> list[DocumentationRecord]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of docs"
-            )
+    def _records_with_skips(self) -> tuple[list[DocumentationRecord], int]:
+        payload = read_cache_json(
+            self.records_path, expect=list, base=self.base
+        )
         return _records_from_payload(payload)
 
 
@@ -635,6 +648,32 @@ class SSOCookieDocsSource(DocumentationSource):
             skip_note = (
                 f"; skipped {len(crawl.skipped_non_html)} non-HTML "
                 "sitemap entries (excluded from scope by design)"
+            )
+        if not records and not crawl.failed_urls:
+            # A sitemap crawl that yields no page (an empty sitemap, an
+            # error page served as the sitemap, every entry non-HTML or
+            # blank) is a failed crawl, never an empty site: a complete
+            # scope over zero pages would retract every page ingested
+            # before.
+            return ConnectorRun(
+                facts=(),
+                completed_scope=False,
+                run_mode=mode,
+                health=ConnectorHealth(
+                    status="endpoint_failed",
+                    mode="live",
+                    credential_refs=(self.cookie_file_env,),
+                    record_count=0,
+                    content_hash=record_hash,
+                    endpoint=self.sitemap_url,
+                    reason=(
+                        f"sitemap {self.sitemap_url} yielded no "
+                        f"documentation pages ({crawl.total_urls} URLs "
+                        f"crawled{truncation_note}{skip_note}); no facts "
+                        "emitted and no complete scope claimed"
+                    ),
+                    checked_at=_checked_at(),
+                ),
             )
         if crawl.failed_urls:
             # A partially failed crawl must never claim a complete scope
@@ -834,14 +873,23 @@ def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _records_from_payload(payload: list[Any]) -> list[DocumentationRecord]:
+def _records_from_payload(
+    payload: list[Any],
+) -> tuple[list[DocumentationRecord], int]:
+    """(records, skipped item count). A repeated URL is deduplication,
+    not a skip; an item that is not an object or has no URL is."""
     records: list[DocumentationRecord] = []
     seen_urls: set[str] = set()
+    skipped = 0
     for item in payload:
         if not isinstance(item, dict):
+            skipped += 1
             continue
         url = _pg_text(str(item.get("url") or ""))
-        if not url or url in seen_urls:
+        if not url:
+            skipped += 1
+            continue
+        if url in seen_urls:
             continue
         seen_urls.add(url)
         records.append(
@@ -858,7 +906,7 @@ def _records_from_payload(payload: list[Any]) -> list[DocumentationRecord]:
                 ),
             )
         )
-    return records
+    return records, skipped
 
 
 def _facts_for_records(

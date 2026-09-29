@@ -47,6 +47,18 @@ bounces are detected with docs.py's ``_login_bounce`` (real SSO final
 host, or redirect + login-looking body — never a mere ``/login``
 substring in a page's own path).
 
+EOS snapshot reading (empty-cache-fails-loudly, 2026-09): the snapshot
+walk skips hidden files and folders (``.TopicA.txt``, ``.sync/...`` —
+sync-tool metadata, never TWiki topics). A snapshot root that cannot be
+listed is ``cache_missing`` ("could not be read"), never an empty wiki.
+A folder or topic file that cannot be read, or a zero-byte topic file
+(an interrupted sync of that topic), is left out and the run claims no
+complete scope (``endpoint_failed``, with counts and samples), so the
+last good copy of those pages is kept rather than blanked or retracted.
+``preflight()`` reaches the same verdict as ``run()`` for every such
+case and for missing seeds; the one thing it does not do is apply the
+optional physics filter, which needs every topic parsed.
+
 Parity wart kept on purpose (as in archi/sources/jira.py): chunk ids
 hash their input with a literal backslash-zero separator (the cms
 original's ``f'..\\0..'`` inside an f-string), not the NUL byte docs.py
@@ -308,6 +320,33 @@ class _EOSSeedWalk:
 
     records: tuple[TwikiRecord, ...]
     missing_seeds: tuple[str, ...]
+    unreadable: tuple[str, ...] = ()
+    empty: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _SnapshotListing:
+    """Whole-tree listing of an EOS snapshot.
+
+    ``paths`` are the readable, non-empty real topic files (sorted,
+    capped at ``max_files``); ``unreadable`` are folders or files the
+    walk could not read; ``empty`` are zero-byte topic files. Both are
+    snapshot-relative paths.
+    """
+
+    paths: tuple[Path, ...]
+    unreadable: tuple[str, ...] = ()
+    empty: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _SnapshotRead:
+    """What run() read from the snapshot for the configured scope."""
+
+    records: list[TwikiRecord]
+    missing_seeds: tuple[str, ...] = ()
+    unreadable: tuple[str, ...] = ()
+    empty: tuple[str, ...] = ()
 
 
 class TwikiEOSSource:
@@ -466,30 +505,8 @@ class TwikiEOSSource:
                 if os.environ.get(self.eos_root_env) else
                 ()
             )
-            if self.seed_topics is None:
-                files = self._paths()
-                reason = "local TWiki EOS snapshot directory present"
-            else:
-                # Seeded scope: count/hash the seeded closure, not the
-                # whole tree, so preflight describes what run() emits.
-                walk = self._seed_walk(root)
-                files = [root / record.source_path for record in walk.records]
-                reason = (
-                    f"local TWiki EOS snapshot directory present; seeded "
-                    f"closure: {len(files)} topics from "
-                    f"{len(self.seed_topics)} seeds at max depth "
-                    f"{self.max_depth}"
-                )
-                if walk.missing_seeds:
-                    reason += (
-                        f" ({len(walk.missing_seeds)} seeds missing from "
-                        "the snapshot)"
-                    )
-            if not files and not (
-                self.seed_topics is not None and walk.missing_seeds
-            ):
-                # Same verdict run() reaches: a present but empty
-                # snapshot is a missing cache, not an empty wiki.
+            unreadable_root = _unreadable_dir_reason(root)
+            if unreadable_root is not None:
                 return PreflightResult(
                     source_name=self.name,
                     status="cache_missing",
@@ -498,7 +515,53 @@ class TwikiEOSSource:
                     credential_refs=credential_refs,
                     cache_path=str(root),
                     record_count=0,
-                    reason=self._empty_snapshot_reason(root),
+                    reason=unreadable_root,
+                    checked_at=_checked_at(),
+                )
+            if self.seed_topics is None:
+                listing = self._listing()
+                files = list(listing.paths)
+                missing_seeds: tuple[str, ...] = ()
+                unreadable, empty = listing.unreadable, listing.empty
+                reason = "local TWiki EOS snapshot directory present"
+            else:
+                # Seeded scope: count/hash the seeded closure, not the
+                # whole tree, so preflight describes what run() emits.
+                walk = self._seed_walk(root)
+                files = [root / record.source_path for record in walk.records]
+                missing_seeds = walk.missing_seeds
+                unreadable, empty = walk.unreadable, walk.empty
+                reason = (
+                    f"local TWiki EOS snapshot directory present; seeded "
+                    f"closure: {len(files)} topics from "
+                    f"{len(self.seed_topics)} seeds at max depth "
+                    f"{self.max_depth}"
+                )
+            # The verdict run() reaches for the same snapshot, from the
+            # same helper: empty, all seeds missing -> cache_missing;
+            # some seeds missing, unreadable or zero-byte topics ->
+            # endpoint_failed. (run() alone applies the physics filter.)
+            verdict = self._snapshot_verdict(
+                root,
+                found=len(files),
+                missing_seeds=missing_seeds,
+                unreadable=unreadable,
+                empty=empty,
+            )
+            if verdict is not None:
+                status, problem = verdict
+                return PreflightResult(
+                    source_name=self.name,
+                    status=status,
+                    mode="filesystem",
+                    required=self.required,
+                    credential_refs=credential_refs,
+                    cache_path=str(root),
+                    record_count=len(files),
+                    content_hash=(
+                        _listing_hash(root, files) if files else None
+                    ),
+                    reason=problem,
                     checked_at=_checked_at(),
                 )
             return PreflightResult(
@@ -521,7 +584,7 @@ class TwikiEOSSource:
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        missing_seeds: tuple[str, ...] = ()
+        verdict: tuple[str, str] | None = None
         if self._records is not None:
             records = self._physics_scoped(self._records)
         else:
@@ -547,16 +610,10 @@ class TwikiEOSSource:
                         credential_refs=preflight.credential_refs,
                     ),
                 )
-            records, missing_seeds = self._records_from_root(root)
-            if not records and not missing_seeds:
-                # The directory is there but holds no topic (a failed
-                # sync, an empty mount point). That is a missing cache,
-                # never an empty wiki: with completed_scope=True the
-                # registry's missing_from_completed_scope semantics
-                # would retract every page ingested before. Checked
-                # before the physics filter, which has its own guard
-                # below. All-seeds-missing is reported by the seed
-                # branch further down, with the seed names.
+            unreadable_root = _unreadable_dir_reason(root)
+            if unreadable_root is not None:
+                # A root that exists but cannot be listed (permissions,
+                # a stale mount) is a missing cache, not an empty wiki.
                 return ConnectorRun(
                     facts=(),
                     completed_scope=False,
@@ -568,8 +625,43 @@ class TwikiEOSSource:
                         cache_path=str(root),
                         record_count=0,
                         reason=(
-                            f"{self._empty_snapshot_reason(root)}; no "
-                            "facts emitted and no complete scope claimed"
+                            f"{unreadable_root}; no facts emitted and no "
+                            "complete scope claimed"
+                        ),
+                        checked_at=_checked_at(),
+                    ),
+                )
+            read = self._records_from_root(root)
+            records = read.records
+            verdict = self._snapshot_verdict(
+                root,
+                found=len(records),
+                missing_seeds=read.missing_seeds,
+                unreadable=read.unreadable,
+                empty=read.empty,
+            )
+            if verdict is not None and not records:
+                # Nothing readable: a failed sync, an empty or
+                # unreadable mount, every seed missing. That is a
+                # missing cache, never an empty wiki — with
+                # completed_scope=True the registry's
+                # missing_from_completed_scope semantics would retract
+                # every page ingested before. Checked before the
+                # physics filter, which has its own guard below.
+                status, problem = verdict
+                return ConnectorRun(
+                    facts=(),
+                    completed_scope=False,
+                    run_mode=mode,
+                    health=ConnectorHealth(
+                        status=status,
+                        mode="filesystem",
+                        credential_refs=(self.eos_root_env,),
+                        cache_path=str(root),
+                        record_count=0,
+                        reason=(
+                            f"{problem}; no facts emitted and no complete "
+                            "scope claimed"
                         ),
                         checked_at=_checked_at(),
                     ),
@@ -598,32 +690,27 @@ class TwikiEOSSource:
                 chunker_name=self.chunker_name,
             )
 
-        if missing_seeds:
-            # A configured seed without a snapshot file is a scope
-            # failure, never a silent skip: with completed_scope=True
-            # the registry's missing_from_completed_scope semantics
-            # would retract every topic under the absent seed. (Only
-            # operator-configured seeds fail loudly; followed-link
-            # targets missing from the snapshot stay silently skipped —
-            # wisdqm-parity behavior.)
-            total = len(self.seed_topics or ())
-            samples = ", ".join(missing_seeds[:3])
-            all_missing = len(missing_seeds) == total
+        if verdict is not None:
+            # Part of the scope was not read: a configured seed without
+            # a snapshot file, an unreadable folder or topic file, a
+            # zero-byte topic. Emit what was read, never claim a
+            # complete scope — it would retract every page the run
+            # failed to read. (Only operator-configured seeds count as
+            # missing; followed-link targets missing from the snapshot
+            # stay silently skipped — wisdqm-parity behavior.)
+            status, problem = verdict
             return ConnectorRun(
                 facts=_facts(),
                 completed_scope=False,
                 run_mode=mode,
                 health=ConnectorHealth(
-                    status="cache_missing" if all_missing else "endpoint_failed",
+                    status=status,
                     mode="filesystem",
                     credential_refs=(self.eos_root_env,),
+                    cache_path=str(Path(self.eos_root).expanduser()),
                     record_count=len(records),
                     content_hash=content_hash,
-                    reason=(
-                        f"{len(missing_seeds)}/{total} configured seed "
-                        f"topics missing from the EOS snapshot, e.g. "
-                        f"{samples}; no complete scope claimed"
-                    ),
+                    reason=problem,
                 ),
             )
         report = self.last_physics_report if self.physics_filter else None
@@ -676,36 +763,137 @@ class TwikiEOSSource:
         if self.seed_topics is None:
             return (
                 f"TWiki EOS snapshot directory {root} is present but "
-                "holds no TWiki topics"
+                "holds no TWiki topics it could read"
             )
         return (
             f"TWiki EOS snapshot directory {root} is present but its "
             f"{len(self.seed_topics)} configured seed topics yield no "
-            "TWiki topics"
+            "TWiki topics it could read"
         )
 
+    def _snapshot_verdict(
+        self,
+        root: Path,
+        *,
+        found: int,
+        missing_seeds: tuple[str, ...],
+        unreadable: tuple[str, ...],
+        empty: tuple[str, ...],
+    ) -> tuple[str, str] | None:
+        """(status, reason) when the snapshot read cannot claim its
+        scope, else None. Shared by preflight() and run() so the two
+        report the same verdict for the same snapshot.
+
+        Zero topics read is ``cache_missing``; topics read while some
+        of the scope was not (a missing seed, an unreadable folder or
+        file, a zero-byte topic) is ``endpoint_failed`` — the closed
+        status vocabulary has no 'degraded'.
+        """
+        problems: list[str] = []
+        if missing_seeds:
+            total = len(self.seed_topics or ())
+            problems.append(
+                f"{len(missing_seeds)}/{total} configured seed topics "
+                "missing from the EOS snapshot, e.g. "
+                f"{', '.join(missing_seeds[:3])}"
+            )
+        if unreadable:
+            problems.append(
+                f"{len(unreadable)} snapshot folders or topic files could "
+                f"not be read, e.g. {', '.join(unreadable[:3])}"
+            )
+        if empty:
+            problems.append(
+                f"{len(empty)} topic files are zero bytes (an "
+                f"interrupted sync), e.g. {', '.join(empty[:3])}"
+            )
+        if not found:
+            reason = self._empty_snapshot_reason(root)
+            if problems:
+                reason += "; " + "; ".join(problems)
+            return ("cache_missing", reason)
+        if problems:
+            return (
+                "endpoint_failed",
+                f"{'; '.join(problems)}; {found} readable topics emitted, "
+                "no complete scope claimed",
+            )
+        return None
+
     def _paths(self) -> list[Path]:
+        return list(self._listing().paths)
+
+    def _listing(self) -> _SnapshotListing:
+        """Walk the whole snapshot like ``rglob("*.txt")`` did, but see
+        what rglob hid: a folder it could not list, a topic file it
+        could not read, a zero-byte topic. Hidden files and folders
+        (sync-tool metadata such as ``.sync/``) are never topics.
+        Symlinked folders are not followed, as with rglob."""
         root = Path(self.eos_root).expanduser()
-        paths = [
-            path for path in root.rglob("*.txt")
-            if path.is_file() and is_real_page(path.name, self.skip_patterns)
-        ]
+        unreadable: list[str] = []
+        empty: list[str] = []
+        paths: list[Path] = []
+
+        def _on_error(exc: OSError) -> None:
+            unreadable.append(_relative(root, exc.filename))
+
+        for dirpath, dirnames, filenames in os.walk(
+            root, onerror=_on_error, followlinks=False
+        ):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            here = Path(dirpath)
+            for filename in filenames:
+                if filename.startswith(".") or not filename.endswith(".txt"):
+                    continue
+                path = here / filename
+                if not is_real_page(path.name, self.skip_patterns):
+                    continue
+                rel = path.relative_to(root).as_posix()
+                try:
+                    if not path.is_file():
+                        continue
+                    size = path.stat().st_size
+                except OSError:
+                    unreadable.append(rel)
+                    continue
+                if not os.access(path, os.R_OK):
+                    unreadable.append(rel)
+                elif size == 0:
+                    empty.append(rel)
+                else:
+                    paths.append(path)
         paths.sort(key=lambda p: p.relative_to(root).as_posix())
         if self.max_files is not None:
-            return paths[:self.max_files]
-        return paths
+            paths = paths[:self.max_files]
+        return _SnapshotListing(
+            paths=tuple(paths),
+            unreadable=tuple(sorted(unreadable)),
+            empty=tuple(sorted(empty)),
+        )
 
-    def _records_from_root(
-        self, root: Path
-    ) -> tuple[list[TwikiRecord], tuple[str, ...]]:
-        """(records, missing seed page ids) for the configured scope."""
+    def _records_from_root(self, root: Path) -> _SnapshotRead:
+        """Records for the configured scope, plus what was not read."""
         if self.seed_topics is None:
-            records = [
-                self._record_for_path(root, path) for path in self._paths()
-            ]
-            return records, ()
+            listing = self._listing()
+            records: list[TwikiRecord] = []
+            unreadable = list(listing.unreadable)
+            for path in listing.paths:
+                try:
+                    records.append(self._record_for_path(root, path))
+                except OSError:
+                    unreadable.append(path.relative_to(root).as_posix())
+            return _SnapshotRead(
+                records=records,
+                unreadable=tuple(sorted(unreadable)),
+                empty=listing.empty,
+            )
         walk = self._seed_walk(root)
-        return list(walk.records), walk.missing_seeds
+        return _SnapshotRead(
+            records=list(walk.records),
+            missing_seeds=walk.missing_seeds,
+            unreadable=walk.unreadable,
+            empty=walk.empty,
+        )
 
     def _physics_scoped(self, records: list[TwikiRecord]) -> list[TwikiRecord]:
         """Narrow the records to physics when the deployment asked for it.
@@ -737,6 +925,8 @@ class TwikiEOSSource:
         seen: set[str] = set()
         records: list[TwikiRecord] = []
         missing_seeds: list[str] = []
+        unreadable: list[str] = []
+        empty: list[str] = []
         while queue:
             page_id, depth = queue.popleft()
             if not page_id or page_id in seen:
@@ -749,7 +939,15 @@ class TwikiEOSSource:
                 continue
             if not is_real_page(path.name, self.skip_patterns):
                 continue
-            record = self._record_for_path(root, path)
+            rel = path.relative_to(root).as_posix()
+            try:
+                if path.stat().st_size == 0:
+                    empty.append(rel)
+                    continue
+                record = self._record_for_path(root, path)
+            except OSError:
+                unreadable.append(rel)
+                continue
             records.append(record)
             if depth >= self.max_depth:
                 continue
@@ -760,6 +958,8 @@ class TwikiEOSSource:
         return _EOSSeedWalk(
             records=tuple(records),
             missing_seeds=tuple(missing_seeds),
+            unreadable=tuple(sorted(unreadable)),
+            empty=tuple(sorted(empty)),
         )
 
     def _seed_page_id(self, seed: str) -> str:
@@ -788,6 +988,10 @@ class TwikiEOSSource:
             if not page_id.startswith(f"{self.web_root}/"):
                 return None
             rel = page_id[len(self.web_root) + 1:]
+        if any(part.startswith(".") for part in rel.split("/")):
+            # Hidden files and folders are sync-tool metadata, never
+            # topics (see _listing).
+            return None
         path = root / f"{rel}.txt"
         return path if path.is_file() else None
 
@@ -1223,6 +1427,28 @@ def _emit_targets(source_class: type) -> list[Any]:
     Fingerprinting both modules makes such a change re-emit once.
     """
     return [source_class, sys.modules[__name__], _anonymizer]
+
+
+def _unreadable_dir_reason(root: Path) -> str | None:
+    """Why *root* cannot be listed, or None when it can."""
+    try:
+        with os.scandir(root):
+            pass
+    except OSError as exc:
+        return (
+            f"TWiki EOS snapshot directory {root} is present but could "
+            f"not be read ({exc.strerror or exc})"
+        )
+    return None
+
+
+def _relative(root: Path, filename: Any) -> str:
+    if not filename:
+        return str(root)
+    try:
+        return Path(filename).relative_to(root).as_posix() or "."
+    except ValueError:
+        return str(filename)
 
 
 def _checked_at() -> str:

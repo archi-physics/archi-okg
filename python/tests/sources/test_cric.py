@@ -120,8 +120,11 @@ def test_drifted_responsibilities_payload_fails_loud(tmp_path):
     (tmp_path / "data" / "cric" / "responsibilities.json").write_text(
         json.dumps({"error": "auth required"})
     )
-    with pytest.raises(ValueError, match="responsibilit"):
-        source.run("run-1", mode="scope_complete")
+    run = source.run("run-1", mode="scope_complete")
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert "responsibilit" in run.health.reason
     result = source.preflight()
     assert result.status == "endpoint_failed"
     assert "result" in result.reason
