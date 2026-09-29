@@ -15,6 +15,23 @@ raised from ``run()`` on a missing cache and reported an empty one as
 ``depends_on`` -> ``cmssw_release`` edge is emitted whether or not that
 release node exists (the original did not check).
 
+The cache is either a plain list of workflow records or the WMStats
+collection shape (wmstats-collection-shape)::
+
+    {"cutoff_utc": "...",
+     "status_payloads": {"<status>": {"result": [{"<name>": {record}}]}}}
+
+one WMStats API answer per workflow status. Its records are flattened in
+file order. A workflow name seen twice is skipped and counted, so the run
+emits it once and claims no complete scope: the collector already merges
+duplicates (``authority.json`` ``deliberate_merge_count``), so a repeat
+means the export contradicts itself. No workflow at all under
+``status_payloads`` is ``cache_missing``; an object without a
+``status_payloads`` object, or a status without a ``result`` list, is
+``endpoint_failed``. When ``authority.json`` sits next to the records file,
+the number of records in the file must equal its ``record_count``, else
+``endpoint_failed``.
+
 Registry-entry template — same three prerequisites as
 ``archi/sources/jira.py``'s template; ``workflow`` and
 ``cmssw_release`` ship in ``archi/schemas/operations.yaml``;
@@ -64,7 +81,9 @@ Registry-entry template — same three prerequisites as
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
 
 from okg.deployment import (
@@ -77,6 +96,7 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
+    resolve_repo_path,
 )
 from archi.sources._cache_report import (
     CacheUnusable,
@@ -195,11 +215,15 @@ class WMStatsWorkflowSource:
 
     def _records_with_skips(self) -> tuple[list[WorkflowRecord], int]:
         payload = read_cache_json(
-            self.records_path, expect=list, base=self.base
+            self.records_path, expect=(list, dict), base=self.base
         )
+        path = resolve_repo_path(self.records_path, base=self.base)
+        items = _workflow_items(payload, path)
+        _check_authority_count(path, len(items))
         records: list[WorkflowRecord] = []
+        seen: set[str] = set()
         skipped = 0
-        for item in payload:
+        for item in items:
             if not isinstance(item, dict):
                 skipped += 1
                 continue
@@ -209,9 +233,10 @@ class WMStatsWorkflowSource:
                 or item.get("RequestName")
                 or ""
             ).strip()
-            if not name:
+            if not name or name in seen:
                 skipped += 1
                 continue
+            seen.add(name)
             output = (
                 item.get("output_datasets")
                 or item.get("OutputDatasets")
@@ -257,6 +282,63 @@ class WMStatsWorkflowSource:
                 updated_at=str(item.get("updated_at") or ""),
             ))
         return records, skipped
+
+
+def _workflow_items(payload: Any, path: Path) -> list[Any]:
+    """The workflow records of either cache shape, in file order."""
+    if isinstance(payload, list):
+        return payload
+    by_status = payload.get("status_payloads")
+    if not isinstance(by_status, dict):
+        raise CacheUnusable(
+            path,
+            "holds a JSON object without a status_payloads object "
+            "(drifted or error-shaped payload)",
+            status="endpoint_failed",
+        )
+    items: list[Any] = []
+    for status, body in by_status.items():
+        result = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(result, list):
+            raise CacheUnusable(
+                path,
+                f"status_payloads[{status!r}] has no result list "
+                "(drifted or error-shaped payload)",
+                status="endpoint_failed",
+            )
+        for entry in result:
+            # Each result entry maps workflow name -> record.
+            items.extend(entry.values() if isinstance(entry, dict) else [entry])
+    if not items:
+        raise CacheUnusable(
+            path,
+            "holds no workflow under status_payloads; a failed or "
+            "unsynced fetch, not an empty catalog",
+            status="cache_missing",
+        )
+    return items
+
+
+def _check_authority_count(path: Path, count: int) -> None:
+    """The collector's ``authority.json`` record count, when it is there."""
+    authority = path.parent / "authority.json"
+    if not authority.is_file():
+        return
+    try:
+        expected = json.loads(authority.read_text(encoding="utf-8"))["record_count"]
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise CacheUnusable(
+            authority,
+            f"has no readable record_count ({exc.__class__.__name__})",
+            status="endpoint_failed",
+        ) from exc
+    if expected != count:
+        raise CacheUnusable(
+            path,
+            f"holds {count} workflow records but {authority} counts "
+            f"{expected}; a partial or mixed export",
+            status="endpoint_failed",
+        )
 
 
 def _facts_for_records(

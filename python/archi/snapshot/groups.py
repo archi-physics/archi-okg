@@ -38,7 +38,10 @@ class JsonFile:
 
     name: str
     #: ``list`` (a list of records), ``mapping`` (an object whose values are
-    #: records, keyed by name) or ``object`` (one object, schema applied to it).
+    #: records, keyed by name), ``object`` (one object, schema applied to it)
+    #: or ``status_payloads`` (the WMStats collection object
+    #: ``{"status_payloads": {status: {"result": [{name: record}]}}}``, or a
+    #: plain list of records; schema applied to each record).
     shape: str
     schema: Schema = None
     #: Returns a reason when a record (for ``object`` files, the whole object)
@@ -109,7 +112,7 @@ class GroupSpec:
     def record_file(self) -> Optional[JsonFile]:
         """The list or mapping file that per-record config drops apply to."""
         for spec in self.json_files:
-            if spec.shape in {"list", "mapping"}:
+            if spec.shape in {"list", "mapping", "status_payloads"}:
                 return spec
         return None
 
@@ -196,6 +199,13 @@ def _responsibilities_check(payload: Any) -> Optional[str]:
         if site is not None and not isinstance(site, str):
             return f"row {index}: site title must be a string or null"
     return None
+
+
+def _require_record_count(item: Any) -> Optional[str]:
+    count = item.get("record_count") if isinstance(item, dict) else None
+    if isinstance(count, int) and not isinstance(count, bool):
+        return None
+    return "record_count is missing or not an integer"
 
 
 def _gocdb_identity(item: Any) -> Optional[str]:
@@ -704,9 +714,18 @@ GROUPS: dict[str, GroupSpec] = {
             json_files=(
                 JsonFile(
                     "records.json",
-                    "list",
+                    "status_payloads",
                     WMSTATS_SCHEMA,
                     _require_text("workflow_name", "request_name", "RequestName"),
+                ),
+                # The collector's own record count; the reader checks the
+                # records file against it, so the build does too.
+                JsonFile(
+                    "authority.json",
+                    "object",
+                    _keys("record_count"),
+                    _require_record_count,
+                    required=False,
                 ),
             ),
             # Jason, 2026-09-28: drop the requestor's certificate DN, keep the
