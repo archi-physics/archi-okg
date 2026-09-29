@@ -66,6 +66,18 @@ DEFAULT_BASE_URL = "https://indico.cern.ch"
 DEFAULT_TIMEOUT = 30.0
 
 
+#: Indico's category export path. It is ``/export/categ/``, NOT
+#: ``/export/category/`` -- the spelled-out form 404s:
+#:
+#:     /export/category/100.json -> 404
+#:     /export/categ/100.json    -> 200, count=3
+#:
+#: Measured against indico.cern.ch on 2026-09-29. The event export
+#: path IS spelled out (``/export/event/``), which is where the
+#: original mistake came from.
+CATEGORY_EXPORT = "/export/categ"
+
+
 class IndicoLiveSource:
     """Read Indico events and their contributions over the REST API."""
 
@@ -110,6 +122,9 @@ class IndicoLiveSource:
         #: Counters from the last run. This module logs nothing, matching
         #: the rest of archi.sources.
         self.last_harvest_report: dict[str, Any] | None = None
+        #: Configured categories that came back with zero events on the
+        #: last walk. Reset per harvest; see `_event_ids_in_scope`.
+        self._empty_categories: list[str] = []
         self.change_probe = ContentHashProbe(
             content_items=self._probe_content_items,
             config={
@@ -156,7 +171,7 @@ class IndicoLiveSource:
         probe = self.event_ids[0] if self.event_ids else None
         path = (
             f"/export/event/{probe}.json" if probe
-            else f"/export/category/{self.category_ids[0]}.json"
+            else f"{CATEGORY_EXPORT}/{self.category_ids[0]}.json"
         )
         try:
             self._get_json(self._session(), path)
@@ -193,12 +208,18 @@ class IndicoLiveSource:
         if self._records is not None:
             records = list(self._records)
             report = {"events": len(records), "failed_events": [],
-                      "truncated": False, "timetable_fallbacks": 0}
+                      "truncated": False, "timetable_fallbacks": 0,
+                      "empty_categories": []}
         else:
             records, report = self._harvest()
         self.last_harvest_report = report
 
-        complete = not report["failed_events"] and not report["truncated"]
+        empty_categories = report.get("empty_categories") or []
+        complete = (
+            not report["failed_events"]
+            and not report["truncated"]
+            and not empty_categories
+        )
         revision = {
             "run_id": run_id,
             "content_hash": _records_hash(records),
@@ -218,16 +239,30 @@ class IndicoLiveSource:
             # walk, means this run saw less than its declared scope.
             # Claiming completion would retract every event it missed.
             failed = report["failed_events"]
-            reason = (
-                f"{len(failed)} event(s) failed to read, e.g. "
-                f"{', '.join(failed[:3])}"
-                if failed else
-                f"walk truncated at max_events={self.max_events}"
-            )
+            if failed:
+                reason = (
+                    f"{len(failed)} event(s) failed to read, e.g. "
+                    f"{', '.join(failed[:3])}"
+                )
+            elif empty_categories:
+                reason = (
+                    f"category {', '.join(empty_categories[:3])} returned "
+                    "no events: on indico.cern.ch a gated category answers "
+                    "200 with zero results rather than refusing, so an "
+                    "empty walk cannot be told from a missing credential"
+                )
+            else:
+                reason = (
+                    f"walk truncated at max_events={self.max_events}"
+                )
             return ConnectorRun(
                 facts=_facts(), completed_scope=False, run_mode=mode,
                 health=ConnectorHealth(
-                    status="endpoint_failed" if failed else "ok",
+                    status=(
+                        "endpoint_failed" if failed
+                        else "auth_failed" if empty_categories
+                        else "ok"
+                    ),
                     mode="live", endpoint=self.base_url,
                     record_count=len(records),
                     reason=f"{reason}; no complete scope claimed",
@@ -288,20 +323,40 @@ class IndicoLiveSource:
         for category_id in self.category_ids:
             try:
                 payload = self._get_json(
-                    session, f"/export/category/{category_id}.json"
+                    session, f"{CATEGORY_EXPORT}/{category_id}.json"
                 )
             except (requests.RequestException, _LoginRedirect):
                 if probe:
                     continue
                 raise
+            found = 0
             for event in payload.get("results", []) or []:
                 event_id = str(event.get("id", "")).strip()
                 if event_id and event_id not in ids:
                     ids.append(event_id)
+                    found += 1
+            if found == 0:
+                # A category the caller CONFIGURED returned nothing. On
+                # indico.cern.ch an SSO-gated category does not redirect
+                # and does not 401 -- it answers HTTP 200 with zero
+                # results, which is indistinguishable from a quiet week:
+                #
+                #     /export/categ/100.json  (public)     -> 200 count=3
+                #     /export/categ/6803.json (CMS, gated) -> 200 count=0
+                #
+                # That matters beyond a missing ingest. Under
+                # `missing_from_completed_scope`, a COMPLETE scope with
+                # no records is an instruction to delete everything this
+                # source ingested before, so an expired cookie would
+                # quietly empty the meetings out of the graph rather
+                # than failing. Record it and refuse the completeness
+                # claim; never guess which of the two it was.
+                self._empty_categories.append(str(category_id))
         return ids
 
     def _harvest(self) -> tuple[list[IndicoEventRecord], dict[str, Any]]:
         session = self._session()
+        self._empty_categories = []
         failed: list[str] = []
         fallbacks = 0
         records: list[IndicoEventRecord] = []
@@ -310,7 +365,8 @@ class IndicoLiveSource:
             event_ids = self._event_ids_in_scope(session)
         except (requests.RequestException, _LoginRedirect):
             return [], {"events": 0, "failed_events": list(self.category_ids),
-                        "truncated": False, "timetable_fallbacks": 0}
+                        "truncated": False, "timetable_fallbacks": 0,
+                        "empty_categories": list(self.category_ids)}
 
         truncated = False
         if self.max_events is not None and len(event_ids) > self.max_events:
@@ -339,6 +395,7 @@ class IndicoLiveSource:
             "failed_events": failed,
             "truncated": truncated,
             "timetable_fallbacks": fallbacks,
+            "empty_categories": list(self._empty_categories),
         }
 
     def _contributions(
