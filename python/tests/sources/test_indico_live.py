@@ -237,7 +237,7 @@ def test_max_events_truncation_forfeits_complete_scope(monkeypatch):
 
 def test_category_walk_expands_to_events(monkeypatch):
     _routes(monkeypatch, {
-        "/export/category/42.json": {"results": [{"id": "1234"}]},
+        "/export/categ/42.json": {"results": [{"id": "1234"}]},
         "detail=contributions": {"results": [dict(EVENT, contributions=CONTRIBUTIONS)]},
         "/export/event/1234.json": {"results": [EVENT]},
     })
@@ -280,3 +280,63 @@ def test_adapter_declares_literal_profile_and_probe_kind():
     }
     assert literals["profile"] == "discovery_crawl"
     assert literals["change_probe_kind"] == "content_hash"
+
+
+# --- category export path and the empty-category guard (issue #26) ----
+
+def test_category_export_path_is_categ_not_category():
+    """Indico's category export is ``/export/categ/``.
+
+    ``/export/category/100.json`` returns 404 and ``/export/categ/100.json``
+    returns 200 -- measured against indico.cern.ch. The event export path
+    IS spelled out, which is where the original mistake came from, so this
+    test names the asymmetry rather than trusting it to be remembered.
+    """
+    from archi.sources.indico_live import CATEGORY_EXPORT
+
+    assert CATEGORY_EXPORT == "/export/categ"
+    source = IndicoLiveSource(category_ids=["42"])
+    calls: list[str] = []
+
+    def _record(session, path):
+        calls.append(path)
+        return {"results": []}
+
+    source._get_json = _record  # type: ignore[assignment]
+    source._event_ids_in_scope(object())
+    assert calls == ["/export/categ/42.json"]
+    assert not any("/export/category/" in c for c in calls)
+
+
+def test_a_configured_category_with_no_events_refuses_completeness():
+    """A gated category answers 200 with zero results, not 401.
+
+    Measured: public category 100 returns count=3, CMS category 6803
+    returns count=0 with no credential. Under
+    ``missing_from_completed_scope`` a complete-but-empty scope deletes
+    everything the source ingested before, so an expired cookie would
+    quietly empty the graph. The run must refuse to claim completeness
+    and must say which category was empty.
+    """
+    source = IndicoLiveSource(category_ids=["6803"])
+    source._get_json = lambda session, path: {"results": []}  # type: ignore[assignment]
+    source._session = lambda: object()  # type: ignore[assignment]
+
+    run = source.run("run-1", mode="scope_complete")
+    list(run.facts)
+
+    assert run.completed_scope is False
+    assert run.health.status == "auth_failed"
+    assert "6803" in run.health.reason
+    assert source.last_harvest_report["empty_categories"] == ["6803"]
+
+
+def test_a_category_that_returns_events_still_completes():
+    """The guard must not fire on a category that actually has events."""
+    source = IndicoLiveSource(category_ids=["100"])
+    source._get_json = lambda session, path: {"results": [{"id": "999"}]}  # type: ignore[assignment]
+    source._session = lambda: object()  # type: ignore[assignment]
+    ids = source._event_ids_in_scope(object())
+
+    assert ids == ["999"]
+    assert source._empty_categories == []
