@@ -27,8 +27,10 @@ A parent may be recorded web-qualified (``%META:TOPICPARENT{name=
 strips a leading ``<Web>.`` before the lookup, but only when every
 dotted part before the topic names a web the snapshot actually has
 (its web root or one of its web directories), so a dotted name that is
-not web-qualified is left alone. cms-kb matched the raw string, so a
-web-qualified parent stopped the chain and dropped its subtree.
+not web-qualified is left alone. A parent given as a TWiki view URL
+(``.../twiki/bin/view/<Web>[/<SubWeb>]/<Topic>``) is read the same way.
+cms-kb matched the raw string, so a web-qualified parent stopped the
+chain and dropped its subtree.
 
 Nothing here touches the ontology: the filter only ever *selects*
 records the connector already produces. Physics-specific vocabulary
@@ -133,14 +135,24 @@ def classify_page_type(title: str, parent_topic: str) -> str:
 
 # ── Stage 3: parent-topic transitive closure ────────────────────────────
 
+# A parent given as a view URL. TWiki itself often rewrites such a value,
+# turning the dots before the last slash into slashes and that slash into
+# a dot (``https://twiki/cern/ch/twiki/bin/view/CMS.Page``), so both the
+# raw and the rewritten form end in ``<Web>[/<SubWeb>](/|.)<Topic>``.
+_VIEW_URL_RE = re.compile(r"/twiki/bin/view(?:auth)?/([^?#]+)$")
+
+
 def bare_parent_topic(parent: str, web_names: frozenset[str]) -> str:
     """``parent`` without a leading ``<Web>.``, when that prefix is a web.
 
     ``CMS.HiggsPhysics`` becomes ``HiggsPhysics`` when ``CMS`` is in
     ``web_names``; ``CMS.HiggsWG.Page`` needs both ``CMS`` and
-    ``HiggsWG``. Anything else is returned unchanged.
+    ``HiggsWG``. A view URL (``.../twiki/bin/view/CMS/HiggsPhysics``) is
+    read the same way. Anything else is returned unchanged.
     """
-    web, dot, topic = parent.rpartition(".")
+    url = _VIEW_URL_RE.search(parent)
+    qualified = url.group(1).replace("/", ".") if url else parent
+    web, dot, topic = qualified.rpartition(".")
     if dot and web and topic and all(
         part in web_names for part in web.split(".")
     ):

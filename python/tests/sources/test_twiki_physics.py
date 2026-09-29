@@ -264,6 +264,36 @@ def test_dotted_parent_that_is_not_a_known_web_is_left_alone(parent):
     assert kept == {"HIG-19-001"}
 
 
+@pytest.mark.parametrize(
+    "parent",
+    [
+        "https://wiki.example.org/twiki/bin/view/CMS/HIG-19-001",
+        "https://wiki.example.org/twiki/bin/viewauth/CMS/Sub/HIG-19-001",
+        # the form TWiki rewrites a URL parent into
+        "https://wiki/example/org/twiki/bin/view/CMS.HIG-19-001",
+    ],
+)
+def test_view_url_parent_into_a_known_web_closes_the_chain(parent):
+    topics = ["HIG-19-001", "Child"]
+    _seeds, kept = compute_keep_set(topics, {"Child": parent}, {"CMS", "Sub"})
+    assert kept == {"HIG-19-001", "Child"}
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        "https://wiki.example.org/twiki/bin/view/OtherWeb/HIG-19-001",
+        "https://wiki/example/org/twiki/bin/view/OtherWeb.HIG-19-001",
+        "https://wiki.example.org/twiki/bin/oops/CMS/HIG-19-001",
+        "https://wiki.example.org/twiki/bin/view/CMS/HIG-19-001?raw=on",
+    ],
+)
+def test_view_url_parent_outside_a_known_web_stays_out(parent):
+    topics = ["HIG-19-001", "Child"]
+    _seeds, kept = compute_keep_set(topics, {"Child": parent}, {"CMS"})
+    assert kept == {"HIG-19-001"}
+
+
 def test_web_qualified_parents_close_the_chain_in_a_snapshot(tmp_path):
     """End to end through the connector: the webs are the snapshot's own
     web root (``CMS``) and web directories (``SubWeb``)."""
@@ -275,11 +305,23 @@ def test_web_qualified_parents_close_the_chain_in_a_snapshot(tmp_path):
     (root / "SubWeb" / "SubGrand.txt").write_text(
         _topic("CMS.SubWeb.SubChild")
     )
+    (root / "SubWeb" / "UrlChild.txt").write_text(
+        _topic("https://wiki.example.org/twiki/bin/view/CMS/SubWeb/SubChild")
+    )
     (root / "StrayPage.txt").write_text(_topic("OtherWeb.HIG-19-001"))
+    (root / "StrayUrlPage.txt").write_text(
+        _topic("https://wiki.example.org/twiki/bin/view/OtherWeb/HIG-19-001")
+    )
     source = TwikiEOSSource(eos_root=str(root), physics_filter=True)
     titles, _run = _titles(source)
-    assert titles == {"HIG-19-001", "ChildPage", "SubChild", "SubGrand"}
-    assert source.last_physics_report.closure_count == 4
+    assert titles == {
+        "HIG-19-001",
+        "ChildPage",
+        "SubChild",
+        "SubGrand",
+        "UrlChild",
+    }
+    assert source.last_physics_report.closure_count == 5
 
 
 @pytest.mark.parametrize(

@@ -10,9 +10,9 @@ why: 'Issue #15. The physics filter''s parent-topic closure (stage 3 in archi.so
 
 
   Measured read-only on the Aug 31 twiki-eos stage on submit76 (43,744 topics, 51 web names):
-  5,896 topics have a dotted parent; 119 of them are qualified by a web the snapshot has.
-  With the physics filter on, the kept count goes from 15,655 to 15,738 (+83, none lost);
-  seeds are unchanged at 6,627 and the closure grows from 13,194 to 13,287.
+  119 topics have a <Web>. parent and 152 a URL parent; the change follows 119 + 142 = 261
+  of them. With the physics filter on, the kept count goes from 15,655 to 15,757 (+102, none
+  lost); seeds are unchanged at 6,627 and the closure grows from 13,194 to 13,307.
 
 
   DECISION, which prefixes are stripped: only a prefix whose every dotted part is a web the
@@ -21,8 +21,11 @@ why: 'Issue #15. The physics filter''s parent-topic closure (stage 3 in archi.so
   string.
 
 
-  NOT CHANGED: parents written as a full view URL are still not followed; that is a separate
-  parse question, not a web prefix.'
+  DECISION, view URLs (lead, 2026-09-28): a parent that is a TWiki view URL, path
+  .../twiki/bin/view/<Web>[/<SubWeb>]/<Topic> (viewauth too), is read as <Web>[.<SubWeb>].<Topic>
+  under the same known-web rule. TWiki often stores such a value rewritten, with the dots before
+  the last slash turned into slashes and that slash into a dot; both forms are read. Every
+  other URL (another web, oops, a query string, a trailing slash, another path) is left alone.'
 affected_code:
 - python/archi/sources/_twiki_physics.py
 - python/tests/sources/test_twiki_physics.py
@@ -36,8 +39,10 @@ requirements:
 
     - acc.twiki-web-qualified-parent.closure: a child whose parent is <Web>.<seed> or <Web>.<SubWeb>.<topic>
     joins the closure; a parent qualified by an unknown web, with any unknown part, or with
-    nothing after the dot does not; through the connector, the webs come from the snapshot''s
-    web root and web directories. [evidence: executed_test]'
+    nothing after the dot does not; a view URL into a known web (raw or TWiki-rewritten,
+    view or viewauth) joins the closure, and a view URL into another web, an oops URL, or a
+    URL with a query does not; through the connector, the webs come from the snapshot''s web
+    root and web directories. [evidence: executed_test]'
 tasks:
 - id: task.twiki-web-qualified-parent.deliver
   requirement: req.twiki-web-qualified-parent.main
