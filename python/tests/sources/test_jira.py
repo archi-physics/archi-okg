@@ -487,3 +487,201 @@ def test_api_parent_dict_yields_key_not_repr(tmp_path):
     text = chunks[0].attrs["text"]
     assert "{'id'" not in text
     assert "parent: CMSPROD-9" in text
+
+
+# --- email redaction (parity with okg-deployments cms jira, b25e36f06c) -----
+
+# One address per text field the source reads, each with a distinct local
+# part so a leak names the field it came from. Mixed forms: plain, +tag,
+# quoted local part, HTML-encoded @, double-encoded @, and URL %40.
+EMAIL_ISSUE = {
+    "key": "CMSPROD-300",
+    "summary": "Contact summary.owner+ops@cern.ch about run 381000",
+    "description": 'Ask "descr author"@cern.ch or descrtwo&#64;cern.ch.',
+    "project": "CMSPROD",
+    "status": "Waiting for statusperson@cern.ch",
+    "priority": "Major",
+    "issue_type": "Bug",
+    "assignee": {"displayName": "Ada Lovelace <assigneeaddr@cern.ch>"},
+    "reporter": "reporteraddr@cern.ch",
+    "created": "2026-01-05T10:00:00.000+0000",
+    "updated": "2026-02-01T09:30:00.000+0000",
+    "environment": "prod, owner envaddr&amp;#64;cern.ch",
+    "components": ["transfers componentaddr@cern.ch"],
+    "labels": ["labeladdr@cern.ch"],
+    "fix_versions": ["v1 fixaddr@cern.ch"],
+    "recent_comments": [
+        {
+            "author": {"displayName": "commentauthor@cern.ch"},
+            "created": "2026-01-06T08:00:00.000+0000",
+            "body": " ".join([
+                "Retrying via cmsweb.cern.ch; see",
+                "https://its.cern.ch/jira/secure/ViewProfile?mail=commentbody%40cern.ch",
+                "for the owner",
+            ]),
+        }
+    ],
+}
+EMAIL_LOCAL_PARTS = (
+    "summary.owner",
+    "descr author",
+    "descrtwo",
+    "statusperson",
+    "assigneeaddr",
+    "reporteraddr",
+    "envaddr",
+    "componentaddr",
+    "labeladdr",
+    "fixaddr",
+    "commentauthor",
+    "commentbody",
+)
+
+
+def test_email_addresses_removed_from_every_emitted_field(tmp_path):
+    source = _write_caches(tmp_path, [EMAIL_ISSUE])
+    run, facts = _run_facts(source, mode="scope_complete")
+    emitted = json.dumps(
+        [
+            {
+                "id": getattr(f, "node_id", None),
+                "attrs": f.attrs,
+                "record": f.source_record_id,
+            }
+            for f in facts
+        ],
+        sort_keys=True,
+    ).casefold()
+    leaked = [part for part in EMAIL_LOCAL_PARTS if part in emitted]
+    assert leaked == []
+    assert "@" not in emitted
+    assert "%40" not in emitted
+    assert "&#64;" not in emitted
+
+    # Only the addresses go; the text around them survives, as in cms.
+    (issue,) = _nodes(facts, "jira_issue")
+    assert issue.attrs["summary"] == "Contact  about run 381000"
+    assert issue.attrs["assignee"] == "Ada Lovelace <>"
+    assert issue.attrs["reporter"] == ""
+    chunk_text = "\n".join(
+        c.attrs["text"] for c in _nodes(facts, "document_chunk")
+    )
+    assert "Retrying via cmsweb.cern.ch" in chunk_text
+    # "=" is a local-part character, so the query key goes too.
+    assert "ViewProfile? for the owner" in chunk_text
+    assert "environment: prod, owner" in chunk_text
+    assert run.health.status == "ok"
+
+
+def test_email_redaction_covers_rest_api_shaped_comments(tmp_path):
+    issue = {
+        "key": "CMSPROD-301",
+        "fields": {
+            **API_ISSUE["fields"],
+            "summary": "Mail apiowner@cern.ch",
+            "comment": {
+                "comments": [
+                    {
+                        "author": {"displayName": "Enrico Fermi"},
+                        "body": "cc apicomment@cern.ch please",
+                    }
+                ]
+            },
+        },
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps([f.attrs for f in facts], sort_keys=True)
+    assert "apiowner" not in emitted
+    assert "apicomment" not in emitted
+    assert "cc  please" in emitted
+
+
+def test_text_without_an_address_is_emitted_verbatim(tmp_path):
+    # Redaction decodes nothing: an issue with HTML entities and no
+    # address keeps them, so its chunk text and chunk id do not change.
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-302",
+        "summary": "R&amp;D link to AT&amp;T &#64; noon",
+        "description": "Ticket &commat;ops, 100% &amp;amp; done",
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["summary"] == "R&amp;D link to AT&amp;T &#64; noon"
+    (chunk,) = _nodes(facts, "document_chunk")
+    assert "R&amp;D link to AT&amp;T &#64; noon" in chunk.attrs["text"]
+    assert "Ticket &commat;ops, 100% &amp;amp; done" in chunk.attrs["text"]
+
+
+def test_non_ascii_and_padded_addresses_leave_no_fragment(tmp_path):
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-303",
+        "summary": "Ask j\u00fcrgen.k\u00f6nig&#064;cern.ch or fwidthaddr\uff20cern.ch",
+        "assignee": "\u00fcber.m\u00fcller@cern.ch",
+        "reporter": "Grace Hopper",
+        "recent_comments": [],
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps(
+        [f.attrs for f in facts], sort_keys=True, ensure_ascii=False
+    )
+    for fragment in ("j\u00fcrgen", "k\u00f6nig", "\u00fcber", "m\u00fc", "fwidthaddr"):
+        assert fragment not in emitted
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["summary"] == "Ask  or "
+    # An assignee that is only an address yields no person, as in cms.
+    assert [p.attrs["display_name"] for p in _nodes(facts, "person")] == [
+        "Grace Hopper"
+    ]
+
+
+def test_adjacent_addresses_in_table_markup_are_both_removed(tmp_path):
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-304",
+        "description": "||owner||backup||\n|tablebob@cern.ch|tablealice@fnal.gov|",
+        "recent_comments": [],
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps([f.attrs for f in facts], sort_keys=True)
+    assert "tablebob" not in emitted
+    assert "tablealice" not in emitted
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["description"] == "||owner||backup||\n|"
+
+
+def test_git_account_kept_and_next_address_still_removed(tmp_path):
+    # Operator decision (2026-09-28), changing #5's behavior for JIRA too:
+    # the literal git@ account of a git host is kept, so clone
+    # instructions survive; an address right after it is still removed,
+    # and ssh user@host logins still go.
+    issue = {
+        **FLAT_ISSUE,
+        "key": "CMSPROD-305",
+        "summary": "Clone git@gitlab.cern.ch:cms/y.git",
+        "description": "\n".join([
+            "git clone git@github.com:x/y.git by gitnextaddr@cern.ch",
+            "then ssh sshloginaddr@lxplus.cern.ch",
+        ]),
+        "recent_comments": [],
+    }
+    source = _write_caches(tmp_path, [issue])
+    _, facts = _run_facts(source)
+    emitted = json.dumps([f.attrs for f in facts], sort_keys=True)
+    assert "gitnextaddr" not in emitted
+    assert "sshloginaddr" not in emitted
+    (node,) = _nodes(facts, "jira_issue")
+    assert node.attrs["summary"] == "Clone git@gitlab.cern.ch:cms/y.git"
+    assert node.attrs["description"] == (
+        "git clone git@github.com:x/y.git by \nthen ssh "
+    )
+    chunk_text = "\n".join(
+        c.attrs["text"] for c in _nodes(facts, "document_chunk")
+    )
+    assert "git clone git@github.com:x/y.git by \n" in chunk_text
+    assert "Clone git@gitlab.cern.ch:cms/y.git" in chunk_text

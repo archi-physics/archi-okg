@@ -49,6 +49,13 @@ classes:
       transient: "false"
       okg_alias_fields: issue_key
       okg_searchable_text_fields: issue_key,summary,description,status,priority,text
+      # An issue's body lives on its chunks (jira_issue contains
+      # document_chunk, archi.sources.jira). Declaring the relation lets
+      # a passage name this issue as its parent and lets passage-ranked
+      # search roll chunk scores up to the issue (okg#2914).
+      okg_passage_rollup:
+        edge_type: contains
+        child_subtype: DocumentChunk
 
   DocumentationPage:
     description: A documentation page from a docs-site records cache.
@@ -67,6 +74,19 @@ classes:
       transient: "false"
       okg_alias_fields: url
       okg_searchable_text_fields: title,body,url,text
+      # TWiki titles are WikiWords (CMSDataTransfers) and docs-site titles
+      # often paths; the BM25 index lexes either as one token. Declaring
+      # `title` here adds its component words (separators on current okg;
+      # CamelCase too once okg#2925 lands).
+      okg_searchable_text_path_fields: title
+      # A page's body lives on its chunks (documentation_page contains
+      # document_chunk, archi.sources.twiki / archi.sources.docs).
+      # Declaring the relation lets a passage name this page as its
+      # parent and lets passage-ranked search roll chunk scores up to
+      # the page (okg#2914).
+      okg_passage_rollup:
+        edge_type: contains
+        child_subtype: DocumentChunk
 
   SoftwareRepository:
     # The cms deployment's nodes.yaml carried a second SoftwareRepository

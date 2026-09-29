@@ -64,8 +64,10 @@ def test_preflight_optional_cache(tmp_path):
     missing = DBSDatasetSource(base=str(tmp_path))
     assert missing.preflight().status == "cache_missing"
     assert missing.preflight().required is False
+    # An empty cache is a failed fetch, not an optional skip: okg treats
+    # skipped_optional as healthy enough to retract a complete scope.
     empty = _source(tmp_path, [])
-    assert empty.preflight().status == "skipped_optional"
+    assert empty.preflight().status == "cache_missing"
 
 
 # --- circleback-fixes regressions ---

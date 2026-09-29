@@ -13,7 +13,21 @@ next.
 - `search`: discover candidate nodes. Use short queries, exact CMS identifiers,
   and alternate terms rather than one long keyword dump.
 - `inspect(target={kind: "node", node_id: ...})`: inspect canonical candidates
-  and read `skill_hints`.
+  and read `skill_hints`. For a page, document, or ticket this returns its
+  metadata (title, URL, dates) only, not its text.
+- `inspect(target={kind: "text", node_id: "<page node id>"})`: read the whole
+  text of a page, document, or ticket in reading order in one call. Use it
+  when the question names a specific page, document, or ticket, or when search
+  surfaces one as the likely source, before answering or concluding the
+  answer is not in the graph. Long records come back in pages: while
+  `complete` is false, call again with the returned `continuation_token` in
+  the target. `order_basis` and `coverage` say whether the order is real and
+  whether any text is missing. A `coverage` of "unknown" means okg cannot
+  prove the text is complete, not that text is missing; where chunks overlap,
+  a few lines may repeat. The text read needs okg with mitdbg/okg#2697
+  (merged 2026-09-28); an older okg refuses it ("inspect target kind must be
+  one of ..."). Then fall back to the ordered-chunk recipe (Parent To Ordered
+  Chunks in `source_document_exploration.md`).
 - `expand` / `aggregate`: expand a candidate node, roll
   chunks to parents, and understand adjacent evidence volume before taking many
   rows.

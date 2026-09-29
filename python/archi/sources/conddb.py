@@ -9,8 +9,11 @@ and the hardcoded ``data/cms/...`` paths are parameters (defaults keep
 the cms layout minus the ``cms/`` segment). As in the original the
 CMSSW records cache is optional (missing -> no ``cmssw_targets``, so
 ``depends_on`` edges only reach releases named by CondDB itself), and
-the source is optional and offline-only — a missing records cache
-raises from ``run()``; only ``preflight`` reports it.
+the source is optional and offline-only; a missing, unreadable, truncated or
+empty records cache is ``cache_missing`` with ``completed_scope=False`` from
+both ``preflight`` and ``run()`` (empty-cache-fails-loudly; the original
+raised from ``run()`` on a missing cache and reported an empty one as
+``skipped_optional``, which okg accepts as a complete scope to retract).
 
 Registry-entry template — same three prerequisites as
 ``archi/sources/jira.py``'s template; ``global_tag`` and
@@ -18,7 +21,7 @@ Registry-entry template — same three prerequisites as
 
     conddb_global_tags:
       module: archi.sources.conddb
-      class: CondDBGlobalTagSource
+      class: CondDBGlobalTagAdapter
       ownership_id: <instance>.conddb-global-tags
       admission_policy:
         producer_id: <instance>.conddb-global-tags
@@ -42,7 +45,7 @@ Registry-entry template — same three prerequisites as
             - global_tag supersedes global_tag
             - global_tag depends_on cmssw_release
       source_class: reference_catalog
-      record_identity_kind: remote_id
+      record_identity_kind: domain_key
       record_identity_fields: [global_tag]
       source_revision_kind: content_hash
       deletion_semantics: missing_from_completed_scope
@@ -76,9 +79,14 @@ from archi.auth.cache import (
     load_json,
 )
 from archi.sources._cache_report import (
+    CacheUnusable,
     cache_preflight_result,
     cache_source_health,
+    read_cache_json,
+    unusable_cache_preflight,
+    unusable_cache_run,
 )
+from archi.sources._sdk_adapter import ReaderAdapter
 
 _GT_VERSION_RE = re.compile(r"_v(\d+)$")
 _CMSSW_VERSION_RE = re.compile(r"^CMSSW_(\d+)_(\d+)_(\d+)")
@@ -139,10 +147,14 @@ class CondDBGlobalTagSource:
         return (self.records_path,)
 
     def preflight(self, mode: str = "live") -> PreflightResult:
+        # Same verdict run() reaches: a missing, unreadable, truncated
+        # or empty cache is cache_missing, never an empty success.
         try:
-            records = self._records()
-        except FileNotFoundError:
-            records = None
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=False
+            )
         return cache_preflight_result(
             source_name=self.name,
             description="CondDB global tag",
@@ -150,10 +162,18 @@ class CondDBGlobalTagSource:
             records=records,
             required=False,
             base=self.base,
+            skipped_count=skipped,
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records, skipped = self._records_with_skips()
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            # An empty cache is a failed fetch, not an empty catalog: a
+            # complete scope over zero records would retract every
+            # record ingested before (okg honours that order for
+            # skipped_optional health too), so report cache_missing.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -199,11 +219,9 @@ class CondDBGlobalTagSource:
         return self._records_with_skips()[0]
 
     def _records_with_skips(self) -> tuple[list[GlobalTagRecord], int]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of global tags"
-            )
+        payload = read_cache_json(
+            self.records_path, expect=list, base=self.base
+        )
         records: list[GlobalTagRecord] = []
         skipped = 0
         for item in payload:
@@ -354,3 +372,21 @@ def _parse_cmssw_family(label: str) -> dict[str, Any]:
         "minor": int(minor),
         "family": True,
     }
+
+
+class CondDBGlobalTagAdapter(ReaderAdapter):
+    """Registry adapter for :class:`CondDBGlobalTagSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = CondDBGlobalTagSource
+    profile = "reference_catalog"
+    change_probe_kind = "content_hash"

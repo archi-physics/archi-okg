@@ -28,6 +28,9 @@ Deliberately **not** ported:
   anonymizer per the porting matrix); the hook point to preserve there
   is the text surface this module emits — ``jira_issue.attrs`` text
   fields and ``document_chunk.attrs["text"]`` — before embedding.
+  The cms source's narrower, always-on email removal *is* kept: every
+  string read from the cache goes through :func:`_pg_text`, which
+  calls :func:`archi.enrichment.anonymizer.redact_email_addresses`.
 - The live JIRA fetch itself: like the cms original this source reads
   an externally maintained records cache; credentials stay env-var
   references only.
@@ -70,6 +73,13 @@ Changes from the cms original:
   ``degraded``) with both counts in the reason, and the run never
   claims ``completed_scope`` — a truncated cache claimed complete
   would retract every record it happened to drop.
+- 2026-09 (empty-cache-fails-loudly): a records cache that is
+  unreadable, zero bytes, truncated JSON or an empty list is
+  ``cache_missing`` with no facts and no complete scope, whatever
+  ``meta.json`` says — a complete scope over zero issues retracts every
+  issue. Items without an issue key are skipped per item but stop the
+  run claiming a complete scope. ``preflight()`` and ``run()`` share
+  one verdict, so preflight now also reports the meta mismatch.
 
 Registry-entry template — INGEST-PROVEN 2026-08-11 on a scratch
 instance (okg dev@21c5b8c3e). Three things beyond the registry entry
@@ -178,6 +188,14 @@ from okg.deployment import (
     ConnectorRun,
 )
 
+from archi.enrichment.anonymizer import redact_email_addresses
+from archi.sources._cache_report import (
+    CacheUnusable,
+    read_cache_json,
+    skipped_items_status,
+    unusable_cache_preflight,
+    unusable_cache_run,
+)
 from archi.sources._sdk_adapter import ReaderAdapter
 from archi.auth.cache import (
     cache_or_forced_live_change_probe,
@@ -374,7 +392,7 @@ class JiraIssueSource:
         path = resolve_repo_path(self.records_path, base=self.base)
         if not path.is_file():
             expected = _expected_count(self.meta_path, base=self.base)
-            reason = "JIRA records cache file is missing"
+            reason = f"JIRA records cache file {path} is missing"
             if expected is not None:
                 reason += f"; metadata reports {expected} records"
             return PreflightResult(
@@ -388,17 +406,30 @@ class JiraIssueSource:
                 reason=reason,
                 checked_at=_checked_at(),
             )
-        records = self._records()
+        # Same verdict run() reaches for the same cache.
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc,
+                source_name=self.name,
+                required=True,
+                credential_refs=self._credential_refs,
+                alias_refs=self._alias_refs,
+            )
+        status, reason, _complete = self._verdict(
+            len(records), skipped, "local JIRA records cache present"
+        )
         return PreflightResult(
             source_name=self.name,
-            status="ok",
+            status=status,
             mode="cache",
             required=True,
             credential_refs=self._credential_refs,
             alias_refs=self._alias_refs,
             record_count=len(records),
             content_hash=content_hash(self.cache_paths, base=self.base),
-            reason="local JIRA records cache present",
+            reason=reason,
             checked_at=_checked_at(),
         )
 
@@ -415,11 +446,26 @@ class JiraIssueSource:
                     credential_refs=self._credential_refs,
                     alias_refs=self._alias_refs,
                     cache_path=str(path),
-                    reason="JIRA records cache is absent; no facts emitted",
+                    reason=(
+                        f"JIRA records cache {path} is absent; no facts "
+                        "emitted and no complete scope claimed"
+                    ),
                     checked_at=_checked_at(),
                 ),
             )
-        records = self._records()
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            # Unreadable, truncated or empty: a failed fetch, never an
+            # empty project. A complete scope over zero issues would
+            # retract every issue ingested before, and meta.json cannot
+            # vouch for an empty cache.
+            return unusable_cache_run(
+                exc,
+                mode=mode,
+                credential_refs=self._credential_refs,
+                alias_refs=self._alias_refs,
+            )
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -499,8 +545,33 @@ class JiraIssueSource:
                         targets,
                     )
 
+        status, reason, complete = self._verdict(
+            len(records), skipped, "local JIRA records cache used"
+        )
+        return ConnectorRun(
+            facts=_facts(),
+            completed_scope=(
+                mode in {"scope_complete", "reconcile"} and complete
+            ),
+            run_mode=mode,
+            health=ConnectorHealth(
+                status=status,
+                mode="cache",
+                credential_refs=self._credential_refs,
+                alias_refs=self._alias_refs,
+                record_count=len(records),
+                content_hash=revision["content_hash"],
+                reason=reason,
+            ),
+        )
+
+    def _verdict(
+        self, record_count: int, skipped: int, ok_reason: str
+    ) -> tuple[str, str, bool]:
+        """(status, reason, may claim a complete scope), shared by
+        preflight() and run() so the two cannot disagree."""
         expected = _expected_count(self.meta_path, base=self.base)
-        if expected is not None and expected != len(records):
+        if expected is not None and expected != record_count:
             # meta.json says the fetch produced `expected` records but
             # the cache parsed a different number: the records file is
             # truncated or stale relative to its own metadata. Emit
@@ -509,40 +580,24 @@ class JiraIssueSource:
             # complete would retract every record it dropped. The
             # closed status vocabulary has no 'degraded', so report
             # endpoint_failed.
-            return ConnectorRun(
-                facts=_facts(),
-                completed_scope=False,
-                run_mode=mode,
-                health=ConnectorHealth(
-                    status="endpoint_failed",
-                    mode="cache",
-                    credential_refs=self._credential_refs,
-                    alias_refs=self._alias_refs,
-                    record_count=len(records),
-                    content_hash=revision["content_hash"],
-                    reason=(
-                        f"JIRA records cache parsed {len(records)} records "
-                        f"but {self.meta_path} reports record_count="
-                        f"{expected}; cache looks truncated or stale, "
-                        "facts emitted, no complete scope claimed"
-                    ),
-                    checked_at=_checked_at(),
-                ),
+            return (
+                "endpoint_failed",
+                f"JIRA records cache parsed {record_count} records "
+                f"but {self.meta_path} reports record_count="
+                f"{expected}; cache looks truncated or stale, "
+                "facts emitted, no complete scope claimed",
+                False,
             )
-        return ConnectorRun(
-            facts=_facts(),
-            completed_scope=(mode in {"scope_complete", "reconcile"}),
-            run_mode=mode,
-            health=ConnectorHealth(
-                status="ok",
-                mode="cache",
-                credential_refs=self._credential_refs,
-                alias_refs=self._alias_refs,
-                record_count=len(records),
-                content_hash=revision["content_hash"],
-                reason="local JIRA records cache used",
-            ),
+        # Items without an issue key (or not objects at all) are
+        # skipped per item, but the run then stops claiming a complete
+        # scope: the skipped items' issues would otherwise be retracted.
+        status, reason = skipped_items_status(
+            status="ok",
+            reason=ok_reason,
+            record_count=record_count,
+            skipped_count=skipped,
         )
+        return status, reason, not skipped
 
     def issue_url(self, key: str) -> str:
         """Browse URL for an issue (v2 collector's ticket metadata URL)."""
@@ -583,13 +638,12 @@ class JiraIssueSource:
             source_revision=revision,
         )
 
-    def _records(self) -> list[JiraIssueRecord]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of JIRA records"
-            )
+    def _records_with_skips(self) -> tuple[list[JiraIssueRecord], int]:
+        payload = read_cache_json(
+            self.records_path, expect=list, base=self.base
+        )
         items = [item for item in payload if isinstance(item, dict)]
+        skipped = len(payload) - len(items)
         # Without configured project_keys the generic KEY-123 pattern
         # would extract strings like COVID-19 from free text; mirror
         # docs.py's intersect-with-known-keys discipline by bounding
@@ -603,6 +657,7 @@ class JiraIssueSource:
         for item in items:
             key = _pg_text(str(item.get("key") or item.get("issue_key") or ""))
             if not key:
+                skipped += 1
                 continue
             fields = (
                 item.get("fields") if isinstance(item.get("fields"), dict) else {}
@@ -675,7 +730,7 @@ class JiraIssueSource:
                     or (fields.get("comment") or {}).get("comments")
                 )),
             ))
-        return records
+        return records, skipped
 
     def _issue_keys_from_value(
         self, value: Any, key_re: re.Pattern[str] | None = None
@@ -772,7 +827,16 @@ def _chunk_text(record: JiraIssueRecord) -> str:
 
 
 def _pg_text(text: str) -> str:
-    return text.replace("\x00", " ")
+    """Normalize one source string: NUL to space, email addresses removed.
+
+    Every string this source reads from the records cache passes through
+    here (key, summary, description, environment, dates, status-like
+    names, people, labels, components, comment authors and bodies), so
+    no address reaches a ``jira_issue`` or ``person`` attr or
+    ``document_chunk`` text. Parity with okg-deployments
+    ``cms/cms_sources/jira.py`` (commit b25e36f06c).
+    """
+    return redact_email_addresses(text.replace("\x00", " "))
 
 
 def _sha256(text: str) -> str:

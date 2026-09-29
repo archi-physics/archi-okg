@@ -26,7 +26,16 @@ For every question with OKG evidence:
 
 1. Run multiple query variants unless an exact canonical answer is found and
    verified.
-2. Inspect canonical parents for chunk hits.
+2. Inspect canonical parents for chunk hits. When the question names a
+   specific page, document, or ticket, or search surfaces one as the likely
+   source, read its text with
+   `inspect(target={"kind": "text", "node_id": "<page node id>"})` before
+   answering or concluding the answer is absent; `kind: "node"` gives only
+   its metadata. Follow `continuation_token` while `complete` is false.
+   The text read needs okg with mitdbg/okg#2697 (merged 2026-09-28); an
+   older okg refuses it ("inspect target kind must be one of ..."). Then
+   fall back to the ordered-chunk recipe (Parent To Ordered Chunks in
+   `source_document_exploration.md`).
 3. Perform at least one expansion action: neighbor traversal, path traversal,
    alias/entity lookup, source-family search, or bounded `okg.v_*` SQL.
 4. Rerank evidence clusters by canonical source ID, not by chunk rank alone.

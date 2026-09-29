@@ -2,6 +2,7 @@
 offline and fixture-driven."""
 import hashlib
 import json
+import os
 import time
 from datetime import datetime, timezone
 
@@ -511,7 +512,10 @@ def test_eos_seeded_preflight_reports_subtree_metrics(tmp_path):
         max_depth=0,
     ).preflight()
     assert part_missing.record_count == 1
-    assert "1 seeds missing" in part_missing.reason
+    # Same verdict run() reaches: one of two seeds missing is a partial
+    # read (endpoint_failed), not ok (PR #19 review item 1).
+    assert part_missing.status == "endpoint_failed"
+    assert "1/2 configured seed topics missing" in part_missing.reason
 
 
 def test_eos_run_walks_the_tree_once(tmp_path, monkeypatch):
@@ -520,13 +524,13 @@ def test_eos_run_walks_the_tree_once(tmp_path, monkeypatch):
     root = _write_snapshot(tmp_path)
     source = TwikiEOSSource(eos_root=str(root))
     calls = {"n": 0}
-    original = TwikiEOSSource._paths
+    original = TwikiEOSSource._listing
 
     def counting(self):
         calls["n"] += 1
         return original(self)
 
-    monkeypatch.setattr(TwikiEOSSource, "_paths", counting)
+    monkeypatch.setattr(TwikiEOSSource, "_listing", counting)
     run = source.run("r", mode="scope_complete")
     list(run.facts)
     assert run.health.status == "ok"
@@ -564,6 +568,59 @@ def test_eos_missing_root_is_safe(monkeypatch, tmp_path):
     result = source.preflight()
     assert result.status == "ok"
     assert result.record_count == 3
+
+
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_eos_empty_snapshot_dir_refuses_scope(tmp_path, mode):
+    # A snapshot directory that exists but holds nothing (a failed sync,
+    # an unmounted volume left as an empty mount point) is a missing
+    # cache, not an empty wiki. Claiming a complete scope over it would
+    # order the retraction of every page ingested before.
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode=mode)
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "cache_missing"
+    assert run.health.mode == "filesystem"
+    assert run.health.record_count == 0
+    assert run.health.cache_path == str(root)
+    assert "no TWiki topics" in run.health.reason
+    assert "no complete scope claimed" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "cache_missing"
+    assert preflight.record_count == 0
+    assert preflight.cache_path == str(root)
+
+
+def test_eos_snapshot_of_only_skipped_pages_refuses_scope(tmp_path):
+    # Structural pages and junk files are dropped before any record is
+    # built, so a snapshot holding only those is as empty as no files.
+    root = tmp_path / "snapshot"
+    (root / "Sub").mkdir(parents=True)
+    (root / "WebChanges.txt").write_text("structural page")
+    (root / "12345.txt").write_text("junk")
+    (root / "Sub" / "notes.md").write_text("not a topic")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "cache_missing"
+    assert source.preflight().status == "cache_missing"
+
+
+def test_eos_one_topic_snapshot_still_claims_scope(tmp_path):
+    # The guard is about zero topics, not few: one real page is a scope.
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "TopicOne.txt").write_text(TOPIC_ONE)
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert len(_nodes(list(run.facts), "documentation_page")) == 1
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert source.preflight().status == "ok"
 
 
 def test_eos_completed_scope_by_mode_and_chunker_param(tmp_path):
@@ -1037,3 +1094,620 @@ def test_crawl_probe_declarations():
     first = source.change_probe.build_token()
     time.sleep(0.002)
     assert source.change_probe.build_token() != first
+
+
+# --- email redaction (names kept; operator decision for cms-kb, 2026-09-28) --
+
+# One address per field or markup form, each with a distinct local part so
+# a leak names where it came from. Names (Main.JohnDoe, John Doe, Jane Roe,
+# the link label) must survive.
+EMAIL_TOPIC = (
+    '%META:TOPICINFO{author="authoraddr@cern.ch" date="1700000000" '
+    'version="3 versionaddr@cern.ch"}%\n'
+    '%META:TOPICPARENT{name="parentaddr@cern.ch"}%\n'
+    "---++ Contacts\n"
+    "Contact Main.JohnDoe (John Doe, plainaddr@cern.ch) or "
+    "[[mailto:linkaddr@cern.ch][Jane Roe]].\n"
+    "Bare link [[mailto:barelinkaddr@cern.ch]], url pctaddr%40cern.ch, "
+    "entity entityaddr&#64;cern.ch, tagged plus.tag+ops@fnal.gov.\n"
+    '<a href="mailto:hrefaddr@cern.ch">Mail Alice Smith</a>\n'
+    "| Contact | tableaddr@cern.ch |\n"
+    "Spelled: bracketaddr[AT]cern.ch, parenaddr(at)cern(dot)ch, "
+    "word.addr at cern.ch, glued.addr_at_cern.ch, "
+    "spaced AT cern DOT ch, nospam.addr_NOSPAM_AT_cern.ch.\n"
+)
+EMAIL_TOPIC_LOCAL_PARTS = (
+    "authoraddr",
+    "versionaddr",
+    "parentaddr",
+    "plainaddr",
+    "linkaddr",
+    "barelinkaddr",
+    "pctaddr",
+    "entityaddr",
+    "plus.tag",
+    "hrefaddr",
+    "tableaddr",
+    "bracketaddr",
+    "parenaddr",
+    "glued.addr",
+    "nospam.addr",
+)
+
+
+def _emitted(facts):
+    return json.dumps(
+        [
+            {
+                "id": getattr(f, "node_id", None),
+                "attrs": f.attrs,
+                "record": f.source_record_id,
+            }
+            for f in facts
+        ],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def _assert_no_address(emitted, local_parts):
+    folded = emitted.casefold()
+    assert [part for part in local_parts if part in folded] == []
+    assert "@" not in emitted
+    assert "%40" not in emitted
+    assert "&#64;" not in emitted
+
+
+def test_eos_email_addresses_removed_from_every_emitted_field(tmp_path):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "ContactsTopic.txt").write_text(EMAIL_TOPIC)
+    run = TwikiEOSSource(eos_root=str(root)).run("r", mode="scope_complete")
+    facts = list(run.facts)
+    _assert_no_address(_emitted(facts), EMAIL_TOPIC_LOCAL_PARTS)
+
+    (page,) = _nodes(facts, "documentation_page")
+    # A field that held only an address is left empty, as in the JIRA source.
+    assert page.attrs["author"] == ""
+    assert page.attrs["parent_topic"] == ""
+    assert page.attrs["version"] == "3 "
+    assert page.attrs["title"] == "ContactsTopic"
+    (chunk,) = _nodes(facts, "document_chunk")
+    text = chunk.attrs["text"]
+    # Names are kept; only the addresses go.
+    assert "Contact Main.JohnDoe (John Doe, )" in text
+    assert "or Jane Roe." in text
+    assert "Mail Alice Smith" in text
+    assert "Bare link mailto:, url , entity , tagged ." in text
+    assert "| Contact |  |" in text
+    # Bracketed, glued and NOSPAM forms go; the two free-prose forms stay
+    # (operator rule, 2026-09-28).
+    assert text.endswith(
+        "Spelled: , , word.addr at cern.ch, , spaced AT cern DOT ch, ."
+    )
+    assert run.health.status == "ok"
+
+
+def test_eos_email_redaction_covers_the_title_of_fixture_records():
+    record = twiki_mod.TwikiRecord(
+        page_id="CMS/OwnerPage",
+        web_name="CMS",
+        web_root="CMS",
+        title="Owner titleaddr@cern.ch page",
+        url="https://twiki.cern.ch/twiki/bin/view/CMS/OwnerPage",
+        source_path="OwnerPage.txt",
+        body="Ask bodyaddr@cern.ch or Main.AliceSmith.",
+        author="AliceSmith",
+        parent_topic="WebHome",
+    )
+    facts = list(TwikiEOSSource(records=[record]).run("r").facts)
+    _assert_no_address(_emitted(facts), ("titleaddr", "bodyaddr"))
+    (page,) = _nodes(facts, "documentation_page")
+    assert page.attrs["title"] == "Owner  page"
+    assert page.attrs["label"] == "Owner  page"
+    assert page.attrs["author"] == "AliceSmith"
+    assert page.attrs["text"] == "Owner  page WebHome CMS"
+    (chunk,) = _nodes(facts, "document_chunk")
+    assert chunk.attrs["heading_path"] == "Owner  page"
+    assert chunk.attrs["text"] == "Owner  page Ask  or Main.AliceSmith."
+
+
+def test_eos_address_free_topic_is_emitted_byte_identical(tmp_path):
+    # Redaction decodes nothing: a topic with entities, names, a version
+    # pin and "AT"-words but no address keeps its exact text, so its chunk
+    # text and chunk id are the ones the parser alone would give.
+    raw = (
+        '%META:TOPICINFO{author="JohnDoe" date="1700000000" version="4"}%\n'
+        "---++ Plain\n"
+        "Main.JohnDoe and Jane Roe at CERN: AT&amp;T, R&amp;D &commat; ops, "
+        "&#64; alone, pip install numpy@1.26.4, 100% done, served at "
+        "cmsweb.cern.ch, run at 13.6 TeV, file x_2016_at_13TeV.root, "
+        "remove NOSPAM.\n"
+    )
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "PlainTopic.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    (page,) = _nodes(facts, "documentation_page")
+    assert page.attrs["author"] == "JohnDoe"
+    (chunk,) = _nodes(facts, "document_chunk")
+    expected_text = "PlainTopic " + strip_twiki(raw)
+    assert chunk.attrs["text"] == expected_text
+    seed = f"twiki:CMS:PlainTopic\\0{0}\\0{expected_text}"
+    expected_id = "chunk:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    assert chunk.node_id == expected_id
+
+
+def test_eos_address_across_a_chunk_boundary_leaves_no_fragment(tmp_path):
+    # Redaction runs before chunking, so an address that the 4,000-char
+    # window would split is still removed whole from both chunks.
+    # "LongTopic " + 1,990 "x " pairs puts the address at chars 3990-4020.
+    raw = "x " * 1990 + "boundaryaddr.longlocal@cern.ch " + "tail text " * 30
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "LongTopic.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    chunks = _nodes(facts, "document_chunk")
+    assert len(chunks) == 2
+    joined = " ".join(c.attrs["text"] for c in chunks)
+    assert "boundaryaddr" not in joined
+    assert "longlocal" not in joined
+    assert "@" not in joined
+    assert "tail text" in joined
+
+
+def test_change_probes_fingerprint_the_emission_and_redaction_code():
+    # The class body alone does not hold the fact-building functions or
+    # the redaction, so a change to them must still change the probe
+    # token; otherwise an unchanged snapshot is skipped and already
+    # stored text keeps its addresses.
+    import sys
+
+    from archi.enrichment import anonymizer
+
+    for source_class in (TwikiEOSSource, TwikiCrawlSource):
+        targets = twiki_mod._emit_targets(source_class)
+        assert source_class in targets
+        assert sys.modules["archi.sources.twiki"] in targets
+        assert anonymizer in targets
+
+
+def test_crawl_email_addresses_removed_and_names_kept(monkeypatch):
+    raw = (
+        '%META:TOPICINFO{author="crawlauthor@cern.ch" date="1700000000" '
+        'version="2"}%\n'
+        "---++ Owners\n"
+        "Owner Main.JaneRoe (crawlbody@cern.ch).\n"
+        "<table><tr><td>Jane Roe</td><td>crawlcell&#64;cern.ch</td></tr>"
+        "</table>\n"
+    )
+    responses = {_raw_url("Ops/StartTopic"): _ok("Ops/StartTopic", raw)}
+    _fake_sessions(monkeypatch, responses)
+    run = _crawl_source(max_depth=0).run("r", mode="scope_complete")
+    facts = list(run.facts)
+    _assert_no_address(
+        _emitted(facts), ("crawlauthor", "crawlbody", "crawlcell")
+    )
+    (chunk,) = _nodes(facts, "document_chunk")
+    assert "Owner Main.JaneRoe ()." in chunk.attrs["text"]
+    assert "| Jane Roe |  |" in chunk.attrs["text"]
+
+
+# --- operator rule for spelled-out forms and git@ (Jason, 2026-09-28) -------
+
+
+def _single_chunk_text(tmp_path, name, raw):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / f"{name}.txt").write_text(raw)
+    facts = list(TwikiEOSSource(eos_root=str(root)).run("r").facts)
+    (chunk,) = _nodes(facts, "document_chunk")
+    return chunk
+
+
+def test_eos_prose_forms_and_git_account_are_emitted_byte_identical(tmp_path):
+    # Free-prose "at ... dot" forms and the git@ account are not removed,
+    # so a topic holding only those keeps the parser's exact text and the
+    # chunk id computed from it.
+    raw = (
+        '%META:TOPICINFO{author="JohnDoe" date="1700000000" version="2"}%\n'
+        "---++ Setup\n"
+        "Write to john.doe at cern.ch or jdoe AT cern DOT ch; the group is "
+        "based at cern.ch.\n"
+        "<verbatim>\ngit clone git@github.com:cms-sw/cmssw.git\n"
+        "git remote add up git@gitlab.cern.ch:cms/y.git\n</verbatim>\n"
+    )
+    chunk = _single_chunk_text(tmp_path, "SetupTopic", raw)
+    expected_text = "SetupTopic " + strip_twiki(raw)
+    assert "john.doe at cern.ch" in expected_text
+    assert "git clone git@github.com:cms-sw/cmssw.git" in expected_text
+    assert chunk.attrs["text"] == expected_text
+    seed = f"twiki:CMS:SetupTopic\\0{0}\\0{expected_text}"
+    expected_id = "chunk:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+    assert chunk.node_id == expected_id
+
+
+def test_eos_bracketed_forms_and_ssh_logins_removed_git_kept(tmp_path):
+    raw = (
+        "---++ Access\n"
+        "Mail bracketone[AT]cern.ch or brackettwo(at)cern(dot)ch or "
+        "bracketthree at cern[DOT]ch.\n"
+        "Log in with ssh sshuser@lxplus.cern.ch then run "
+        "git clone git@github.com:x/y.git by gitnext@cern.ch today.\n"
+    )
+    chunk = _single_chunk_text(tmp_path, "AccessTopic", raw)
+    text = chunk.attrs["text"]
+    for part in ("bracketone", "brackettwo", "bracketthree", "sshuser", "gitnext"):
+        assert part not in text
+    assert "Mail  or  or ." in text
+    assert "ssh  then run git clone git@github.com:x/y.git by  today." in text
+
+
+# --- empty-cache-fails-loudly: PR #19 review follow-ups ----------------------
+#
+# Each case below claimed a complete scope (or disagreed between
+# preflight and run) on main 8e056961. All snapshot content is made up.
+
+_NOT_ROOT = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root reads mode-000 files and folders",
+)
+
+
+def _page_ids(run):
+    return {n.node_id for n in _nodes(list(run.facts), "documentation_page")}
+
+
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_eos_all_seeds_missing_preflight_agrees_with_run(tmp_path, mode):
+    # Review item 1: preflight said ok with 0 records; run said
+    # cache_missing.
+    root = _write_snapshot(tmp_path)
+    source = TwikiEOSSource(
+        eos_root=str(root), seed_topics=["AbsentOne", "AbsentTwo"]
+    )
+    run = source.run("r", mode=mode)
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "cache_missing"
+    assert "2/2 configured seed topics missing" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "cache_missing"
+    assert preflight.cache_path == str(root)
+    assert "2/2 configured seed topics missing" in preflight.reason
+
+
+def test_eos_one_seed_missing_preflight_agrees_with_run(tmp_path):
+    # Review item 1: preflight said ok; run said endpoint_failed.
+    root = _write_snapshot(tmp_path)
+    source = TwikiEOSSource(
+        eos_root=str(root), seed_topics=["TopicOne", "AbsentTopic"],
+        max_depth=0,
+    )
+    run = source.run("r", mode="scope_complete")
+    assert _page_ids(run) == {"twiki:CMS:TopicOne"}
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert source.preflight().status == "endpoint_failed"
+
+
+@_NOT_ROOT
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_eos_unreadable_root_says_it_could_not_be_read(tmp_path, mode):
+    # Review item 2: the refusal said "holds no TWiki topics".
+    root = _write_snapshot(tmp_path)
+    root.chmod(0)
+    try:
+        source = TwikiEOSSource(eos_root=str(root))
+        run = source.run("r", mode=mode)
+        assert list(run.facts) == []
+        assert run.completed_scope is False
+        assert run.health.status == "cache_missing"
+        assert run.health.cache_path == str(root)
+        assert "could not be read" in run.health.reason
+        assert "holds no TWiki topics" not in run.health.reason
+        preflight = source.preflight()
+        assert preflight.status == "cache_missing"
+        assert "could not be read" in preflight.reason
+    finally:
+        root.chmod(0o755)
+
+
+@_NOT_ROOT
+def test_eos_unreadable_subfolder_refuses_scope(tmp_path):
+    # Review item 3: rglob hid the PermissionError and the run claimed
+    # a complete scope, retracting every page under the folder.
+    root = _write_snapshot(tmp_path)
+    (root / "Sub").chmod(0)
+    try:
+        source = TwikiEOSSource(eos_root=str(root))
+        run = source.run("r", mode="scope_complete")
+        assert _page_ids(run) == {"twiki:CMS:TopicOne", "twiki:CMS:TopicTwo"}
+        assert run.completed_scope is False
+        assert run.health.status == "endpoint_failed"
+        assert "could not be read, e.g. Sub" in run.health.reason
+        preflight = source.preflight()
+        assert preflight.status == "endpoint_failed"
+        assert preflight.record_count == 2
+    finally:
+        (root / "Sub").chmod(0o755)
+
+
+@_NOT_ROOT
+def test_eos_unreadable_topic_file_refuses_scope(tmp_path):
+    # main: read_text raised PermissionError out of run().
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").chmod(0)
+    try:
+        source = TwikiEOSSource(eos_root=str(root))
+        run = source.run("r", mode="scope_complete")
+        assert "twiki:CMS:TopicTwo" not in _page_ids(run)
+        assert run.completed_scope is False
+        assert run.health.status == "endpoint_failed"
+        assert "TopicTwo.txt" in run.health.reason
+        assert source.preflight().status == "endpoint_failed"
+    finally:
+        (root / "TopicTwo.txt").chmod(0o644)
+
+
+def test_eos_zero_byte_topic_is_skipped_and_claims_scope(tmp_path):
+    # Review item 4 said a zero-byte topic is an interrupted sync and
+    # refused the scope. The real CMS snapshot holds two topics that are
+    # empty upstream, so that rule refused every real ingest
+    # (twiki-empty-topics, 2026-09-29). A few empty topics are skipped
+    # (never emitted: that would blank the page), named, and the scope
+    # is still claimed, so the page is retracted as absent.
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").write_bytes(b"")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert _page_ids(run) == {
+        "twiki:CMS:TopicOne", "twiki:CMS:Sub:SubTopicPage",
+    }
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert run.health.record_count == 2
+    assert "1 empty topic files skipped" in run.health.reason
+    assert run.health.reason.endswith(": TopicTwo.txt")
+    assert source.last_empty_topics == ("TopicTwo.txt",)
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert preflight.record_count == 2
+    assert "TopicTwo.txt" in preflight.reason
+
+
+def test_eos_zero_byte_seed_topic_is_skipped_and_claims_scope(tmp_path):
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").write_bytes(b"")
+    source = TwikiEOSSource(
+        eos_root=str(root), seed_topics=["TopicOne"], max_depth=1
+    )
+    run = source.run("r", mode="scope_complete")
+    assert _page_ids(run) == {"twiki:CMS:TopicOne"}
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert "TopicTwo.txt" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert "TopicTwo.txt" in preflight.reason
+
+
+def _write_many_topics(root, count):
+    for index in range(count):
+        (root / f"Filler{index:03d}.txt").write_text(
+            f"---+ Filler {index}\nBody {index}.\n"
+        )
+
+
+def test_eos_two_empty_topics_among_many_claim_scope_and_are_named(tmp_path):
+    # The real case: two topics empty upstream in a large snapshot.
+    root = _write_snapshot(tmp_path)
+    _write_many_topics(root, 40)
+    (root / "EmptyUpstream.txt").write_bytes(b"")
+    (root / "Sub" / "Blank.txt").write_bytes(b" \n\x00\n")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert len(_page_ids(run)) == 43
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert run.health.record_count == 43
+    assert (
+        "2 empty topic files skipped (zero bytes or only whitespace/NUL "
+        "bytes; taken as empty upstream, at most 10 allowed among 45 "
+        "topic files): EmptyUpstream.txt, Sub/Blank.txt"
+    ) in run.health.reason
+    assert source.last_empty_topics == ("EmptyUpstream.txt", "Sub/Blank.txt")
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert preflight.record_count == 43
+    assert "EmptyUpstream.txt, Sub/Blank.txt" in preflight.reason
+
+
+def test_eos_empty_topics_at_the_limit_claim_scope(tmp_path):
+    root = _write_snapshot(tmp_path)
+    for index in range(10):
+        (root / f"Empty{index:02d}.txt").write_bytes(b"")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert "10 empty topic files skipped" in run.health.reason
+    assert source.preflight().status == "ok"
+
+
+@pytest.mark.parametrize("seeded", [False, True], ids=["tree", "seeded"])
+def test_eos_many_empty_topics_refuse_scope(tmp_path, seeded):
+    # Above max(10, 0.1%) empty topics the snapshot looks like an
+    # interrupted sync: skip them, emit the rest, claim no scope.
+    root = _write_snapshot(tmp_path)
+    names = [f"Empty{index:02d}" for index in range(11)]
+    for name in names:
+        (root / f"{name}.txt").write_bytes(b"")
+    kwargs = (
+        {"seed_topics": ["TopicOne", *names], "max_depth": 0}
+        if seeded else {}
+    )
+    source = TwikiEOSSource(eos_root=str(root), **kwargs)
+    run = source.run("r", mode="scope_complete")
+    assert "twiki:CMS:TopicOne" in _page_ids(run)
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert "11 topic files are zero bytes" in run.health.reason
+    assert "more than the 10 empty topics allowed" in run.health.reason
+    assert "interrupted sync" in run.health.reason
+    assert "no complete scope claimed" in run.health.reason
+    assert len(source.last_empty_topics) == 11
+    preflight = source.preflight()
+    assert preflight.status == "endpoint_failed"
+    assert preflight.reason == run.health.reason
+
+
+def test_eos_tolerated_empty_topics_are_named_when_another_problem_refuses(
+    tmp_path,
+):
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").write_bytes(b"")
+    source = TwikiEOSSource(
+        eos_root=str(root), seed_topics=["TopicOne", "NoSuchSeed"],
+        max_depth=1,
+    )
+    run = source.run("r", mode="scope_complete")
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert "NoSuchSeed" in run.health.reason
+    assert "1 empty topic files skipped" in run.health.reason
+    assert source.preflight().status == "endpoint_failed"
+
+
+def test_eos_empty_topic_names_are_capped_in_the_reason(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(twiki_mod, "EMPTY_TOPIC_NAMES_SHOWN", 1)
+    root = _write_snapshot(tmp_path)
+    for index in range(3):
+        (root / f"Empty{index:02d}.txt").write_bytes(b"")
+    run = TwikiEOSSource(eos_root=str(root)).run("r", mode="scope_complete")
+    assert run.completed_scope is True
+    assert run.health.reason.endswith(": Empty00.txt, and 2 more")
+
+
+@pytest.mark.parametrize(
+    ("topic_files", "limit"),
+    [(0, 10), (45, 10), (10999, 10), (11000, 11), (43746, 43)],
+)
+def test_empty_topic_limit_is_max_of_ten_and_a_tenth_of_a_percent(
+    topic_files, limit
+):
+    assert twiki_mod.empty_topic_limit(topic_files) == limit
+    assert twiki_mod.empty_topics_tolerated(limit, topic_files)
+    assert not twiki_mod.empty_topics_tolerated(limit + 1, topic_files)
+
+
+def test_eos_snapshot_of_only_zero_byte_topics_is_cache_missing(tmp_path):
+    root = tmp_path / "snapshot"
+    root.mkdir()
+    (root / "TopicOne.txt").write_bytes(b"")
+    (root / "TopicTwo.txt").write_bytes(b"")
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "cache_missing"
+    assert "2 topic files are zero bytes" in run.health.reason
+    assert "and no readable topic" in run.health.reason
+    assert "allowed" not in run.health.reason
+    assert source.preflight().status == "cache_missing"
+
+
+def test_eos_hidden_files_and_folders_are_not_topics(tmp_path):
+    # Review item 5: .TopicA.txt and .sync/... were ingested as topics.
+    root = _write_snapshot(tmp_path)
+    (root / ".TopicA.txt").write_text(TOPIC_TWO)
+    (root / ".sync").mkdir()
+    (root / ".sync" / "TopicB.txt").write_text(TOPIC_TWO)
+    (root / "Sub" / ".hidden").mkdir()
+    (root / "Sub" / ".hidden" / "TopicC.txt").write_text(TOPIC_TWO)
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert _page_ids(run) == {
+        "twiki:CMS:TopicOne", "twiki:CMS:TopicTwo",
+        "twiki:CMS:Sub:SubTopicPage",
+    }
+    # Hidden files are not part of the scope, so skipping them is not a
+    # partial read: the run still claims its scope.
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert source.preflight().record_count == 3
+
+
+def test_eos_snapshot_of_only_hidden_topics_is_cache_missing(tmp_path):
+    root = tmp_path / "snapshot"
+    (root / ".sync").mkdir(parents=True)
+    (root / ".sync" / "TopicOne.txt").write_text(TOPIC_ONE)
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert list(run.facts) == []
+    assert run.health.status == "cache_missing"
+    assert source.preflight().status == "cache_missing"
+
+
+# --- review of #21: max_files cap and blank topics ---------------------------
+
+
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_eos_max_files_cut_claims_no_scope(tmp_path, mode):
+    # The cap read 1 of 3 topics and still claimed a complete scope,
+    # retracting the 2 pages past the cap.
+    root = _write_snapshot(tmp_path)
+    source = TwikiEOSSource(eos_root=str(root), max_files=1)
+    run = source.run("r", mode=mode)
+    assert len(_page_ids(run)) == 1
+    assert run.completed_scope is False
+    assert run.health.status == "ok"
+    assert "max_files=1 left out 2 of 3 topics" in run.health.reason
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert "no complete scope claimed" in preflight.reason
+
+
+def test_eos_max_files_that_cuts_nothing_still_claims_scope(tmp_path):
+    root = _write_snapshot(tmp_path)
+    run = TwikiEOSSource(eos_root=str(root), max_files=3).run(
+        "r", mode="scope_complete"
+    )
+    assert len(_page_ids(run)) == 3
+    assert run.completed_scope is True
+
+
+@pytest.mark.parametrize(
+    "content", [b"   \n\t \r\n", b"\x00" * 70000, b"\n\x00 \x00\n"],
+    ids=["whitespace", "nul-bytes", "mixed"],
+)
+def test_eos_blank_topic_is_skipped_and_claims_scope(tmp_path, content):
+    # Whitespace-only or NUL-filled topics were ingested as real pages,
+    # blanking their content. Treated like zero-byte files.
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").write_bytes(content)
+    source = TwikiEOSSource(eos_root=str(root))
+    run = source.run("r", mode="scope_complete")
+    assert "twiki:CMS:TopicTwo" not in _page_ids(run)
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert "TopicTwo.txt" in run.health.reason
+    assert twiki_mod.is_blank_topic(content)
+    preflight = source.preflight()
+    assert preflight.status == "ok"
+    assert "TopicTwo.txt" in preflight.reason
+
+
+def test_eos_blank_seed_topic_is_skipped_and_claims_scope(tmp_path):
+    root = _write_snapshot(tmp_path)
+    (root / "TopicTwo.txt").write_bytes(b"\x00\x00\n")
+    source = TwikiEOSSource(
+        eos_root=str(root), seed_topics=["TopicOne"], max_depth=1
+    )
+    run = source.run("r", mode="scope_complete")
+    assert _page_ids(run) == {"twiki:CMS:TopicOne"}
+    assert run.completed_scope is True
+    assert run.health.status == "ok"
+    assert source.preflight().status == "ok"

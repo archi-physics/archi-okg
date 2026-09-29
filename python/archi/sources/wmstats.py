@@ -7,10 +7,30 @@ helpers come from :mod:`archi.auth.cache` /
 :mod:`archi.sources._cache_report` with an explicit ``base`` parameter,
 and the hardcoded ``data/cms/wmstats-workflows/records.json`` path is a
 parameter (default keeps the cms layout minus the ``cms/`` segment).
-As in the original the source is optional and offline-only; ``run()``
-raises on a missing cache (only ``preflight`` reports it), and the
+As in the original the source is optional and offline-only; a missing, unreadable, truncated or
+empty records cache is ``cache_missing`` with ``completed_scope=False`` from
+both ``preflight`` and ``run()`` (empty-cache-fails-loudly; the original
+raised from ``run()`` on a missing cache and reported an empty one as
+``skipped_optional``, which okg accepts as a complete scope to retract). The
 ``depends_on`` -> ``cmssw_release`` edge is emitted whether or not that
 release node exists (the original did not check).
+
+The cache is either a plain list of workflow records or the WMStats
+collection shape (wmstats-collection-shape)::
+
+    {"cutoff_utc": "...",
+     "status_payloads": {"<status>": {"result": [{"<name>": {record}}]}}}
+
+one WMStats API answer per workflow status. Its records are flattened in
+file order. A workflow name seen twice is skipped and counted, so the run
+emits it once and claims no complete scope: the collector already merges
+duplicates (``authority.json`` ``deliberate_merge_count``), so a repeat
+means the export contradicts itself. No workflow at all under
+``status_payloads`` is ``cache_missing``; an object without a
+``status_payloads`` object, or a status without a ``result`` list, is
+``endpoint_failed``. When ``authority.json`` sits next to the records file,
+the number of records in the file must equal its ``record_count``, else
+``endpoint_failed``.
 
 Registry-entry template — same three prerequisites as
 ``archi/sources/jira.py``'s template; ``workflow`` and
@@ -19,7 +39,7 @@ Registry-entry template — same three prerequisites as
 
     wmstats_workflows:
       module: archi.sources.wmstats
-      class: WMStatsWorkflowSource
+      class: WMStatsWorkflowAdapter
       ownership_id: <instance>.wmstats-workflows
       admission_policy:
         producer_id: <instance>.wmstats-workflows
@@ -47,7 +67,7 @@ Registry-entry template — same three prerequisites as
       source_class: mutable_api
       record_identity_kind: remote_id
       record_identity_fields: [workflow]
-      source_revision_kind: content_hash
+      source_revision_kind: updated_at
       deletion_semantics: missing_from_completed_scope
       publication_mode: published_generation
       required_for_baseline: false
@@ -61,7 +81,9 @@ Registry-entry template — same three prerequisites as
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
 
 from okg.deployment import (
@@ -74,12 +96,17 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
-    load_json,
+    resolve_repo_path,
 )
 from archi.sources._cache_report import (
+    CacheUnusable,
     cache_preflight_result,
     cache_source_health,
+    read_cache_json,
+    unusable_cache_preflight,
+    unusable_cache_run,
 )
+from archi.sources._sdk_adapter import ReaderAdapter
 
 
 @dataclass(frozen=True)
@@ -132,10 +159,14 @@ class WMStatsWorkflowSource:
         return (self.records_path,)
 
     def preflight(self, mode: str = "live") -> PreflightResult:
+        # Same verdict run() reaches: a missing, unreadable, truncated
+        # or empty cache is cache_missing, never an empty success.
         try:
-            records = self._records()
-        except FileNotFoundError:
-            records = None
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=False
+            )
         return cache_preflight_result(
             source_name=self.name,
             description="WMStats workflow",
@@ -143,10 +174,18 @@ class WMStatsWorkflowSource:
             records=records,
             required=False,
             base=self.base,
+            skipped_count=skipped,
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records, skipped = self._records_with_skips()
+        try:
+            records, skipped = self._records_with_skips()
+        except CacheUnusable as exc:
+            # An empty cache is a failed fetch, not an empty catalog: a
+            # complete scope over zero records would retract every
+            # record ingested before (okg honours that order for
+            # skipped_optional health too), so report cache_missing.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -175,14 +214,16 @@ class WMStatsWorkflowSource:
         return self._records_with_skips()[0]
 
     def _records_with_skips(self) -> tuple[list[WorkflowRecord], int]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of workflows"
-            )
+        payload = read_cache_json(
+            self.records_path, expect=(list, dict), base=self.base
+        )
+        path = resolve_repo_path(self.records_path, base=self.base)
+        items = _workflow_items(payload, path)
+        _check_authority_count(path, len(items))
         records: list[WorkflowRecord] = []
+        seen: set[str] = set()
         skipped = 0
-        for item in payload:
+        for item in items:
             if not isinstance(item, dict):
                 skipped += 1
                 continue
@@ -192,9 +233,10 @@ class WMStatsWorkflowSource:
                 or item.get("RequestName")
                 or ""
             ).strip()
-            if not name:
+            if not name or name in seen:
                 skipped += 1
                 continue
+            seen.add(name)
             output = (
                 item.get("output_datasets")
                 or item.get("OutputDatasets")
@@ -240,6 +282,63 @@ class WMStatsWorkflowSource:
                 updated_at=str(item.get("updated_at") or ""),
             ))
         return records, skipped
+
+
+def _workflow_items(payload: Any, path: Path) -> list[Any]:
+    """The workflow records of either cache shape, in file order."""
+    if isinstance(payload, list):
+        return payload
+    by_status = payload.get("status_payloads")
+    if not isinstance(by_status, dict):
+        raise CacheUnusable(
+            path,
+            "holds a JSON object without a status_payloads object "
+            "(drifted or error-shaped payload)",
+            status="endpoint_failed",
+        )
+    items: list[Any] = []
+    for status, body in by_status.items():
+        result = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(result, list):
+            raise CacheUnusable(
+                path,
+                f"status_payloads[{status!r}] has no result list "
+                "(drifted or error-shaped payload)",
+                status="endpoint_failed",
+            )
+        for entry in result:
+            # Each result entry maps workflow name -> record.
+            items.extend(entry.values() if isinstance(entry, dict) else [entry])
+    if not items:
+        raise CacheUnusable(
+            path,
+            "holds no workflow under status_payloads; a failed or "
+            "unsynced fetch, not an empty catalog",
+            status="cache_missing",
+        )
+    return items
+
+
+def _check_authority_count(path: Path, count: int) -> None:
+    """The collector's ``authority.json`` record count, when it is there."""
+    authority = path.parent / "authority.json"
+    if not authority.is_file():
+        return
+    try:
+        expected = json.loads(authority.read_text(encoding="utf-8"))["record_count"]
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise CacheUnusable(
+            authority,
+            f"has no readable record_count ({exc.__class__.__name__})",
+            status="endpoint_failed",
+        ) from exc
+    if expected != count:
+        raise CacheUnusable(
+            path,
+            f"holds {count} workflow records but {authority} counts "
+            f"{expected}; a partial or mixed export",
+            status="endpoint_failed",
+        )
 
 
 def _facts_for_records(
@@ -332,3 +431,21 @@ def _dataset_node(dataset: str, revision: dict[str, Any]) -> NodeFact:
         source_record_id={"dataset": dataset},
         source_revision=revision,
     )
+
+
+class WMStatsWorkflowAdapter(ReaderAdapter):
+    """Registry adapter for :class:`WMStatsWorkflowSource`.
+
+    The registry-entry template in this module's docstring names this
+    class. The reader's behavior is unchanged; this class only drives it
+    through the substrate's adapter contract, which a bare reader cannot
+    satisfy (its ``ConnectorRun`` has no ``next_cursor``).
+
+    ``profile`` and ``change_probe_kind`` must be string literals; see
+    ``ReaderAdapter``. ``test_bundle_source_adapters.py`` parses this
+    file and holds them equal to the reader's own values.
+    """
+
+    reader_class = WMStatsWorkflowSource
+    profile = "mutable_api"
+    change_probe_kind = "content_hash"

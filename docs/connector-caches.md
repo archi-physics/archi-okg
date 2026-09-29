@@ -9,8 +9,9 @@ at.
 
 It exists because a live bring-up of the comp-ops instance found that
 eight connectors had no refresh tooling anywhere: the runbook assumed
-downloader scripts that were never written, and only `download_jira.py`
-and `download_static_docs.py` exist in any repo. Whoever writes the
+downloader scripts that were never written, and only the JIRA and static
+docs downloaders exist (now `archi.downloaders.jira` and
+`archi.downloaders.static_docs`, moved from okg-deployments). Whoever writes the
 missing ones — us or an operations team who already fetch this data —
 needs to know exactly what to produce. That is this page.
 
@@ -110,10 +111,10 @@ upstream or normalized names: `RequestName` / `request_name` /
 
 | connector | cache | refreshed by |
 |---|---|---|
-| `jira` | `data/jira/records.json` (+ `meta.json`) | `download_jira.py`. Needs the `jira` Python package installed in the operator venv — absent, the token alone does not help. The parsed record count is cross-checked against `meta.json`'s `record_count`; a mismatch withholds the scope claim. |
-| `docsite`, `gitlab_docs` | `data/docsite/records.json`, `data/gitlab-docs/records.json` | `download_static_docs.py` |
+| `jira` | `data/jira/records.json` (+ `meta.json`) | `python -m archi.downloaders.jira`. Needs the `jira` Python package installed in the operator venv — absent, the token alone does not help. The parsed record count is cross-checked against `meta.json`'s `record_count`; a mismatch withholds the scope claim. |
+| `docsite`, `gitlab_docs` | `data/docsite/records.json`, `data/gitlab-docs/records.json` | `python -m archi.downloaders.static_docs` (targets in the packaged `source-download-manifest.yaml`) |
 | `cmssw_releases` | `data/cmssw-releases/releases.map` | the connector itself, from the public cms-bot map — no auth, no downloader |
-| `cmsweb_docs`, `hypernews` | crawled live through an SSO cookie jar | `sso-login.py`, which is **interactive and needs a TOTP code** — inherently an operator step |
+| `cmsweb_docs`, `hypernews` | crawled live through an SSO cookie jar | `python -m archi.downloaders.sso_login`, which is **interactive and needs a TOTP code** — inherently an operator step |
 | `twiki_eos` | an EOS snapshot path | whatever populates that EOS area |
 | `monit_*` | none — queried live | a MONIT/Grafana token |
 
@@ -130,3 +131,9 @@ For releases specifically there are two accepted shapes: a
 cms-bot map that `cmssw_releases` already fetches
 (`releases_map_path: data/cmssw-releases/releases.map`). Use the map on
 a live instance — nothing produces a releases `records.json`.
+
+## Shipping caches without credentials
+
+`python -m archi.snapshot` packs existing caches into checksummed, redacted
+per-group archives with a lock file, so an install can fetch data without
+CERN access. See [cache snapshots](cache-snapshot.md).
