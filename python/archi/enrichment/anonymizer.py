@@ -321,12 +321,14 @@ def _local_start(text: str, sep: int, bound: int) -> int:
     """Leftmost start of the local part that ends at ``sep`` (``sep`` if none).
 
     A quoted local part may start before ``bound``; the caller merges it
-    with the earlier matches it covers (see :func:`_add_span`).
+    with the earlier matches it covers (see :func:`_add_span`). Local-part
+    characters directly before the opening quote go with it
+    (``jdoe"x"@cern.ch``), so no part of the name is left.
     """
     quote = _quoted_local_start(text, sep)
-    if quote is not None:
+    if quote is not None and quote <= bound:
         return quote
-    i = sep
+    i = sep if quote is None else quote
     while i > bound:
         char = text[i - 1]
         if _is_local(char):
@@ -633,7 +635,8 @@ def _add_span(spans: list[tuple[int, int]], start: int, end: int) -> None:
 # - A token that carries ``NOSPAM`` (any case) and, with it taken out,
 #   ends like a mail domain (``.ch``, ``.edu``, ``.gov``, ``.org``,
 #   ``.com``, ``DOTch`` ... or ``cernch``) is removed whole, with a
-#   preceding ``name AT`` / ``name_at_`` part: the ``NOSPAM`` marker says
+#   preceding ``name AT`` / ``name_at_`` / ``name@`` part (``jdoe@cernNOSPAMch``,
+#   whose domain has no dot for the @ pass): the ``NOSPAM`` marker says
 #   the token is an address. ``NOSPAM`` alone, in a name such as
 #   ``NoSpamFilter``, or with nothing before the domain ending
 #   (``nospam.ch``, ``NOSPAM.org``) stays: it must sit inside an address.
@@ -708,7 +711,7 @@ _OBF_GLUED_RE = re.compile(
     + _OBF_END
 )
 _OBF_NOSPAM_RE = re.compile(
-    r"(?<![\w.+-])(?:[\w.+-]{1,64}(?: at | AT |_at_|_AT_))?"
+    r"(?<![\w.+-])(?:[\w.+-]{1,64}(?: at | AT |_at_|_AT_|@))?"
     r"[\w.+-]*NOSPAM[\w.+-]*",
     re.IGNORECASE,
 )

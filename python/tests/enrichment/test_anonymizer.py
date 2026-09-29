@@ -1079,7 +1079,13 @@ def test_redact_email_addresses_invisible_characters_property():
         ('see "a\\"b"@cern.ch now', "see  now"),
         ('"q\\"x jdoe@a.bc"@cern.ch', ""),
         ('"q\\\\"x"@cern.ch', '"q\\\\'),
+        # A name directly before the opening quote goes with it (it kept
+        # "jdoe" before #14).
+        ('mail jdoe"x"@cern.ch now', "mail  now"),
+        ('a jdoe.x"q y"@cern.ch b', "a  b"),
+        ('mail="john doe"@cern.ch x', " x"),
         # Quotes elsewhere are left alone.
+        ('say "hi"@cern.ch', "say "),
         ('jdoe@cern.ch said "hi"', ' said "hi"'),
         ('"a" jdoe@cern.ch "b"@x.org', '"a"  '),
         # A quote pair across a line break is not a quoted local part.
@@ -1172,6 +1178,9 @@ def test_redact_obfuscated_email_addresses_keeps_sites_markup_and_code(text):
         "mail jdoe at cern(dot)ch now",
         "mail jdoeNOSPAM.cern.ch now",
         "mail NOSPAMjdoe.cern.ch now",
+        # Found on the TWiki snapshot: the @ pass skips a domain with no
+        # dot, and before #14 only "cernNOSPAMch" went, leaving "jdoe@".
+        "mail jdoe@cernNOSPAMch now",
     ],
 )
 def test_redact_obfuscated_email_addresses_still_removes_real_addresses(text):

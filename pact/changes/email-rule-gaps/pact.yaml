@@ -55,9 +55,10 @@ requirements:
 
     Quoted local part: the opening quote is the nearest unescaped " before the closing one,
     on the same line, looked for past earlier matches and across up to 16 backslash-escaped
-    quotes; the span covers and merges the earlier matches inside it. So "x git@a.b y"@cern.ch,
-    "x jdoe@a.bc y"@cern.ch and "q\"x jdoe@a.bc"@cern.ch are removed whole. The git@ exemption
-    reads a quoted local part the same way, so a git@ token inside one is never kept.
+    quotes; the span covers and merges the earlier matches inside it, and local-part characters
+    directly before the opening quote go with it. So "x git@a.b y"@cern.ch, "x jdoe@a.bc y"@cern.ch,
+    "q\"x jdoe@a.bc"@cern.ch and jdoe"x"@cern.ch are removed whole. The git@ exemption reads
+    a quoted local part the same way, so a git@ token inside one is never kept.
 
 
     Spelled-out bracketed forms ((at) [at] {at} <at>, and a spaced " at " before a bracketed
@@ -65,8 +66,9 @@ requirements:
     letters or one of com org net edu gov mil int info biz name pro aero coop museum mobi asia
     cat jobs tel travel eus xyz dev app cloud online site tech email, and the user name is not
     a CMS site name (T<digit>_<two capitals>_...). NOSPAM tokens must have a letter or digit
-    before the domain ending once NOSPAM is taken out, so nospam.ch and NOSPAM.org stay. Glued
-    forms (_at_) are unchanged.
+    before the domain ending once NOSPAM is taken out, so nospam.ch and NOSPAM.org stay; a
+    name@ before the token goes with it (jdoe@cernNOSPAMch, whose dotless domain the @ pass skips,
+    used to leave jdoe@). Glued forms (_at_) are unchanged.
 
 
     Kept by the rule and unchanged: git@ tokens (git clone git@github.com:org/x.git), free-prose
