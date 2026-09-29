@@ -721,3 +721,27 @@ def test_sso_probe_declarations():
 def test_sso_required_params():
     with pytest.raises(TypeError):
         SSOCookieDocsSource()  # sitemap_url and cookie_file_env are required
+
+
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_sso_crawl_with_no_pages_never_claims_scope(monkeypatch, tmp_path, mode):
+    # empty-cache-fails-loudly: an empty sitemap (or one whose pages are
+    # all blank or non-HTML) used to finish ok with a complete scope
+    # over zero pages, retracting every page. Made-up sitemap.
+    cookie_path = tmp_path / "sso.txt"
+    _write_cookie_file(cookie_path)
+    monkeypatch.setenv(COOKIE_ENV, str(cookie_path))
+    responses = _default_responses()
+    responses[SITEMAP_URL] = _FakeResponse(
+        200, "", SITEMAP_URL,
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        b"</urlset>\n",
+    )
+    _fake_sessions(monkeypatch, responses)
+    run = _sso_source().run("r", mode=mode)
+    assert list(run.facts) == []
+    assert run.completed_scope is False
+    assert run.health.status == "endpoint_failed"
+    assert SITEMAP_URL in run.health.reason
+    assert "no complete scope claimed" in run.health.reason

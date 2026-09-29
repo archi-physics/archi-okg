@@ -9,10 +9,19 @@ parameter, and the hardcoded ``data/cms/...`` paths are parameters
 
 Kept-behavior note: as in the original, the CRIC ``sites_path`` and
 CRIC-core ``services_path`` topology caches are *required* — they are
-part of ``cache_paths`` (probe/preflight hash them) and ``run()``
-raises ``FileNotFoundError`` if either is absent. They are not
+part of ``cache_paths`` (probe/preflight hash them). They are not
 optional reference targets here because ``affects`` edges are only
 emitted to nodes those caches prove exist.
+
+Empty-cache-fails-loudly: a missing, unreadable, zero-byte, truncated
+or empty downtime list is ``cache_missing``, and so is a missing or
+empty CRIC topology cache (an empty one would drop every ``affects``
+edge under a complete scope); an error-shaped payload is
+``endpoint_failed``. Each gives no facts and ``completed_scope=False``
+from both ``preflight()`` and ``run()`` (the original raised
+``FileNotFoundError`` from ``run()`` only and claimed a complete scope
+over ``[]``). Topology entries that are not objects are skipped and
+stop the scope claim, as unparseable downtimes do.
 
 Registry-entry template — same three prerequisites as
 ``archi/sources/jira.py``'s template; ``downtime``, ``site``, and
@@ -77,11 +86,16 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
-    load_json,
-    resolve_repo_path,
 )
-from archi.sources._cache_report import skipped_items_status
+from archi.sources._cache_report import (
+    CacheUnusable,
+    read_cache_json,
+    skipped_items_status,
+    unusable_cache_preflight,
+    unusable_cache_run,
+)
 from archi.sources._sdk_adapter import ReaderAdapter
+from archi.sources.cric import _CMS_SITE_NAME, _Skipped, _read_objects
 
 
 @dataclass(frozen=True)
@@ -138,33 +152,37 @@ class GoCDBDowntimeSource:
         return (self.records_path, self.sites_path, self.services_path)
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        path = resolve_repo_path(self.records_path, base=self.base)
-        if not path.is_file():
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=True,
-                cache_path=str(path),
-                reason="GOCDB downtime cache file is missing",
-                checked_at=_checked_at(),
+        # Same verdict run() reaches for the same caches.
+        try:
+            records, skipped = self._records_with_skips()
+            _sites, _services, topo_skipped = self._topology()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=True
             )
-        records = self._records()
+        status, reason, _complete = _verdict(
+            "local GOCDB downtime cache present",
+            record_count=len(records),
+            skipped_count=skipped + topo_skipped,
+            records_path=self.records_path,
+        )
         return PreflightResult(
             source_name=self.name,
-            status="ok",
+            status=status,
             mode="cache",
             required=True,
             record_count=len(records),
             content_hash=content_hash(self.cache_paths, base=self.base),
-            reason="local GOCDB downtime cache present",
+            reason=reason,
             checked_at=_checked_at(),
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records, skipped = self._records_with_skips()
-        known_sites = _known_sites(self.sites_path, base=self.base)
-        service_lookup = _service_lookup(self.services_path, base=self.base)
+        try:
+            records, skipped = self._records_with_skips()
+            known_sites, service_lookup, topo_skipped = self._topology()
+        except CacheUnusable as exc:
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -181,16 +199,16 @@ class GoCDBDowntimeSource:
                     service_lookup=service_lookup,
                 )
 
-        status, reason = skipped_items_status(
-            status="ok",
-            reason="local GOCDB downtime cache used",
+        status, reason, complete = _verdict(
+            "local GOCDB downtime cache used",
             record_count=len(records),
-            skipped_count=skipped,
+            skipped_count=skipped + topo_skipped,
+            records_path=self.records_path,
         )
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(
-                mode in {"scope_complete", "reconcile"} and not skipped
+                mode in {"scope_complete", "reconcile"} and complete
             ),
             run_mode=mode,
             health=ConnectorHealth(
@@ -202,15 +220,37 @@ class GoCDBDowntimeSource:
             ),
         )
 
+    def _topology(self) -> tuple[set[str], dict[str, str], int]:
+        """The required CRIC topology caches (see the module note).
+
+        Read like the CRIC source reads them: a missing, unreadable,
+        truncated or empty cache is ``cache_missing``, an API error body
+        or a sites cache with no CMS site name is ``endpoint_failed``,
+        in preflight() and run() alike. An empty topology is refused
+        rather than accepted: it would drop every ``affects`` edge while
+        the run claimed a complete scope. Returns the lookups plus the
+        number of non-object entries skipped (which stops the claim).
+        """
+        skipped = _Skipped()
+        sites = _read_objects(
+            self.sites_path, base=self.base, skipped=skipped,
+            key_pattern=_CMS_SITE_NAME,
+        )
+        services = _read_objects(
+            self.services_path, base=self.base, skipped=skipped
+        )
+        return _known_sites(sites), _service_lookup(services), skipped.total
+
     def _records(self) -> list[DowntimeRecord]:
         return self._records_with_skips()[0]
 
     def _records_with_skips(self) -> tuple[list[DowntimeRecord], int]:
-        payload = load_json(self.records_path, base=self.base)
-        if not isinstance(payload, list):
-            raise ValueError(
-                f"{self.records_path}: expected a JSON list of downtimes"
-            )
+        # An empty downtime list is refused as cache_missing (operator
+        # decision 2026-09-28: an empty cache is a loud failure). The
+        # snapshot builder already refuses an empty gocdb group.
+        payload = read_cache_json(
+            self.records_path, expect=list, base=self.base
+        )
         grouped: dict[int, dict[str, Any]] = {}
         skipped = 0
         for item in payload:
@@ -264,17 +304,30 @@ def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _known_sites(path: str, *, base: str | None = None) -> set[str]:
-    payload = load_json(path, base=base)
-    if not isinstance(payload, dict):
-        return set()
+def _verdict(
+    ok_reason: str,
+    *,
+    record_count: int,
+    skipped_count: int,
+    records_path: str,
+) -> tuple[str, str, bool]:
+    """(status, reason, may claim a complete scope) for one cache read,
+    shared by preflight() and run(). An empty downtime list never gets
+    here (read_cache_json refuses it)."""
+    status, reason = skipped_items_status(
+        status="ok",
+        reason=ok_reason,
+        record_count=record_count,
+        skipped_count=skipped_count,
+    )
+    return status, reason, not skipped_count
+
+
+def _known_sites(payload: dict[str, Any]) -> set[str]:
     return {str(k) for k in payload}
 
 
-def _service_lookup(path: str, *, base: str | None = None) -> dict[str, str]:
-    payload = load_json(path, base=base)
-    if not isinstance(payload, dict):
-        return {}
+def _service_lookup(payload: dict[str, Any]) -> dict[str, str]:
     lookup: dict[str, str] = {}
     for service_name, service in payload.items():
         if not isinstance(service, dict):

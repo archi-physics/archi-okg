@@ -13,6 +13,29 @@ verbatim; the only changes:
   keep the cms layout minus the ``cms/`` segment (``data/cric/...``,
   ``data/cric-core/...``) so the registry template below matches the
   reference-target paths already documented in jira.py/docs.py.
+- 2026-09 (empty-cache-fails-loudly): every cache file is read with
+  :func:`archi.sources._cache_report.read_cache_json`. A missing,
+  unreadable, zero-byte, truncated or empty cache file (``{}``, or a
+  responsibilities payload whose ``result`` list is empty) is
+  ``cache_missing``; valid JSON of the wrong shape (a list where an
+  object belongs, a responsibilities payload without ``result``) is
+  ``endpoint_failed``. Either way ``run()`` emits nothing and claims
+  no complete scope, and ``preflight()`` reaches the same verdict. The
+  originals claimed a complete scope over ``{}`` caches (retracting the
+  whole topology) and crashed on a ``[]`` cache. A CRIC-core
+  federations cache with no CMS federation is ``endpoint_failed`` too.
+- Review of archi-okg #21: a name -> object cache that is an API error
+  body (top-level ``error``/``errors`` key), a sites cache with no key
+  shaped like a CMS site name, a cache none of whose values is an
+  object, a responsibilities payload with no 3-field row, or an entry
+  whose nested shape breaks the record builder is ``endpoint_failed``
+  (it used to claim a complete scope or crash). A single non-object
+  entry or non-3-field row is skipped and counted, and the run then
+  claims no complete scope. Rows with a null username or site stay a
+  plain drop, as in real exports.
+- Re-review of #21: responsibility rows that yield no operator at all
+  (every site null, or no site title matching the sites cache) are
+  ``endpoint_failed``; a complete scope would retract every operator.
 
 Registry-entry templates — same three prerequisites as
 ``archi/sources/jira.py``'s template (compose the deployment schema
@@ -116,7 +139,9 @@ and ``schemas/bridges/``; ``output_scope_summary`` must accompany
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Literal
 
@@ -131,8 +156,14 @@ from okg.deployment import (
 from archi.auth.cache import (
     content_hash,
     content_hash_change_probe,
-    load_json,
     resolve_repo_path,
+)
+from archi.sources._cache_report import (
+    CacheUnusable,
+    read_cache_json,
+    skipped_items_status,
+    unusable_cache_preflight,
+    unusable_cache_run,
 )
 from archi.sources._sdk_adapter import ReaderAdapter
 
@@ -206,45 +237,35 @@ class CRICSource:
         )
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        missing = [
-            str(resolve_repo_path(p, base=self.base))
-            for p in self.cache_paths
-            if not resolve_repo_path(p, base=self.base).is_file()
-        ]
-        if missing:
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=True,
-                cache_path=", ".join(missing),
-                reason="one or more CRIC cache files are missing",
-                checked_at=_checked_at(),
-            )
+        # Same verdict run() reaches for the same caches.
         try:
-            records = self._records()
-        except ValueError as exc:
-            return PreflightResult(
-                source_name=self.name,
-                status="endpoint_failed",
-                mode="cache",
-                required=True,
-                reason=str(exc),
-                checked_at=_checked_at(),
+            records, skipped = self._records()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=True
             )
+        status, reason = _skip_verdict(
+            "local CRIC cache present", len(records), skipped
+        )
         return PreflightResult(
             source_name=self.name,
-            status="ok",
+            status=status,
             mode="cache",
             required=True,
             record_count=len(records),
             content_hash=content_hash(self.cache_paths, base=self.base),
-            reason="local CRIC cache present",
+            reason=reason,
             checked_at=_checked_at(),
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records = self._records()
+        try:
+            records, skipped = self._records()
+        except CacheUnusable as exc:
+            # A missing, truncated, drifted or empty cache file is a
+            # failed fetch, never an empty topology: a complete scope
+            # over it would retract every site, endpoint and operator.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -257,29 +278,206 @@ class CRICSource:
             for record in records:
                 yield from _edge_facts(record, revision)
 
+        status, reason = _skip_verdict(
+            "local CRIC cache used", len(records), skipped
+        )
         return ConnectorRun(
             facts=_facts(),
-            completed_scope=(mode in {"scope_complete", "reconcile"}),
+            # Entries skipped as unparseable stop the scope claim: their
+            # records would otherwise be retracted.
+            completed_scope=(
+                mode in {"scope_complete", "reconcile"} and not skipped
+            ),
             run_mode=mode,
             health=ConnectorHealth(
-                status="ok",
+                status=status,
                 mode="cache",
                 record_count=len(records),
                 content_hash=revision["content_hash"],
-                reason="local CRIC cache used",
+                reason=reason,
             ),
         )
 
-    def _records(self) -> list[CRICRecord]:
-        return _build_records(
-            sites=load_json(self.sites_path, base=self.base),
-            storage_units=load_json(self.storage_units_path, base=self.base),
-            compute_units=load_json(self.compute_units_path, base=self.base),
-            facilities=load_json(self.facilities_path, base=self.base),
-            responsibilities=_responsibilities_result(
-                load_json(self.responsibilities_path, base=self.base),
-                self.responsibilities_path,
+    def _records(self) -> tuple[list[CRICRecord], _Skipped]:
+        _raise_if_missing(self.cache_paths, base=self.base, what="CRIC")
+        skipped = _Skipped()
+        sites = _read_objects(
+            self.sites_path, base=self.base, skipped=skipped,
+            key_pattern=_CMS_SITE_NAME,
+        )
+        storage_units = _read_objects(
+            self.storage_units_path, base=self.base, skipped=skipped
+        )
+        compute_units = _read_objects(
+            self.compute_units_path, base=self.base, skipped=skipped
+        )
+        facilities = _read_objects(
+            self.facilities_path, base=self.base, skipped=skipped
+        )
+        responsibilities_path = resolve_repo_path(
+            self.responsibilities_path, base=self.base
+        )
+        responsibilities = _responsibility_rows(
+            read_cache_json(
+                self.responsibilities_path, expect=dict, base=self.base
             ),
+            responsibilities_path,
+            skipped=skipped,
+        )
+        records = _guarded_build(
+            resolve_repo_path(self.sites_path, base=self.base).parent,
+            lambda: _build_records(
+                sites=sites,
+                storage_units=storage_units,
+                compute_units=compute_units,
+                facilities=facilities,
+                responsibilities=responsibilities,
+            ),
+        )
+        if not any(record.kind == "operator" for record in records):
+            # Rows were read but none became an operator: every row has
+            # a null user or site, or no site title matches the sites
+            # cache (the title format changed). A complete scope would
+            # retract every operator ingested before.
+            with_site = sum(1 for row in responsibilities if row[0] and row[1])
+            raise CacheUnusable(
+                responsibilities_path,
+                f"holds {len(responsibilities)} responsibility rows and "
+                f"none maps to an operator ({with_site} have a user and a "
+                f"site title, 0 of those titles match the {len(sites)} "
+                "sites in the sites cache); drifted titles or payload",
+                status="endpoint_failed",
+            )
+        return records, skipped
+
+
+#: A CMS site name (T0_CH_CERN, T2_US_MIT): a sites cache with no such
+#: key is an error body or another feed, not CRIC's CMS site list.
+_CMS_SITE_NAME = re.compile(r"^T[0-3]_[A-Z]{2}_\w+$")
+#: Top-level keys that mark an API error body written in place of data.
+_ERROR_BODY_KEYS = frozenset({"error", "errors"})
+
+
+class _Skipped:
+    """Entries dropped as unparseable, per cache file, for the reason."""
+
+    def __init__(self) -> None:
+        self.by_file: dict[str, int] = {}
+
+    def add(self, path: Path, count: int) -> None:
+        if count:
+            self.by_file[str(path)] = self.by_file.get(str(path), 0) + count
+
+    @property
+    def total(self) -> int:
+        return sum(self.by_file.values())
+
+    def __bool__(self) -> bool:
+        return bool(self.total)
+
+    def describe(self) -> str:
+        return ", ".join(f"{n} in {p}" for p, n in sorted(self.by_file.items()))
+
+
+def _skip_verdict(
+    ok_reason: str, record_count: int, skipped: _Skipped
+) -> tuple[str, str]:
+    status, reason = skipped_items_status(
+        status="ok",
+        reason=ok_reason,
+        record_count=record_count,
+        skipped_count=skipped.total,
+    )
+    if skipped:
+        reason = f"{reason} ({skipped.describe()})"
+    return status, reason
+
+
+def _read_objects(
+    path: str,
+    *,
+    base: str | None,
+    skipped: _Skipped,
+    key_pattern: re.Pattern[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """The object-valued entries of a CRIC JSON-object cache.
+
+    Refuses (``endpoint_failed``) a payload that is an API error body
+    (a top-level ``error``/``errors`` key), has no key of the expected
+    shape, or holds no object entry at all; each of those used to be
+    read as entries, claiming a complete scope that retracted every
+    real record, or crashed the run. A single entry that is not an
+    object is skipped and counted, which stops the scope claim.
+    """
+    payload = read_cache_json(path, expect=dict, base=base)
+    resolved = resolve_repo_path(path, base=base)
+    error_keys = sorted(k for k in payload if k in _ERROR_BODY_KEYS)
+    if error_keys:
+        raise CacheUnusable(
+            resolved,
+            f"holds an API error body (top-level {error_keys[0]!r} key), "
+            "not CRIC entries",
+            status="endpoint_failed",
+        )
+    if key_pattern is not None and not any(
+        key_pattern.match(str(key)) for key in payload
+    ):
+        raise CacheUnusable(
+            resolved,
+            f"has none of its {len(payload)} keys shaped like a CMS site "
+            "name (T2_XX_Name); drifted or error-shaped payload",
+            status="endpoint_failed",
+        )
+    entries = {
+        str(key): value
+        for key, value in payload.items()
+        if isinstance(value, dict)
+    }
+    if not entries:
+        raise CacheUnusable(
+            resolved,
+            f"holds no JSON-object entry (all {len(payload)} values are "
+            "something else); drifted or error-shaped payload",
+            status="endpoint_failed",
+        )
+    skipped.add(resolved, len(payload) - len(entries))
+    return entries
+
+
+def _guarded_build(directory: Path, build: Any) -> Any:
+    """Run a record builder; an entry of an unexpected nested shape is a
+    drifted payload with a health status, never a crash."""
+    try:
+        return build()
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise CacheUnusable(
+            directory,
+            "holds a CRIC entry of an unexpected shape "
+            f"({type(exc).__name__}: {exc}); drifted payload",
+            status="endpoint_failed",
+        ) from exc
+
+
+def _raise_if_missing(
+    paths: tuple[str, ...], *, base: str | None, what: str
+) -> None:
+    """Name every missing cache file at once, not just the first."""
+    missing = [
+        resolve_repo_path(p, base=base)
+        for p in paths
+        if not resolve_repo_path(p, base=base).is_file()
+    ]
+    if missing:
+        others = ""
+        if len(missing) > 1:
+            others = " (also missing: " + ", ".join(
+                str(p) for p in missing[1:]
+            ) + ")"
+        raise CacheUnusable(
+            missing[0],
+            f"is missing{others}; {len(missing)} of {len(paths)} "
+            f"{what} cache files are missing",
+            status="cache_missing",
         )
 
 
@@ -287,27 +485,54 @@ def _checked_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _responsibilities_result(payload: Any, path: str) -> list[list[Any]]:
-    """Extract the ``result`` rows, failing loudly on schema drift.
+def _responsibility_rows(
+    payload: Any, path: Path, *, skipped: _Skipped
+) -> list[list[Any]]:
+    """Extract the ``result`` rows, failing loudly on drift or emptiness.
 
     The former ``.get("result", [])`` default silently read an
     error-shaped or drifted payload as "no responsibilities", which a
     completed-scope run would then commit by retracting every operator
-    record. A payload without a ``result`` list must abort the run
-    instead of emptying it.
+    record. A payload without a ``result`` list refuses the run
+    (``endpoint_failed``); an empty ``result`` list refuses it as an
+    empty cache (``cache_missing``). A row that is not a list of exactly
+    three fields (username, site title, role) is skipped and counted,
+    which stops the scope claim; if no row has that shape the payload
+    has drifted (``endpoint_failed``). A row whose username or site is
+    null stays a normal drop, as in real exports.
     """
     if not isinstance(payload, dict) or "result" not in payload:
-        raise ValueError(
-            f"{path}: expected a dict with a 'result' list of "
-            "responsibility rows; refusing to treat a drifted or "
-            "error-shaped payload as zero responsibilities"
+        raise CacheUnusable(
+            path,
+            "holds no 'result' list of responsibility rows; refusing to "
+            "treat a drifted or error-shaped payload as zero "
+            "responsibilities",
+            status="endpoint_failed",
         )
     result = payload["result"]
     if not isinstance(result, list):
-        raise ValueError(
-            f"{path}: 'result' must be a list of responsibility rows"
+        raise CacheUnusable(
+            path,
+            "has a 'result' that is not a list of responsibility rows",
+            status="endpoint_failed",
         )
-    return result
+    if not result:
+        raise CacheUnusable(
+            path,
+            "holds an empty 'result' list of responsibilities; a failed "
+            "or unsynced fetch, not zero operators",
+            status="cache_missing",
+        )
+    rows = [row for row in result if isinstance(row, list) and len(row) == 3]
+    if not rows:
+        raise CacheUnusable(
+            path,
+            f"holds {len(result)} responsibility rows and none is a list "
+            "of 3 fields (username, site, role); drifted payload",
+            status="endpoint_failed",
+        )
+    skipped.add(path, len(result) - len(rows))
+    return rows
 
 
 def _build_records(
@@ -413,8 +638,6 @@ def _operator_records(
     user_resps: dict[str, list[tuple[str, str]]] = {}
     seen_edges: set[tuple[str, str, str]] = set()
     for row in responsibilities:
-        if len(row) < 3:
-            continue
         username, site_title, role = row[0], row[1], row[2]
         if not username or not site_title:
             continue
@@ -556,35 +779,35 @@ class CRICCoreSource:
         )
 
     def preflight(self, mode: str = "live") -> PreflightResult:
-        missing = [
-            str(resolve_repo_path(p, base=self.base))
-            for p in self.cache_paths
-            if not resolve_repo_path(p, base=self.base).is_file()
-        ]
-        if missing:
-            return PreflightResult(
-                source_name=self.name,
-                status="cache_missing",
-                mode="cache",
-                required=True,
-                cache_path=", ".join(missing),
-                reason="one or more CRIC core cache files are missing",
-                checked_at=_checked_at(),
+        # Same verdict run() reaches for the same caches.
+        try:
+            records, skipped = self._records()
+        except CacheUnusable as exc:
+            return unusable_cache_preflight(
+                exc, source_name=self.name, required=True
             )
-        records = self._records()
+        status, reason = _skip_verdict(
+            "local CRIC core cache present", len(records), skipped
+        )
         return PreflightResult(
             source_name=self.name,
-            status="ok",
+            status=status,
             mode="cache",
             required=True,
             record_count=len(records),
             content_hash=content_hash(self.cache_paths, base=self.base),
-            reason="local CRIC core cache present",
+            reason=reason,
             checked_at=_checked_at(),
         )
 
     def run(self, run_id: str, *, mode: str = "cursor") -> ConnectorRun:
-        records = self._records()
+        try:
+            records, skipped = self._records()
+        except CacheUnusable as exc:
+            # A missing, truncated, drifted or empty cache file is a
+            # failed fetch: a complete scope over it would retract
+            # every service and federation.
+            return unusable_cache_run(exc, mode=mode)
         revision = {
             "run_id": run_id,
             "content_hash": content_hash(self.cache_paths, base=self.base),
@@ -597,25 +820,59 @@ class CRICCoreSource:
             for record in records:
                 yield from _core_edge_facts(record, revision)
 
+        status, reason = _skip_verdict(
+            "local CRIC core cache used", len(records), skipped
+        )
         return ConnectorRun(
             facts=_facts(),
-            completed_scope=(mode in {"scope_complete", "reconcile"}),
+            # Entries skipped as unparseable stop the scope claim: their
+            # records would otherwise be retracted.
+            completed_scope=(
+                mode in {"scope_complete", "reconcile"} and not skipped
+            ),
             run_mode=mode,
             health=ConnectorHealth(
-                status="ok",
+                status=status,
                 mode="cache",
                 record_count=len(records),
                 content_hash=revision["content_hash"],
-                reason="local CRIC core cache used",
+                reason=reason,
             ),
         )
 
-    def _records(self) -> list[CRICCoreRecord]:
-        return _build_core_records(
-            services=load_json(self.services_path, base=self.base),
-            rcsites=load_json(self.rcsites_path, base=self.base),
-            federations=load_json(self.federations_path, base=self.base),
+    def _records(self) -> tuple[list[CRICCoreRecord], _Skipped]:
+        _raise_if_missing(
+            self.cache_paths, base=self.base, what="CRIC core"
         )
+        skipped = _Skipped()
+        services = _read_objects(
+            self.services_path, base=self.base, skipped=skipped
+        )
+        rcsites = _read_objects(
+            self.rcsites_path, base=self.base, skipped=skipped
+        )
+        federations = _read_objects(
+            self.federations_path, base=self.base, skipped=skipped
+        )
+        records = _guarded_build(
+            resolve_repo_path(self.services_path, base=self.base).parent,
+            lambda: _build_core_records(
+                services=services,
+                rcsites=rcsites,
+                federations=federations,
+            ),
+        )
+        if not any(record.kind == "federation" for record in records):
+            # Every federation was dropped as non-CMS. The CMS VO does
+            # not leave WLCG; the cache holds the wrong VO or drifted,
+            # and a complete scope would retract every federation.
+            raise CacheUnusable(
+                resolve_repo_path(self.federations_path, base=self.base),
+                f"lists {len(federations)} federations and none serves "
+                "CMS (no 'cms' VO or pledge); drifted or wrong-VO payload",
+                status="endpoint_failed",
+            )
+        return records, skipped
 
 
 def _build_rcsite_to_cms_sites(
