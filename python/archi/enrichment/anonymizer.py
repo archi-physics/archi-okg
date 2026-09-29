@@ -185,11 +185,13 @@ _DEFAULT_USERNAME_PATTERN = r"\[~[^\]]+\]"
 #   before ``@`` belongs to the separator: ``jdoe\@cern.ch`` is how Perl,
 #   Doxygen and shell text escape an address.
 # - LOCAL: a quoted string on one line, or a run of Unicode word
-#   characters, combining marks, invisible characters (soft hyphen,
-#   zero-width space/joiners, word joiner), ``.!#$%&'*+^`{|}~-=``,
-#   ``&amp;`` layers and encoded dots. ``/`` and ``?`` are excluded so a
-#   URL path is not swallowed; ``=`` is included, so ``mail=`` before an
-#   address in a query string goes with it.
+#   characters, combining marks, invisible characters (see
+#   :func:`_is_invisible`), ``.!#$%&'*+^`{|}~-=``, ``&amp;`` layers and
+#   encoded dots. ``/`` and ``?`` are excluded so a URL path is not
+#   swallowed; ``=`` is included, so ``mail=`` before an address in a
+#   query string goes with it. A quoted local part is found even when an
+#   earlier match sits inside the quotes (``"x jdoe@a.b y"@cern.ch``): the
+#   whole quoted string goes, together with the earlier match.
 # - DOMAIN: word characters, marks, invisible characters, ``-``, and dots
 #   (``.``, fullwidth ``.`` U+FF0E, a backslash-escaped ``\.`` as in Perl
 #   regex text, or an encoded ``&#46;`` / ``&#x2e;`` / ``&period;``), with
@@ -213,8 +215,39 @@ _LOCAL_TOKEN_RE = re.compile(
     r"&(?:amp;)+|&(?:amp;)*(?:#0*46;?|#x0*2e;?|period;)", re.IGNORECASE
 )
 _LOCAL_PUNCT = frozenset(".!#$%&'*+^`{|}~-=")
-_INVISIBLE = frozenset("\u00ad\u200b\u200c\u200d\u2060")
 _DOTS = frozenset(".\uff0e")
+# ASCII control characters other than whitespace: C0 without tab, line
+# feed, vertical tab, form feed, carriage return and the four information
+# separators U+001C-U+001F (Python counts those as whitespace), plus DEL.
+_ASCII_INVISIBLE = frozenset(
+    chr(code)
+    for code in range(0x80)
+    if unicodedata.category(chr(code)) == "Cc" and not chr(code).isspace()
+)
+
+
+def _is_invisible(char: str) -> bool:
+    """Whether ``char`` is a character a reader does not see.
+
+    Every format character (Unicode category Cf: soft hyphen, zero-width
+    space and joiners, word joiner, U+2061-U+2064, the bidi marks U+200E,
+    U+200F and U+202A-U+202E, U+FEFF ...), every control character that is
+    not whitespace (C0, DEL and C1), and U+FFFD, which a decoder writes in
+    place of a byte it could not read. The address scans read these as part
+    of an address, so ``jdoe<U+FEFF>x@cern.ch`` and ``jdoe<DEL>x@cern.ch``
+    are removed whole instead of leaving ``jdoe`` behind.
+    """
+    if char < "\x80":
+        return char in _ASCII_INVISIBLE
+    if char == "\ufffd":
+        return True
+    category = unicodedata.category(char)
+    return category == "Cf" or (category == "Cc" and not char.isspace())
+
+
+# Every character that may be invisible: ASCII controls other than
+# whitespace, and everything outside ASCII (checked with _is_invisible).
+_MAYBE_INVISIBLE_RE = re.compile("[\x00-\x08\x0e-\x1b\x7f-\U0010ffff]")
 
 
 def _is_word(char: str) -> bool:
@@ -224,7 +257,7 @@ def _is_word(char: str) -> bool:
 
 
 def _is_local(char: str) -> bool:
-    return _is_word(char) or char in _LOCAL_PUNCT or char in _INVISIBLE
+    return _is_word(char) or char in _LOCAL_PUNCT or _is_invisible(char)
 
 
 def _separator_start(text: str, match: re.Match, bound: int) -> int | None:
@@ -243,12 +276,56 @@ def _separator_start(text: str, match: re.Match, bound: int) -> int | None:
     return None
 
 
+# How many backslash-escaped quotes (``\"``) a quoted local part is read
+# across. Bounded so every quote is looked at a bounded number of times;
+# past the bound the quote reached so far is used, which removes at least
+# what the nearest quote alone would.
+_QUOTE_HOPS = 16
+
+
+def _escaped(text: str, index: int) -> bool:
+    """Whether the character at ``index`` follows an odd run of backslashes."""
+    run = 0
+    while index - run - 1 >= 0 and text[index - run - 1] == "\\":
+        run += 1
+    return run % 2 == 1
+
+
+def _quoted_local_start(text: str, sep: int) -> int | None:
+    """Opening quote of a quoted local part that ends at ``sep``, or None.
+
+    The nearest ``"`` before the closing one that is not escaped as ``\\"``,
+    on the same line, with at least one character between the quotes. It
+    is looked for without a lower bound: an earlier match inside the quotes
+    (``"x jdoe@a.b y"@cern.ch``) does not hide the quoted local part that
+    holds it. Linear over a whole text: the search from each closing quote
+    stops at the quote before it, or at most :data:`_QUOTE_HOPS` escaped
+    quotes further.
+    """
+    if sep < 2 or text[sep - 1] != '"':
+        return None
+    quote = text.rfind('"', 0, sep - 1)
+    for _ in range(_QUOTE_HOPS):
+        if quote <= 0 or not _escaped(text, quote):
+            break
+        earlier = text.rfind('"', 0, quote)
+        if earlier == -1 or "\n" in text[earlier:quote]:
+            break
+        quote = earlier
+    if quote != -1 and quote < sep - 2 and "\n" not in text[quote:sep]:
+        return quote
+    return None
+
+
 def _local_start(text: str, sep: int, bound: int) -> int:
-    """Leftmost start of the local part that ends at ``sep`` (``sep`` if none)."""
-    if sep - 1 > bound and text[sep - 1] == '"':
-        quote = text.rfind('"', bound, sep - 1)
-        if quote != -1 and quote < sep - 2 and "\n" not in text[quote:sep]:
-            return quote
+    """Leftmost start of the local part that ends at ``sep`` (``sep`` if none).
+
+    A quoted local part may start before ``bound``; the caller merges it
+    with the earlier matches it covers (see :func:`_add_span`).
+    """
+    quote = _quoted_local_start(text, sep)
+    if quote is not None:
+        return quote
     i = sep
     while i > bound:
         char = text[i - 1]
@@ -276,7 +353,7 @@ def _domain_end(text: str, start: int) -> int | None:
         elif char == "\\" and i + 1 < size and text[i + 1] in _DOTS and i > start:
             dots.append((i, i + 2))
             i += 2
-        elif _is_word(char) or char == "-" or char in _INVISIBLE:
+        elif _is_word(char) or char == "-" or _is_invisible(char):
             i += 1
         elif char == "&":
             token = _DOT_TOKEN_RE.match(text, i)
@@ -343,12 +420,17 @@ def _runs_into_separator(text: str, start: int) -> bool:
             # the quote may close or open a quoted local part.
             if _SEP_AT_RE.match(text, i + 1):
                 return True
+            # The closing quote may follow escaped ones: ``"x\"y"@cern.ch``.
             close = text.find('"', i + 1)
-            return (
-                close != -1
-                and "\n" not in text[i:close]
-                and _SEP_AT_RE.match(text, close + 1) is not None
-            )
+            for _ in range(_QUOTE_HOPS + 1):
+                if close == -1 or "\n" in text[i:close]:
+                    return False
+                if _SEP_AT_RE.match(text, close + 1):
+                    return True
+                if not _escaped(text, close):
+                    return False
+                close = text.find('"', close + 1)
+            return False
         elif _is_local(char) or char in _DOTS:
             i += 1
         else:
@@ -356,22 +438,55 @@ def _runs_into_separator(text: str, start: int) -> bool:
     return False
 
 
-def _in_quoted_local(quotes: Sequence[int], text: str, local: int, end: int) -> bool:
+def _in_quoted_local(
+    quotes: Sequence[int],
+    text: str,
+    local: int,
+    end: int,
+    openings: dict[int, int | None] | None = None,
+) -> bool:
     """Whether ``text[local:end]`` sits in a quoted string that ends at a separator.
 
     ``quotes`` holds the position of every ``"`` in ``text``, in order.
     ``"x git@host y"@cern.ch`` is a quoted local part that holds the token.
-    Line breaks are not checked, so a quote pair across lines also counts
-    (fail closed). A binary search keeps this O(log n) per token.
+    Two readings, either of which counts (fail closed):
+
+    - the nearest quotes around the token, the second one followed by a
+      separator; line breaks are not checked, so a quote pair across lines
+      also counts;
+    - the quoted local part the scan without the exemption finds
+      (:func:`_quoted_local_start`), read across escaped quotes:
+      ``"x git@host \\" y"@cern.ch``.
+
+    A binary search keeps the first O(log n) per token; ``openings``
+    caches the second per closing quote, so a long quoted string holding
+    many tokens is read once.
     """
     k = bisect.bisect_left(quotes, end)
-    if k == 0 or k == len(quotes) or quotes[k - 1] >= local:
+    if k == 0 or k == len(quotes):
         return False
-    return _SEP_AT_RE.match(text, quotes[k] + 1) is not None
+    if quotes[k - 1] < local and _SEP_AT_RE.match(text, quotes[k] + 1):
+        return True
+    for close in quotes[k : k + _QUOTE_HOPS + 1]:
+        if _SEP_AT_RE.match(text, close + 1):
+            if openings is None:
+                openings = {}
+            if close not in openings:
+                openings[close] = _quoted_local_start(text, close + 1)
+            start = openings[close]
+            return start is not None and start <= local
+        if not _escaped(text, close):
+            return False
+    return False
 
 
 def _is_git_account(
-    text: str, sep: int, local: int, end: int, quotes: Sequence[int]
+    text: str,
+    sep: int,
+    local: int,
+    end: int,
+    quotes: Sequence[int],
+    openings: dict[int, int | None] | None = None,
 ) -> bool:
     """Whether the token ``text[local:end]`` is the literal ``git@`` account.
 
@@ -390,13 +505,13 @@ def _is_git_account(
     ``git@host:path``, ``git@host/path`` and ``git@host`` before a space
     stop the scan and are kept. Nor may the token sit inside a quoted local
     part (``"x git@host:y z"@cern.ch``); ``quotes`` lists every ``"`` in
-    ``text``.
+    ``text`` and ``openings`` caches quoted local parts by closing quote.
     """
     if text[sep] != "@" or sep - 3 < local or text[sep - 3:sep] != "git":
         return False
     if any(char not in _GIT_WRAPPERS for char in text[local:sep - 3]):
         return False
-    if _in_quoted_local(quotes, text, local, end):
+    if _in_quoted_local(quotes, text, local, end, openings):
         return False
     return not _runs_into_separator(text, end)
 
@@ -447,6 +562,7 @@ def email_address_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     bound = 0  # no local part may start before this
     quotes: list[int] | None = None  # every '"' position, built on first use
+    openings: dict[int, int | None] = {}  # quoted local start by closing quote
     for core in _SEP_CORE_RE.finditer(text):
         if core.start() < bound:
             continue
@@ -461,13 +577,25 @@ def email_address_spans(text: str) -> list[tuple[int, int]]:
             continue
         if quotes is None and text[sep] == "@":
             quotes = [match.start() for match in re.finditer('"', text)]
-        if _is_git_account(text, sep, local, end, quotes or ()):
+        if _is_git_account(text, sep, local, end, quotes or (), openings):
             # Kept in place; no later local part may start inside it.
             bound = end
             continue
-        spans.append((local, end))
+        _add_span(spans, local, end)
         bound = end
     return spans
+
+
+def _add_span(spans: list[tuple[int, int]], start: int, end: int) -> None:
+    """Append ``(start, end)``, merging the earlier spans it overlaps.
+
+    Only a quoted local part starts before the end of an earlier span
+    (``"x jdoe@a.b y"@cern.ch``); the merged span covers both. Each span is
+    merged away at most once, so this stays linear.
+    """
+    while spans and spans[-1][1] > start:
+        start = min(start, spans.pop()[0])
+    spans.append((start, end))
 
 
 # Spelled-out ("anti-spam") address forms, which have no ``@`` at all and
@@ -480,12 +608,18 @@ def email_address_spans(text: str) -> list[tuple[int, int]]:
 # spaced ``john.doe at cern.ch`` / ``jdoe AT cern DOT ch`` (123) are kept.
 #
 # - Bracketed ``(at)`` ``[at]`` ``{at}`` ``<at>`` (any case, optional
-#   spaces): any domain with a dot (``.``, a bracketed ``(dot)`` /
-#   ``[DOT]``, or a spaced ``dot``) whose last label is two or more
-#   letters, with nothing domain- or path-like after it (so ``Run2 [at]
-#   13.6TeV`` stays).
-# - A spaced ``" at "`` (any case) before a domain with at least one
-#   bracketed ``(dot)`` / ``[DOT]``: ``jdoe at cern(dot)ch``.
+#   spaces) between a user name and a mail domain. The domain has a dot
+#   (``.``, a bracketed ``(dot)`` / ``[DOT]``, or a spaced ``dot``), labels
+#   of letters, digits and ``-`` only (no ``_``), and a last label that is
+#   two letters (a country code) or a common generic top-level domain
+#   (``com``, ``org``, ``edu``, ``gov``, ``net`` ...; see
+#   :data:`_OBF_GENERIC_TLDS`), with nothing domain- or path-like after it.
+#   The user name is not a CMS site name (``T2_CH_CERN``). So
+#   ``Run2 [at] 13.6TeV``, ``site T2_CH_CERN [at] cern.ch``, ``dataset (at)
+#   T2_US_MIT.mit.edu``, ``WebHome [AT] Twiki.Main`` and code such as
+#   ``read[at]self.buf.data`` or ``cfg(at)process.source.fileNames`` stay.
+# - A spaced ``" at "`` (any case) before a domain of the same shape with
+#   at least one bracketed ``(dot)`` / ``[DOT]``: ``jdoe at cern(dot)ch``.
 # - Free-prose word separators ``" at "`` / ``" AT "`` with only ``.`` or
 #   a spaced ``" dot "`` / ``" DOT "`` as the dot are never removed:
 #   ``john.doe at cern.ch``, ``jdoe AT cern DOT ch`` and "based at
@@ -500,25 +634,47 @@ def email_address_spans(text: str) -> list[tuple[int, int]]:
 #   ends like a mail domain (``.ch``, ``.edu``, ``.gov``, ``.org``,
 #   ``.com``, ``DOTch`` ... or ``cernch``) is removed whole, with a
 #   preceding ``name AT`` / ``name_at_`` part: the ``NOSPAM`` marker says
-#   the token is an address. ``NOSPAM`` alone, or in a name such as
-#   ``NoSpamFilter``, stays.
+#   the token is an address. ``NOSPAM`` alone, in a name such as
+#   ``NoSpamFilter``, or with nothing before the domain ending
+#   (``nospam.ch``, ``NOSPAM.org``) stays: it must sit inside an address.
+#
+# Invisible characters (see :func:`_is_invisible`) are read as absent: the
+# patterns match the text with them taken out, and a match removes the
+# invisible characters inside it too. So ``jdoe<DEL>[at]cern.ch`` and
+# ``jd<U+FEFF>oe[at]cern.ch`` go whole.
 #
 # Every repetition is bounded or unambiguous, so matching is linear.
 # Like redact_email_addresses this decodes nothing and only removes the
 # matched token, so text with no match comes back byte-identical.
-# Accepted over-removal: ``f(at)obj.attr``-shaped code goes.
-_OBF_LOCAL = r"(?<![\w.+-])[\w.+-]{1,64}"
+# Accepted over-removal: code shaped like ``f(at)obj.ch`` or
+# ``f(at)obj.attr.org`` (a last label that is a top-level domain) goes.
+# A user name is not a CMS site name (T0_CH_CERN, T2_US_MIT, T3_IT_Trieste).
+_OBF_LOCAL = r"(?<![\w.+-])(?!(?-i:T\d_[A-Z]{2}_))[\w.+-]{1,64}"
 _OBF_BRACKET_DOT = r"\s?[(\[{<]\s?dot\s?[)\]}>]\s?"
 _OBF_END = r"(?![\w-]|[./:@(][\w-])"
 # After a bracketed ``[at]`` any dot counts, bracketed or spelled out
 # (``jdoe[at]cern dot ch``): the brackets already mark the token.
 _OBF_ANY_DOT = r"(?:\.|" + _OBF_BRACKET_DOT + r"| dot )"
 _OBF_BRACKET_AT = r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
+# A mail-domain label: letters, digits and "-", never "_" (T2_US_MIT is a
+# site name, self.buf_x code).
+_OBF_LABEL = r"(?:[^\W_]|-)+"
+#: Generic top-level domains a spelled-out address may end in, besides any
+#: two-letter country code. Code attribute chains (``self.buf.data``,
+#: ``process.source.fileNames``) and wiki names (``Twiki.Main``) end in
+#: words that are not on this list.
+_OBF_GENERIC_TLDS = (
+    "com", "org", "net", "edu", "gov", "mil", "int", "info", "biz", "name",
+    "pro", "aero", "coop", "museum", "mobi", "asia", "cat", "jobs", "tel",
+    "travel", "eus", "xyz", "dev", "app", "cloud", "online", "site", "tech",
+    "email",
+)
+_OBF_TLD = r"(?:[^\W\d_]{2}|" + "|".join(_OBF_GENERIC_TLDS) + r")"
 _OBF_STRONG_RE = re.compile(
     _OBF_LOCAL
     + _OBF_BRACKET_AT
-    + r"[\w-]+(?:" + _OBF_ANY_DOT + r"[\w-]+)*"
-    + _OBF_ANY_DOT + r"[^\W\d_]{2,}"
+    + _OBF_LABEL + r"(?:" + _OBF_ANY_DOT + _OBF_LABEL + r")*"
+    + _OBF_ANY_DOT + _OBF_TLD
     + _OBF_END,
     re.IGNORECASE,
 )
@@ -528,9 +684,9 @@ _OBF_STRONG_RE = re.compile(
 _OBF_SPACED_BRACKET_DOT_RE = re.compile(
     _OBF_LOCAL
     + r" at "
-    + r"[\w-]+(?:\.[\w-]+)*" + _OBF_BRACKET_DOT
-    + r"(?:[\w-]+" + _OBF_ANY_DOT + r")*"
-    + r"[^\W\d_]{2,}"
+    + _OBF_LABEL + r"(?:\." + _OBF_LABEL + r")*" + _OBF_BRACKET_DOT
+    + r"(?:" + _OBF_LABEL + _OBF_ANY_DOT + r")*"
+    + _OBF_TLD
     + _OBF_END,
     re.IGNORECASE,
 )
@@ -562,8 +718,12 @@ _OBF_NOSPAM_DOMAIN_END_RE = re.compile(
 
 
 def _nospam_token(match: re.Match) -> str:
+    """``""`` if the NOSPAM token is an address (removed), else the token."""
     rest = re.sub("nospam", "", match.group(0), flags=re.IGNORECASE)
-    if _OBF_NOSPAM_DOMAIN_END_RE.search(rest):
+    ending = _OBF_NOSPAM_DOMAIN_END_RE.search(rest)
+    # NOSPAM must sit inside an address: something name-like has to come
+    # before the domain ending, so a bare "nospam.ch" is not one.
+    if ending and any(c.isalnum() for c in rest[: ending.start()]):
         return ""
     return match.group(0)
 
@@ -608,9 +768,22 @@ def _obfuscated_spans_and_count(text: str) -> tuple[list[tuple[int, int]], int]:
     ``positions[i]`` is the index in ``text`` of character ``i`` of the
     current text, so a later match that closes over an earlier removal maps
     to one range covering both.
+
+    The passes start from ``text`` with its invisible characters taken out
+    (:func:`_is_invisible`), so one inside a token does not split it; the
+    range a match maps back to covers the invisible characters inside it.
     """
-    current = text
-    positions = list(range(len(text)))
+    hidden = {
+        match.start()
+        for match in _MAYBE_INVISIBLE_RE.finditer(text)
+        if _is_invisible(match.group())
+    }
+    if hidden:
+        positions = [i for i in range(len(text)) if i not in hidden]
+        current = "".join(text[i] for i in positions)
+    else:
+        current = text
+        positions = list(range(len(text)))
     removed_mask = bytearray(len(text))
     count = 0
     passes: tuple[tuple[re.Pattern, bool], ...] = (

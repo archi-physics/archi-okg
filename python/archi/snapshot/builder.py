@@ -1116,17 +1116,22 @@ def _decode_with_fallback(data: bytes) -> _Page:
     a stray 0x93, ``@cern.ch``, or ``jdoe``, 0x93, ``[at]cern.ch``) can hide it
     from the redactor. So when any character that redaction removes from the
     dropped view (addresses and spelled-out addresses) would survive redaction
-    of the fallback view, the page uses the dropped view instead.
+    of the fallback view, the page uses the dropped view instead. It does
+    the same when redaction of the fallback view removes a control
+    character that an invalid byte became (Latin-1 C1), since the span rule
+    would refuse that address.
     """
     raw = data.decode("utf-8", errors="surrogateescape")
     counts = {"cp1252": 0, "latin-1": 0}
     fallback_chars: list[str] = []
     kept_positions: list[int] = []
+    fallback_positions: list[int] = []
     for index, char in enumerate(raw):
         if "\udc80" <= char <= "\udcff":
             decoded, kind = _fallback_char(ord(char) - 0xDC00)
             counts[kind] += 1
             fallback_chars.append(decoded)
+            fallback_positions.append(index)
         else:
             fallback_chars.append(char)
             kept_positions.append(index)
@@ -1139,7 +1144,15 @@ def _decode_with_fallback(data: bytes) -> _Page:
     survives = any(
         flag and not removed[kept_positions[i]] for i, flag in enumerate(found)
     )
-    if survives:
+    # The redactor reads a C1 control from the Latin-1 fallback as part of
+    # an address (``a.b@c<U+0081>d.ch`` is removed whole), but the span rule
+    # refuses an address that holds a control character. Dropping the byte
+    # removes the same address without refusing the group.
+    inside = any(
+        removed[i] and _HARD_HIDDEN_RE.match(fallback_view[i])
+        for i in fallback_positions
+    )
+    if survives or inside:
         return _Page(dropped_view, counts, bytes_dropped=True)
     return _Page(fallback_view, counts)
 

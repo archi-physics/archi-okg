@@ -519,7 +519,7 @@ def test_redact_email_addresses_git_account_is_linear():
         ("'git@github.com.jdoe'@cern.ch", ""),
         # Quoted strings that close or open right after the host.
         ('git@github.com.jdoe" x y"@cern.ch', ""),
-        ('"git@github.com.jdoe"@cern.ch', '""@cern.ch'),
+        ('"git@github.com.jdoe"@cern.ch', ""),
         ('git@github.com.jdoe"@cern.ch', '"@cern.ch'),
         # Wrappers around the kept token.
         ("`git@github.com.jdoe`x@cern.ch", ""),
@@ -552,13 +552,12 @@ def test_redact_email_addresses_git_account_is_linear():
         ("clone git@github.com+&amp;amp;#46;x@cern.ch now", "clone  now"),
         ("clone git@github.com+&AMP;#X2E;x@cern.ch now", "clone  now"),
         # A token inside a quoted local part goes as it would with no
-        # exemption (found by fuzzing b657568d). The rest of the quoted
-        # part stays either way: a local part never starts inside an
-        # earlier token (the #5 behavior for any address in quotes).
-        ('"x git@github.com:y z"@cern.ch', '"x :y z"@cern.ch'),
-        ('"git@github.com##]"@cern.ch', '"##]"@cern.ch'),
-        ('"git@h.cern.cha:com"&commat;cern.ch', '":com"&commat;cern.ch'),
-        ('say "hi git@github.com:x"@cern.ch', 'say "hi :x"@cern.ch'),
+        # exemption (found by fuzzing b657568d), and since #14 the whole
+        # quoted local part and its domain go with it.
+        ('"x git@github.com:y z"@cern.ch', ""),
+        ('"git@github.com##]"@cern.ch', ""),
+        ('"git@h.cern.cha:com"&commat;cern.ch', ""),
+        ('say "hi git@github.com:x"@cern.ch', "say "),
         (
             'url: "git@github.com:x/y.git" and jdoe@cern.ch',
             'url: "git@github.com:x/y.git" and ',
@@ -621,6 +620,9 @@ def _address_spans(text):
         if end is None or local == sep:
             bound = core.end()
             continue
+        # A quoted local part may enclose earlier matches (#14): one span.
+        while spans and spans[-1][1] > local:
+            local = min(local, spans.pop()[0])
         spans.append((local, end))
         bound = end
     return spans
@@ -643,16 +645,29 @@ def _git_exemption_inputs():
     prefixes = [
         "", "clone ", "'", "`", "|", "{", '"', "ssh://", "x ", '"x ', "x@",
         '"a" ', "&#64;", '"\n',
+        # #14: quotes that enclose an earlier match, escaped quotes, and
+        # invisible characters before the token.
+        '"jdoe@cern.ch ', '"q\\"', '\\"', "﻿", "\x7f",
     ]
-    hosts = ["github.com", "gitlab.cern.ch", "GITHUB.COM", "h.cern．ch"]
+    hosts = [
+        "github.com", "gitlab.cern.ch", "GITHUB.COM", "h.cern．ch",
+        "git‎hub.com",
+    ]
     tails = ["", ".jdoe", ".jdoe.1", ".jdoe-", ".jdoé", ".JDOE", ".o"]
     joiners = list("+=!#$*^`{|}~'\"") + [
         "", ".", "-", "_", "%", "&", ":", "/", " ", ";", ",", "\n",
         "&amp;", "&#46;", "%2e", "­", "​", "．", '"x y"', '"x"',
         "&#x2e;", "&period;", "&amp;#46;", "&amp;#x2e;", "&amp;period;",
         "&amp;amp;#46;", "&AMP;#X2E;", "&#0046", "⁠", "́",
+        # #14: every kind of invisible character (Cf, C0, DEL, C1, U+FFFD)
+        # and an escaped quote.
+        "﻿", "‎", "⁡", "‮", "\x01", "\x7f", "\x81",
+        "�", '\\"',
     ]
-    locals_ = ["", "x", "ops", "1", "brien", '"q"', ' y"', ':y z"']
+    locals_ = [
+        "", "x", "ops", "1", "brien", '"q"', ' y"', ':y z"', '\\" y"',
+        "x‎y",
+    ]
     seps = [
         "@", "＠", "﹫", "%40", "%2540", "&#64;", "&#064", "&#x40;",
         "&commat;", "&amp;#64;", "&amp;amp;#x0040;", "",
@@ -901,9 +916,12 @@ def test_redact_obfuscated_email_addresses_keeps_free_prose_forms(text):
 
 
 def test_redact_obfuscated_email_addresses_accepted_over_removal():
-    # Code-like text after a bracketed "(at)" goes with it.
-    assert redact_obfuscated_email_addresses("f(at)obj.attr") == ""
-    assert redact_obfuscated_email_addresses("f(at)x dot product") == ""
+    # Code-like text after a bracketed "(at)" goes with it when its last
+    # label is a top-level domain (#14 keeps f(at)obj.attr and
+    # f(at)x dot product: "attr" and "product" are not).
+    assert redact_obfuscated_email_addresses("f(at)obj.ch") == ""
+    assert redact_obfuscated_email_addresses("f(at)obj.attr.org") == ""
+    assert redact_obfuscated_email_addresses("f(at)x dot py") == ""
 
 
 def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
@@ -934,6 +952,311 @@ def test_redact_obfuscated_email_addresses_is_linear_on_long_runs():
         "x at a(dot)" + "a dot " * 5000 + "1",
         "x[at]" + "a dot " * 5000 + "1",
         "a at " * 10000 + "b(dot)",
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_obfuscated_email_addresses(text)
+    assert time.perf_counter() - started < 1.0
+
+
+# --- #14: invisible characters, quoted local parts, tighter spelled-out forms --
+
+#: One character of each invisible kind: format characters (Cf) outside the
+#: five the scans listed before #14, C0 controls, DEL, C1 controls, and the
+#: U+FFFD a decoder writes for an unreadable byte.
+INVISIBLE_CHARS = [
+    "﻿", "‎", "‏", "⁡", "⁢", "⁣", "⁤",
+    "‪", "‮", "⁦", "⁩", "᠎", "؀", "\U000e0001",
+    "\x01", "\x08", "\x1b", "\x7f", "\x81", "\x9b", "�",
+]
+
+
+def test_is_invisible_covers_every_format_and_control_character():
+    import sys
+    import unicodedata
+
+    from archi.enrichment import anonymizer
+
+    for code in range(sys.maxunicode + 1):
+        char = chr(code)
+        category = unicodedata.category(char)
+        expected = (
+            category == "Cf"
+            or (category == "Cc" and not char.isspace())
+            or char == "�"
+        )
+        assert anonymizer._is_invisible(char) is expected, hex(code)
+        if expected:
+            assert anonymizer._MAYBE_INVISIBLE_RE.match(char), hex(code)
+
+
+@pytest.mark.parametrize("char", INVISIBLE_CHARS, ids=lambda c: f"U+{ord(c):04X}")
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "jdoe{c}x@cern.ch",
+        "{c}jdoe@cern.ch",
+        "jdoe{c}@cern.ch",
+        "jdoe@{c}cern.ch",
+        "jdoe@ce{c}rn.ch",
+        "jdoe@cern{c}.ch",
+        "jdoe@cern.{c}ch",
+        "jd{c}oe+o{c}ps@phys{c}.cern.ch",
+    ],
+)
+def test_redact_email_addresses_invisible_characters_do_not_split_an_address(
+    char, shape
+):
+    # Before #14 the scans stopped at any invisible character but five, so
+    # "jdoe" (or the whole address, when one sat in the domain) survived.
+    assert redact_email_addresses("mail " + shape.format(c=char) + " now") == (
+        "mail  now"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Whitespace control characters still end an address.
+        ("a\tjdoe@cern.ch", "a\t"),
+        ("a\njdoe@cern.ch\nb", "a\n\nb"),
+        ("a\rjdoe@cern.ch", "a\r"),
+        ("a\x1cjdoe@cern.ch", "a\x1c"),
+        ("a\x85jdoe@cern.ch", "a\x85"),
+    ],
+)
+def test_redact_email_addresses_whitespace_controls_still_separate(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def test_redact_email_addresses_invisible_characters_property():
+    """Seeded property: invisible characters inserted anywhere inside an
+    address never leave a letter or digit of it behind, and an address
+    with them is removed exactly where the same address without them is."""
+    import random
+
+    rng = random.Random(20260928)
+    locals_ = ["jdoe", "john.doe", "j.doe+ops", "o'brien", "x", "über.müller"]
+    domains = ["cern.ch", "fnal.gov", "phys.ucsd.edu", "CERN.CH"]
+    seps = ["@", "%40", "&#64;", "＠"]
+    checked = 0
+    def sprinkle(part, first, last):
+        # Invisible characters inside ``part``; at its start only when
+        # ``first`` and at its end only when ``last`` is False (an invisible
+        # character before or after the whole address only touches it).
+        chars = list(part)
+        for _ in range(rng.randint(0, 2)):
+            low = 1 if first else 0
+            high = len(chars) - 1 if last else len(chars)
+            chars.insert(rng.randint(low, high), rng.choice(INVISIBLE_CHARS))
+        return "".join(chars)
+
+    for _ in range(4000):
+        # Not inside a multi-character separator: "%4<U+2063>0" is not a
+        # separator to a reader or a URL decoder either.
+        address = (
+            sprinkle(rng.choice(locals_), True, False)
+            + rng.choice(seps)
+            + sprinkle(rng.choice(domains), False, True)
+        )
+        text = "mail " + address + " now"
+        assert redact_email_addresses(text) == "mail  now", repr(text)
+        checked += 1
+    assert checked == 4000
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The #14 report: an earlier match inside the quotes left the rest
+        # of the quoted local part and the domain behind.
+        ('"x git@a.b y"@cern.ch', ""),
+        ('"x jdoe@a.bc y"@cern.ch', ""),
+        ('say "x git@a.b y"@cern.ch ok', "say  ok"),
+        ('a "b jdoe@x.org c jane@y.org d"@cern.ch z', "a  z"),
+        ('"jdoe@cern.ch"@fnal.gov', ""),
+        # Escaped quotes inside the quoted local part.
+        ('see "a\\"b"@cern.ch now', "see  now"),
+        ('"q\\"x jdoe@a.bc"@cern.ch', ""),
+        ('"q\\\\"x"@cern.ch', '"q\\\\'),
+        # Quotes elsewhere are left alone.
+        ('jdoe@cern.ch said "hi"', ' said "hi"'),
+        ('"a" jdoe@cern.ch "b"@x.org', '"a"  '),
+        # A quote pair across a line break is not a quoted local part.
+        ('"a"\njdoe@cern.ch"@x.org', '"a"\n"@x.org'),
+    ],
+)
+def test_redact_email_addresses_quoted_local_part_after_a_match(text, expected):
+    assert redact_email_addresses(text) == expected
+
+
+def test_redact_email_addresses_quoted_local_part_is_linear():
+    import time
+
+    crowded = [
+        '"' + "x jdoe@a.bc " * 20000 + '"@cern.ch',
+        ('"x jdoe@a.bc y"@cern.ch ') * 10000,
+        ("\\\"" * 30 + 'x"@a.bc ') * 2000,
+        ('x\\"@a.bc ') * 20000,
+        '"' + ('x\\"@a.bc ') * 20000,
+        ("\\" * 40 + '"@a.bc ') * 2000,
+        "jdoe﻿" * 30000 + "@cern.ch",
+    ]
+    started = time.perf_counter()
+    for text in crowded:
+        redact_email_addresses(text)
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mail jdoe\x7f[at]cern.ch now",
+        "mail jd﻿oe[at]cern.ch now",
+        "mail jdoe[at]ce​rn.ch now",
+        "mail jdoe\x81[at]cern.ch now",
+        "mail jdoe�[at]cern.ch now",
+        "mail jdoe[‎at]cern.ch now",
+        "mail jdoe (at) cern⁡(dot)ch now",
+        "mail jdoe at cern(‎dot)ch now",
+        "mail john.doe\x7f_at_cern.ch now",
+        "mail jdoe\x01NOSPAM.cern.ch now",
+    ],
+)
+def test_redact_obfuscated_email_addresses_invisible_characters(text):
+    # Before #14 an invisible character split the token: it was kept, or
+    # the part of the name before the character survived.
+    assert redact_obfuscated_email_addresses(text) == "mail  now"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # CMS site names, wiki markup and code before a bracketed "at"
+        # (lane B's review of #11); all were removed before #14.
+        "site T2_CH_CERN [at] cern.ch",
+        "site T1_US_FNAL_Disk(at)fnal.gov",
+        "dataset (at) T2_US_MIT.mit.edu",
+        "WebHome [AT] Twiki.Main",
+        "cfg(at)process.source.fileNames",
+        "read[at]self.buf.data",
+        "data[at]i.root",
+        "f(at)obj.attr",
+        "f(at)x dot product",
+        "x[at]cern.ch.example",
+        # A bare NOSPAM domain is not an address.
+        "nospam.ch config",
+        "see NOSPAM.org",
+        # Kept before and after.
+        "T2_US_MIT (at) CERN",
+        "Run2 [at] 13.6TeV",
+    ],
+)
+def test_redact_obfuscated_email_addresses_keeps_sites_markup_and_code(text):
+    assert redact_obfuscated_email_addresses(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mail jdoe[at]desy.de now",
+        "mail j.doe (AT) ox.ac.uk now",
+        "mail jdoe[at]infn.it now",
+        "mail JDOE{AT}CERN.CH now",
+        "mail jdoe <at> mail.cern.ch now",
+        "mail jdoe[at]a-b.org now",
+        "mail T2admin[at]cern.ch now",
+        "mail jdoe_x[at]cern.ch now",
+        "mail jdoe[at]physics.ucsd.edu now",
+        "mail jdoe[at]cern [dot] ch now",
+        "mail jdoe at cern(dot)ch now",
+        "mail jdoeNOSPAM.cern.ch now",
+        "mail NOSPAMjdoe.cern.ch now",
+    ],
+)
+def test_redact_obfuscated_email_addresses_still_removes_real_addresses(text):
+    assert redact_obfuscated_email_addresses(text) == "mail  now"
+
+
+# The bracketed pattern as #13 shipped it (6193edd0ca), for the differential
+# test below.
+_OBF_STRONG_13 = (
+    r"(?<![\w.+-])[\w.+-]{1,64}"
+    r"\s?[(\[{<]\s?at\s?[)\]}>]\s?"
+    r"[\w-]+(?:(?:\.|\s?[(\[{<]\s?dot\s?[)\]}>]\s?| dot )[\w-]+)*"
+    r"(?:\.|\s?[(\[{<]\s?dot\s?[)\]}>]\s?| dot )[^\W\d_]{2,}"
+    r"(?![\w-]|[./:@(][\w-])"
+)
+
+
+def test_redact_obfuscated_email_addresses_differential_against_13():
+    """Differential property test, the #14 bracketed rule vs #13's.
+
+    Over a seeded grid of user names, bracketed separators and domains:
+    a user name before a mail domain (labels of letters, digits and "-", a
+    country-code or listed generic last label) is removed whole, also with
+    invisible characters inside it; anything else that #13 removed is now
+    kept byte for byte; and #14 removes nothing #13 did not.
+    """
+    import itertools
+    import random
+    import re
+
+    old = re.compile(_OBF_STRONG_13, re.IGNORECASE)
+    rng = random.Random(20260928)
+    users = ["jdoe", "john.doe", "j-doe+ops", "x_y", "JDoe", "a1", "T2admin"]
+    sites = ["T2_CH_CERN", "T1_US_FNAL_Disk", "T0_CH_CERN", "T3_IT_Trieste"]
+    mail = [
+        "cern.ch", "CERN.CH", "fnal.gov", "phys.ucsd.edu", "cern(dot)ch",
+        "cern [DOT] ch", "cern dot ch", "gmail.com", "infn.it", "ox.ac.uk",
+        "a-b.org", "univ.edu", "lab.gov", "x.net", "x.info",
+    ]
+    not_mail = [
+        "T2_US_MIT.mit.edu", "Twiki.Main", "self.buf.data", "i.root",
+        "process.source.fileNames", "obj.attr", "x dot product", "my_host.cern.ch",
+        "a.b_c", "Main.WebHome",
+    ]
+    seps = ["[at]", "[AT]", " [at] ", "(at)", " (At) ", "{at}", "<at>", "[ at ]"]
+    prefixes = ["", "mail ", "(", "site ", "| "]
+    tails = ["", " now", ".", ", next", ")", " |"]
+    removed = kept_now = 0
+    for user, domain, sep in itertools.product(
+        users + sites, mail + not_mail, seps
+    ):
+        for _ in range(2):
+            prefix, tail = rng.choice(prefixes), rng.choice(tails)
+            token = user + sep + domain
+            text = prefix + token + tail
+            shipped = redact_obfuscated_email_addresses(text)
+            was = old.sub("", text)
+            if user in users and domain in mail:
+                assert shipped == prefix + tail, text
+                # With invisible characters inside, still removed whole.
+                chars = list(token)
+                chars.insert(rng.randint(1, len(chars) - 1), rng.choice(INVISIBLE_CHARS))
+                hidden = prefix + "".join(chars) + tail
+                assert redact_obfuscated_email_addresses(hidden) == prefix + tail, hidden
+                removed += 1
+            else:
+                assert shipped == text, text
+                if was != text:
+                    kept_now += 1
+    # The grid exercises both sides, and #13 did remove the kept shapes.
+    assert removed > 1000
+    assert kept_now > 500
+
+
+def test_redact_obfuscated_email_addresses_tighter_rules_are_linear():
+    import time
+
+    crowded = [
+        "x[at]" + "a." * 20000 + "attr",
+        "x[at]" + "a_b." * 10000 + "ch",
+        "T2_CH_CERN[at]" * 5000,
+        "x[at]" + "a dot " * 5000 + "product",
+        "nospam.ch " * 10000,
+        "\x7f" * 50000 + "[at]",
+        ("jdoe﻿[at]" * 5000) + "cern.ch",
     ]
     started = time.perf_counter()
     for text in crowded:

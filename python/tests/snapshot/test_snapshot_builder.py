@@ -1468,7 +1468,8 @@ def test_note_must_be_short_text(note, expected):
     "note, expected",
     [
         ("fetched by jdoe@cern.ch", "note: an address survived redaction"),
-        ("fetched by a.b@c\u0081d.ch", "note, line 1: stored-text rule"),
+        # The redactor reads the C1 control as part of the address (#14).
+        ("fetched by a.b@c\u0081d.ch", "note: an address survived redaction"),
     ],
 )
 def test_an_address_in_a_note_refuses_the_group(tmp_path, sources, note, expected):
@@ -2273,7 +2274,9 @@ NINTH_REVIEW_REFUSED = ["jdoe&lrm;@example.org"]
 #: address, so they are stored (ESC 7 and ESC 8 stripped), not refused.
 DISPLAY_TRICKS_STORED = [
     ("\u202egro.elpmaxe@eodj\u202c", "\u202egro.elpmaxe@eodj\u202c"),
-    ("jdoe(\x08@example.org", "jdoe(\x08@example.org"),
+    # The backspace is a control character, which the redactor reads as a
+    # local part (#14), so "\x08@example.org" goes and "jdoe(" stays.
+    ("jdoe(\x08@example.org", "jdoe("),
     ("\x1b7    @example.org\x1b8jdoe", "    @example.orgjdoe"),
     ("    @example.org\rjdoe", "    @example.org\rjdoe"),
     ("XXXXXXXXXXXX.org\rjdoe@example", "XXXXXXXXXXXX.org\rjdoe@example"),
