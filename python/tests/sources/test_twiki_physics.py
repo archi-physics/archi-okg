@@ -241,13 +241,87 @@ def test_closure_reaches_through_a_chain():
     assert kept == {"HIG-19-001", "Child", "GrandChild"}
 
 
-def test_web_qualified_parents_do_not_close_the_chain():
-    """Carried limitation, asserted so a future fix is a visible change:
-    a web-qualified TOPICPARENT does not match a bare topic key."""
+def test_web_qualified_parent_closes_the_chain():
+    """Issue #15: ``CMS.HIG-19-001`` is the topic ``HIG-19-001`` when
+    ``CMS`` is a web, so the child joins the closure."""
+    topics = ["HIG-19-001", "Child", "GrandChild"]
+    parents = {"Child": "CMS.HIG-19-001", "GrandChild": "CMS.Sub.Child"}
+    _seeds, kept = compute_keep_set(topics, parents, {"CMS", "Sub"})
+    assert kept == {"HIG-19-001", "Child", "GrandChild"}
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        "Elsewhere.HIG-19-001",  # a web this snapshot does not have
+        "CMS.Elsewhere.HIG-19-001",  # one part is not a web
+        "CMS.",  # no topic after the dot
+    ],
+)
+def test_dotted_parent_that_is_not_a_known_web_is_left_alone(parent):
     topics = ["HIG-19-001", "Child"]
-    parents = {"Child": "CMS.HIG-19-001"}
-    _seeds, kept = compute_keep_set(topics, parents)
+    _seeds, kept = compute_keep_set(topics, {"Child": parent}, {"CMS"})
     assert kept == {"HIG-19-001"}
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        "https://wiki.example.org/twiki/bin/view/CMS/HIG-19-001",
+        "https://wiki.example.org/twiki/bin/viewauth/CMS/Sub/HIG-19-001",
+        # the form TWiki rewrites a URL parent into
+        "https://wiki/example/org/twiki/bin/view/CMS.HIG-19-001",
+    ],
+)
+def test_view_url_parent_into_a_known_web_closes_the_chain(parent):
+    topics = ["HIG-19-001", "Child"]
+    _seeds, kept = compute_keep_set(topics, {"Child": parent}, {"CMS", "Sub"})
+    assert kept == {"HIG-19-001", "Child"}
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        "https://wiki.example.org/twiki/bin/view/OtherWeb/HIG-19-001",
+        "https://wiki/example/org/twiki/bin/view/OtherWeb.HIG-19-001",
+        "https://wiki.example.org/twiki/bin/oops/CMS/HIG-19-001",
+        "https://wiki.example.org/twiki/bin/view/CMS/HIG-19-001?raw=on",
+    ],
+)
+def test_view_url_parent_outside_a_known_web_stays_out(parent):
+    topics = ["HIG-19-001", "Child"]
+    _seeds, kept = compute_keep_set(topics, {"Child": parent}, {"CMS"})
+    assert kept == {"HIG-19-001"}
+
+
+def test_web_qualified_parents_close_the_chain_in_a_snapshot(tmp_path):
+    """End to end through the connector: the webs are the snapshot's own
+    web root (``CMS``) and web directories (``SubWeb``)."""
+    root = tmp_path / "snapshot"
+    (root / "SubWeb").mkdir(parents=True)
+    (root / "HIG-19-001.txt").write_text(_topic())
+    (root / "ChildPage.txt").write_text(_topic("CMS.HIG-19-001"))
+    (root / "SubWeb" / "SubChild.txt").write_text(_topic("CMS.ChildPage"))
+    (root / "SubWeb" / "SubGrand.txt").write_text(
+        _topic("CMS.SubWeb.SubChild")
+    )
+    (root / "SubWeb" / "UrlChild.txt").write_text(
+        _topic("https://wiki.example.org/twiki/bin/view/CMS/SubWeb/SubChild")
+    )
+    (root / "StrayPage.txt").write_text(_topic("OtherWeb.HIG-19-001"))
+    (root / "StrayUrlPage.txt").write_text(
+        _topic("https://wiki.example.org/twiki/bin/view/OtherWeb/HIG-19-001")
+    )
+    source = TwikiEOSSource(eos_root=str(root), physics_filter=True)
+    titles, _run = _titles(source)
+    assert titles == {
+        "HIG-19-001",
+        "ChildPage",
+        "SubChild",
+        "SubGrand",
+        "UrlChild",
+    }
+    assert source.last_physics_report.closure_count == 5
 
 
 @pytest.mark.parametrize(
