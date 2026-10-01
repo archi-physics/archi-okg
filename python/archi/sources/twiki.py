@@ -410,6 +410,7 @@ class TwikiEOSSource:
         preserve_images: bool = False,
         skip_patterns: tuple[str, ...] | list[str] = DEFAULT_SKIP_PATTERNS,
         physics_filter: bool = False,
+        page_index_path: str | None = None,
         records: list[TwikiRecord] | None = None,
         base: str | None = None,
     ) -> None:
@@ -452,6 +453,10 @@ class TwikiEOSSource:
         # Physics scoping is opt-in: a deployment that says nothing gets
         # the whole snapshot, exactly as before this option existed.
         self.physics_filter = bool(physics_filter)
+        # Where to write the page ids this run emitted, for a source
+        # that links INTO them later in the same ingest. Opt-in for the
+        # same reason as physics_filter: unset changes nothing.
+        self.page_index_path = page_index_path
         self.last_physics_report: PhysicsFilterReport | None = None
         #: Snapshot-relative paths of the empty topic files the last
         #: preflight() or run() skipped (zero bytes, or only
@@ -787,6 +792,10 @@ class TwikiEOSSource:
                     checked_at=_checked_at(),
                 ),
             )
+        if self.page_index_path:
+            # Only here: every earlier return is a refused scope, and a
+            # refusal must not replace a good index with a short one.
+            _write_page_index(self.page_index_path, records)
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(mode in {"scope_complete", "reconcile"}),
@@ -1842,6 +1851,21 @@ def _facts_for_twiki_records(
                 revision,
                 targets,
             )
+
+
+def _write_page_index(path: str, records: "list[TwikiRecord]") -> None:
+    """Write the page ids a run emitted, for a same-run consumer.
+
+    Written atomically via a sibling temp file: a consumer ordered after
+    this source must never read a half-written list, and a crash must
+    leave the previous one intact rather than a truncated one.
+    """
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(sorted({r.node_id for r in records}), indent=0)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, target)
 
 
 def _page_node(record: TwikiRecord, revision: dict[str, Any]) -> NodeFact:
