@@ -1,0 +1,77 @@
+pact_version: 5
+id: agents-md
+title: Replace CLAUDE.md with an AGENTS.md that describes this repository
+tier: 1
+why: >-
+  `CLAUDE.md` opened by telling an agent that PRs target `archi_v3` and
+  never `main`. There is no `archi_v3` branch: `main` is the only branch
+  on the remote and the repository default, and every PR merged here
+  since #22 targeted it. The instruction came from the predecessor
+  repository, `archi-physics/archi`, where `main` served live v2
+  deployments and the v3 program was developed on a side branch. That
+  program migrated here; this repository IS the v3 distribution, so
+  there is no v2 to protect.
+
+  That was the headline error, not the only one. Most of the paths the
+  file named are gone: `docs/runbooks/` is empty, and `pact/AGENTS.md`,
+  `pact/project.md`, `.github/PULL_REQUEST_TEMPLATE.md` and
+  `docs/runbooks/plain-language-reporting.md` do not exist. It also
+  pointed at `.claude/skills/` sourced from
+  `src/okg/substrate/pact/skills/` -- neither path exists here; skills
+  live in `skills/`. Most of that came from a managed `okg-pact-install`
+  block, which is okg's boilerplate written for okg's own layout.
+
+  An instruction file whose first line is wrong is worse than none: an
+  agent that follows it opens its PR against a branch that does not
+  exist, and one that notices has no way to tell which of the remaining
+  claims to trust.
+
+  The same stale branch name reached CI. `.github/workflows/ci.yml`
+  triggered on pushes to `archi_v3`, so no push to `main` ever ran the
+  suite. Pull requests were unaffected, which is why it went unnoticed.
+affected_code:
+- AGENTS.md
+- CLAUDE.md
+- .github/workflows/ci.yml
+requirements:
+- id: req.agents-md.one-file
+  statement: >-
+    Working rules live in AGENTS.md, which both Claude Code and Codex
+    read. CLAUDE.md is removed, and the new file says not to re-create
+    it.
+- id: req.agents-md.true-of-this-repo
+  statement: >-
+    Every path, command and branch AGENTS.md names exists or is
+    explicitly marked as history. It states that PRs target `main`, and
+    says why the ADR's `archi_v3` instruction does not apply.
+- id: req.agents-md.records-what-was-wrong
+  statement: >-
+    The removed claims are listed against what is actually true, so the
+    old file cannot be restored from memory as an improvement.
+- id: req.agents-md.ci-runs-on-main
+  statement: >-
+    CI triggers on pushes to the branch this repository actually uses,
+    and the workflow still parses.
+tasks:
+- id: task.agents-md.write
+  requirement: req.agents-md.one-file
+  verification: >-
+    AGENTS.md exists, CLAUDE.md does not, and the new file tells the
+    reader not to re-create it.
+- id: task.agents-md.verify-claims
+  requirement: req.agents-md.true-of-this-repo
+  verification: >-
+    Each path named in AGENTS.md resolves in a checkout; `git ls-remote
+    --heads origin` returns only `main`.
+- id: task.agents-md.table
+  requirement: req.agents-md.records-what-was-wrong
+  verification: >-
+    AGENTS.md carries a table of each removed claim against the current
+    state, including the managed block's dead paths.
+- id: task.agents-md.ci
+  requirement: req.agents-md.ci-runs-on-main
+  verification: >-
+    The push trigger names `main`, and the workflow parses as YAML with
+    both jobs intact.
+evidence: []
+decisions: []
