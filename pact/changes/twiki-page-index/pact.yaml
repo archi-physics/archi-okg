@@ -72,5 +72,47 @@ tasks:
   verification: >-
     A run whose physics filter keeps nothing leaves a pre-existing index
     file untouched.
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.twiki-page-index.writes
+  status: pass
+  command: PYTHONPATH=. /work/submit/pmlugato/cms-kb-venv/bin/python -m pytest -q tests/sources/test_twiki_page_index.py
+  head: 3349beb21f39d8b2416afc175679d8c5ead2eaf4
+  at: '2026-10-01T20:50:41+00:00'
+  note: >-
+    8 passed. The index equals the page ids in the run's own facts, and
+    is written into a directory that does not exist yet.
+- kind: executed_test
+  requirement: req.twiki-page-index.off-by-default
+  status: pass
+  command: PYTHONPATH=. /work/submit/pmlugato/cms-kb-venv/bin/python -m pytest -q tests
+  head: 3349beb21f39d8b2416afc175679d8c5ead2eaf4
+  at: '2026-10-01T20:50:41+00:00'
+  note: >-
+    1673 passed, the whole archi suite, with 138 of those the existing
+    twiki, twiki-physics and chunk-char-end suites unchanged. Unset,
+    nothing is written and the content hash is identical to a run
+    without the option -- asserted directly, so turning the index on
+    cannot look like a corpus change and force a re-ingest.
+- kind: executed_test
+  requirement: req.twiki-page-index.respects-the-filter
+  status: pass
+  command: PYTHONPATH=. /work/submit/pmlugato/cms-kb-venv/bin/python -m pytest -q tests/sources/test_twiki_page_index.py
+  head: 3349beb21f39d8b2416afc175679d8c5ead2eaf4
+  at: '2026-10-01T20:50:41+00:00'
+  note: >-
+    With physics_filter on, a snapshot of three topics indexes only the
+    kept one; CompOpsTransferTeam is absent from the index exactly as it
+    is absent from the facts.
+- kind: executed_test
+  requirement: req.twiki-page-index.no-partial-file
+  status: pass
+  command: PYTHONPATH=. /work/submit/pmlugato/cms-kb-venv/bin/python -m pytest -q tests/sources/test_twiki_page_index.py
+  head: 3349beb21f39d8b2416afc175679d8c5ead2eaf4
+  at: '2026-10-01T20:50:41+00:00'
+  note: >-
+    A physics filter that keeps nothing, and a missing snapshot root,
+    both leave a pre-existing index byte-identical. The write is atomic
+    through a sibling temp file and os.replace, and no .tmp is left
+    behind.
 decisions: []
