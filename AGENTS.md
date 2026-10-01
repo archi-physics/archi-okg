@@ -10,7 +10,7 @@ configuration and secrets.
 | | |
 |---|---|
 | `python/archi/` | The wheel: sources, enrichers, schemas. |
-| `python/tests/` | The suite. 1,673 tests. |
+| `python/tests/` | The suite — around 1,700 tests, run by CI on every PR. |
 | `bundles/` | Install bundles (e.g. `cern-team`). |
 | `skills/` | Playbooks for agents operating over the graph. |
 | `pact/changes/` | The change record. |
@@ -138,7 +138,7 @@ pointed at is gone. Recorded here so nobody restores it from memory:
 | it said | actually |
 |---|---|
 | PRs target `archi_v3`, never `main` | `main` is the only branch on the remote; every merged PR targets it |
-| `docs/runbooks/agent-*.md` are the backing contracts | `docs/runbooks/` is empty |
+| `docs/runbooks/agent-*.md` are the backing contracts | there is no `docs/runbooks/` |
 | `pact/AGENTS.md` holds the PACT contract | no such file |
 | `pact/project.md` is human context | no such file |
 | `.github/PULL_REQUEST_TEMPLATE.md` hard-codes the section order | no such file |

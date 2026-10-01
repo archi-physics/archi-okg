@@ -1,7 +1,7 @@
 pact_version: 5
 id: agents-md
 title: Replace CLAUDE.md with an AGENTS.md that describes this repository
-tier: 1
+tier: 2
 why: >-
   `CLAUDE.md` opened by telling an agent that PRs target `archi_v3` and
   never `main`. There is no `archi_v3` branch: `main` is the only branch
@@ -73,5 +73,52 @@ tasks:
   verification: >-
     The push trigger names `main`, and the workflow parses as YAML with
     both jobs intact.
-evidence: []
+evidence:
+- kind: manual
+  requirement: req.agents-md.one-file
+  status: pass
+  command: ls AGENTS.md CLAUDE.md
+  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  at: '2026-10-01T21:11:19+00:00'
+  note: >-
+    AGENTS.md present, CLAUDE.md removed with `git rm`. The new file
+    says not to re-create it, and names the reason: both Claude Code and
+    Codex read AGENTS.md, so two files could only drift apart or repeat
+    each other.
+- kind: formal_check
+  requirement: req.agents-md.true-of-this-repo
+  status: pass
+  command: python - (extract every backticked path from AGENTS.md and stat it)
+  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  at: '2026-10-01T21:11:19+00:00'
+  note: >-
+    12 of 12 paths resolve in a checkout. The only 7 that do not are the
+    ones the "what the old file got wrong" table cites AS absent, which
+    is the table working. `git ls-remote --heads origin` returns exactly
+    one branch, `main`, and `gh repo view` reports it as the default --
+    so the archi_v3 instruction had no target.
+- kind: executed_test
+  requirement: req.agents-md.ci-runs-on-main
+  status: pass
+  command: /work/submit/pmlugato/cms-kb-venv/bin/python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
+  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  at: '2026-10-01T21:11:19+00:00'
+  note: >-
+    Parses; triggers are pull_request and push to [main]; both jobs
+    (tests, no-substrate) intact. Before this, push named archi_v3, so
+    no push to main ran the suite at all.
+- kind: executed_test
+  requirement: req.agents-md.records-what-was-wrong
+  status: pass
+  command: cd python && PYTHONPATH=. /work/submit/pmlugato/cms-kb-venv/bin/python -m pytest tests -q
+  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  at: '2026-10-01T21:11:19+00:00'
+  note: >-
+    1665 passed -- the docs change touches no code, and the suite is the
+    control. Each of the nine rows in the table was checked against the
+    filesystem rather than recalled: docs/runbooks does not exist at
+    all, and pact/AGENTS.md, pact/project.md,
+    .github/PULL_REQUEST_TEMPLATE.md,
+    docs/runbooks/plain-language-reporting.md, .claude/skills and
+    src/okg are each absent.
 decisions: []
