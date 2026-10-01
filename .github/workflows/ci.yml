@@ -1,4 +1,9 @@
-# CI for the v3 distribution (ADR §14: CI on archi_v3 from day one).
+# CI for the v3 distribution (ADR 14: CI from day one).
+#
+# The push trigger named `archi_v3` until 2026-10-01. That was the branch
+# in the PREDECESSOR repository, archi-physics/archi, and it does not
+# exist here -- so no push to `main` ran CI at all. Pull requests were
+# unaffected, which is why it went unnoticed.
 #
 # SECURITY — read before editing. This repository is PUBLIC and the okg
 # substrate is PRIVATE. The tests import okg, so the job needs a credential
@@ -18,7 +23,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [archi_v3]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
