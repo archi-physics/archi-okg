@@ -78,7 +78,7 @@ evidence:
   requirement: req.agents-md.one-file
   status: pass
   command: ls AGENTS.md CLAUDE.md
-  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  head: adbe3cfba19292fb7e0affedfb34937e1cfd10bd
   at: '2026-10-01T21:11:19+00:00'
   note: >-
     AGENTS.md present, CLAUDE.md removed with `git rm`. The new file
@@ -89,7 +89,7 @@ evidence:
   requirement: req.agents-md.true-of-this-repo
   status: pass
   command: python - (extract every backticked path from AGENTS.md and stat it)
-  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  head: adbe3cfba19292fb7e0affedfb34937e1cfd10bd
   at: '2026-10-01T21:11:19+00:00'
   note: >-
     12 of 12 paths resolve in a checkout. The only 7 that do not are the
@@ -101,7 +101,7 @@ evidence:
   requirement: req.agents-md.ci-runs-on-main
   status: pass
   command: /work/submit/pmlugato/cms-kb-venv/bin/python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
-  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  head: adbe3cfba19292fb7e0affedfb34937e1cfd10bd
   at: '2026-10-01T21:11:19+00:00'
   note: >-
     Parses; triggers are pull_request and push to [main]; both jobs
@@ -111,7 +111,7 @@ evidence:
   requirement: req.agents-md.records-what-was-wrong
   status: pass
   command: cd python && PYTHONPATH=. /work/submit/pmlugato/cms-kb-venv/bin/python -m pytest tests -q
-  head: 0bc5bbea5e949620e45e70f7a29a0997631a17ab
+  head: adbe3cfba19292fb7e0affedfb34937e1cfd10bd
   at: '2026-10-01T21:11:19+00:00'
   note: >-
     1665 passed -- the docs change touches no code, and the suite is the
