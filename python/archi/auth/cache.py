@@ -59,17 +59,27 @@ def load_json(path: str | Path, *, base: str | Path | None = None) -> Any:
         return json.load(handle)
 
 
+#: Bytes read per chunk when hashing a cache file.
+CONTENT_HASH_CHUNK_BYTES = 1024 * 1024
+
+
 def content_hash(
     paths: Iterable[str | Path],
     *,
     base: str | Path | None = None,
 ) -> str:
+    # Streams each file in CONTENT_HASH_CHUNK_BYTES chunks: a cache can be
+    # hundreds of MB, and reading it whole doubled a source's peak memory.
+    # The digest is byte-for-byte the one the whole-file read produced, so
+    # stored cursors and revisions keep their values.
     digest = hashlib.sha256()
     resolved = sorted((str(p), resolve_repo_path(p, base=base)) for p in paths)
     for label, path in resolved:
         digest.update(label.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(CONTENT_HASH_CHUNK_BYTES), b""):
+                digest.update(chunk)
         digest.update(b"\0")
     return digest.hexdigest()
 
