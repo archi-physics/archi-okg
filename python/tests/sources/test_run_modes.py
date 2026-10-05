@@ -5,6 +5,7 @@ DEPLOYMENT-001), so ``archi.sources._run_modes`` keeps its own copy.
 Tests are not linted, so this test reads okg's set directly and fails
 at the first okg pin whose set differs.
 """
+
 import importlib
 
 from archi.sources._run_modes import COMPLETED_SCOPE_RUN_MODES
@@ -22,6 +23,4 @@ def _okg_completed_scope_run_modes():
 
 
 def test_archi_completed_scope_run_modes_match_okg():
-    assert COMPLETED_SCOPE_RUN_MODES == frozenset(
-        _okg_completed_scope_run_modes()
-    )
+    assert COMPLETED_SCOPE_RUN_MODES == frozenset(_okg_completed_scope_run_modes())
