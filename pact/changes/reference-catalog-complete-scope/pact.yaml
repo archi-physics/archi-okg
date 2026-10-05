@@ -28,9 +28,19 @@ why: 'okg commit d84f8fd275 ("Resolve source run modes from one per-profile poli
   and okg has no retraction-size guard yet (mitdbg/okg#3307). In those modes they return a
   cursor, `input_content_sha256`, the SHA-256 of the bytes of the input caches (conddb also
   the CMSSW cache it reads), so okg accepts an unchanged rerun as `incomplete_scope_noop`.
-  A changed cache changes the content-hash change-probe token, so it is read and ingested
-  in full. Cost: only a completed scope advances last_reconcile, so dbs and conddb read as
-  stale in freshness checks. scope_complete, reconcile and every other mode behave as on main.
+  okg never skips a read for these readers (none declares probe_short_circuit_safe), so
+  every run re-reads the cache in full; the cursor only gives the source stored state. Costs:
+  only a completed scope advances last_reconcile, so dbs and conddb read as stale in freshness
+  checks; and okg refuses scope_complete and reconcile for a reference_catalog source at run
+  start (runner.py@ac078aabd:2982-2996), so under current okg no run removes records that
+  leave the export until okg#3307 lands and these sources switch to deleting. At reader level
+  scope_complete, reconcile and every other mode behave as on main.
+
+  KNOWN LIMIT (round-3 review finding 1, fix pending): a deployment where dbs or conddb already
+  published facts without a cursor (the state the old bug leaves) is still refused `partial`
+  on the first run after this fix, because every fact dedupes and the cursor is stored only
+  on an accepted run. Fresh deployments and sources that never published are unaffected. Recovery
+  (an okg change or a one-time per-instance step) is to be decided; no archi code change here.
 
   - The modes live in one archi module, archi.sources._run_modes (COMPLETED_SCOPE_RUN_MODES
   and RELEASE_RUN_MODES), not an import of okg.substrate.source_run_modes: `okg lint deployments`
@@ -64,9 +74,9 @@ requirements:
 - id: req.reference-catalog-complete-scope.non-deleting-catalogs
   statement: 'dbs and conddb claim no complete scope in `release_new` or `release_unchanged`
     and return a checkpoint whose cursor is a SHA-256 of their input content: equal for unchanged
-    input, different when a cache changes (for conddb, either cache). In `scope_complete`
-    and `reconcile` they claim the scope and return no checkpoint, as on main; in `cursor`
-    they claim nothing.'
+    input, different when a cache changes (for conddb, either cache). At reader level, `scope_complete`
+    and `reconcile` claim the scope and return no checkpoint, as on main (okg does not currently
+    run a reference_catalog source in either mode); in `cursor` they claim nothing.'
 - id: req.reference-catalog-complete-scope.guards-kept
   statement: 'In the release modes the guards withhold the claim: skipped cache items (cmssw,
     conddb, dbs), an empty cache (cmssw, conddb, dbs), a truncated release list (cmssw), and
@@ -104,52 +114,5 @@ tasks:
   requirement: req.reference-catalog-complete-scope.alignment
   verification: python/tests/test_alignment_page.py passes, with okg and in the substrate-free
     CI environment.
-evidence:
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.deleting-catalogs
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_cmssw.py tests/sources/test_conddb.py
-    tests/sources/test_dbs.py tests/sources/test_github_repos.py tests/sources/test_run_modes.py
-    tests/test_alignment_page.py
-  head: 017bbd89f709bf9599830e891bde01d05fb8568d
-  at: '2026-10-05T01:18:19+00:00'
-  note: 80 passed at this commit (okg ac078aabd, submit76). On main 46d3daef reader code the
-    cmssw and github_repos release-mode claim cases fail (4 of the 8 release-mode failures
-    recorded in round 1); cursor-mode controls pass on both.
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.non-deleting-catalogs
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_dbs.py tests/sources/test_conddb.py
-  head: 017bbd89f709bf9599830e891bde01d05fb8568d
-  at: '2026-10-05T01:18:20+00:00'
-  note: 'Pass at this commit. With the readers of 8c3a315e and these tests, 8 failed: test_release_modes_claim_no_scope_and_return_a_checkpoint
-    and test_release_checkpoint_follows_* in both release modes for dbs and conddb. The scope_complete/reconcile
-    controls (claim, no checkpoint) and the cursor controls pass on both.'
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.guards-kept
-  status: pass
-  command: python -m pytest python/tests -q
-  head: 017bbd89f709bf9599830e891bde01d05fb8568d
-  at: '2026-10-05T01:18:21+00:00'
-  note: 1705 passed at this commit, the whole archi suite (okg ac078aabd, submit76). test_explicit_empty_repos_is_refused
-    failed with the github_repos.py of 8c3a315e (1 failed); test_all_invalid_slugs_claim_no_scope
-    failed in both modes with the unguarded github_repos.py of bb37fce3 (round 2).
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.okg-parity
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_run_modes.py
-  head: 017bbd89f709bf9599830e891bde01d05fb8568d
-  at: '2026-10-05T01:18:22+00:00'
-  note: 2 passed against okg ac078aabd (COMPLETED_SCOPE_RUN_MODES and reference_catalog accepted
-    modes). A copy without release_unchanged fails it (round 2). No module under python/archi/sources
-    imports okg.substrate.
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.alignment
-  status: pass
-  command: python -m pytest python/tests/test_alignment_page.py python/tests/test_compops_lint_recheck.py
-    -q
-  head: 017bbd89f709bf9599830e891bde01d05fb8568d
-  at: '2026-10-05T01:18:22+00:00'
-  note: 3 passed in a venv without okg (the CI substrate-free job), and in the full suite.
-    Before the page update the import-surface test failed on okg.deployment Checkpoint.
+evidence: []
 decisions: []

@@ -54,6 +54,13 @@ def input_content_checkpoint(
     configured path as a separator), not its mtime, so a changed export
     yields a different cursor. Files that do not exist are left out,
     matching the change probe over the same paths.
+
+    The files are hashed after the reader parsed them, so a file rewritten
+    in between yields a cursor for the newer bytes. That is harmless while
+    nothing compares the cursor (no reader declares
+    ``probe_short_circuit_safe``, so okg re-reads every run); a reader
+    that wants okg to skip unchanged reads must first hash the bytes it
+    parsed.
     """
     present = [p for p in paths if resolve_repo_path(p, base=base).is_file()]
     return Checkpoint(

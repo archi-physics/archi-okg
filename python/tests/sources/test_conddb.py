@@ -130,7 +130,9 @@ def test_change_probe_covers_cmssw_cache(tmp_path):
 # claims no complete scope there (no deletion by absence) and instead
 # returns a checkpoint that names its input content -- the global-tag cache
 # and the CMSSW cache it reads for release targets -- so okg accepts an
-# unchanged rerun as a no-op. scope_complete and reconcile are unchanged.
+# unchanged rerun as a no-op. scope_complete and reconcile keep main's
+# reader-level behaviour; okg does not currently run a reference_catalog
+# source in either mode (it refuses them at run start).
 
 _CURSOR_KEY = "input_content_sha256"
 

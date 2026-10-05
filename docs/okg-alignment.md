@@ -46,10 +46,19 @@ releases source off on 2026-10-01 for this reason. Now:
   export would retract an unbounded share of the catalog, and okg has no guard
   on retraction size yet (mitdbg/okg#3307). They return a cursor
   (`input_content_sha256`, the SHA-256 of the input caches; for CondDB also the
-  CMSSW cache it reads) so okg accepts an unchanged rerun as a no-op. Cost:
-  only a completed scope advances okg's last reconcile time, so these two read
-  as stale in freshness checks. `scope_complete` and `reconcile` behave as
-  before for all four.
+  CMSSW cache it reads). The cursor only gives the source stored state, which
+  lets okg accept an unchanged rerun as a no-op; okg still re-reads the cache
+  on every run. Costs: only a completed scope advances okg's last reconcile
+  time, so these two read as stale in freshness checks; and okg refuses
+  `scope_complete` and `reconcile` for a `reference_catalog` source at run
+  start, so under current okg no run removes datasets or tags that leave the
+  export. They stay until okg#3307 lands and these sources switch to deleting.
+  Known limit: a deployment where DBS or CondDB already published facts
+  without a cursor (the state the old bug leaves) is still refused `partial`
+  on its first run after this fix, because every fact dedupes and no cursor
+  is stored yet. RECOVERY: to be decided (okg change or a one-time per-instance
+  step). A fresh deployment, or one where the source never published, is
+  unaffected.
 
 The scope-completing modes live in one archi module, `archi.sources._run_modes`,
 which a test holds equal to okg's `COMPLETED_SCOPE_RUN_MODES` and to the

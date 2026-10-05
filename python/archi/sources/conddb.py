@@ -210,10 +210,11 @@ class CondDBGlobalTagSource:
         # deletes records missing from the cache. A cache is a selection
         # exported by hand or by a downloader; a narrower export would
         # otherwise retract an unbounded share of the catalog, and okg has
-        # no guard on retraction size yet (mitdbg/okg#3307). The checkpoint
-        # names the input content instead, so okg accepts an unchanged rerun
-        # as a no-op; a changed cache changes both the change-probe token
-        # and this cursor, and is read and ingested in full.
+        # no guard on retraction size yet (mitdbg/okg#3307). okg never skips
+        # a read for this reader (it does not declare
+        # probe_short_circuit_safe), so every run re-reads the cache in
+        # full. The checkpoint only gives the source stored state, which is
+        # what lets okg accept an unchanged rerun as a no-op.
         release_mode = mode in RELEASE_RUN_MODES
         return ConnectorRun(
             facts=_facts(),
