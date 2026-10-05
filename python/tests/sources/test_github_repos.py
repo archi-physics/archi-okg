@@ -55,9 +55,10 @@ def test_defaults_dedupe_and_invalid_slugs():
 
 
 # --- reference-catalog-complete-scope regressions ---
-# okg runs a reference_catalog source in release_new or release_unchanged;
-# both complete the scope. This source has no skip or empty guard of its
-# own (it reads no cache), so only the run mode decides the claim.
+# okg runs a reference_catalog source in release_new (chosen automatically)
+# or, when a mode is set explicitly, release_unchanged; both complete the
+# scope. The source reads no cache; it claims the scope only when at least
+# one configured slug is valid.
 
 
 @pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
@@ -69,4 +70,13 @@ def test_reference_catalog_modes_claim_a_complete_scope(mode):
 
 def test_cursor_mode_still_claims_no_scope():
     run = GitHubRepoSource(repos=["dmwm/WMCore"]).run("run-1", mode="cursor")
+    assert run.completed_scope is False
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_all_invalid_slugs_claim_no_scope(mode):
+    # Zero records under a complete scope would retract every repository
+    # the source ever emitted (deletion_semantics: missing_from_completed_scope).
+    run = GitHubRepoSource(repos=["not-a-slug", " "]).run("run-1", mode=mode)
+    assert list(run.facts) == []
     assert run.completed_scope is False

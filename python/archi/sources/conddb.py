@@ -72,7 +72,6 @@ from okg.deployment import (
     PreflightResult,
     ConnectorRun,
 )
-from okg.substrate.source_run_modes import COMPLETED_SCOPE_RUN_MODES
 
 from archi.auth.cache import (
     content_hash,
@@ -87,6 +86,7 @@ from archi.sources._cache_report import (
     unusable_cache_preflight,
     unusable_cache_run,
 )
+from archi.sources._run_modes import COMPLETED_SCOPE_RUN_MODES
 from archi.sources._sdk_adapter import ReaderAdapter
 
 _GT_VERSION_RE = re.compile(r"_v(\d+)$")

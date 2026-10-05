@@ -21,19 +21,31 @@ reimplementation of OKG services.
 ## Current state (update this section when it changes)
 
 **Reference catalogs claim a complete scope again (2026-10-04).** Since okg
-`d84f8fd275` (in the pinned `ac078aabd`), okg runs every `reference_catalog`
-source in run mode `release_new` (whole scope) or `release_unchanged`, and both
-complete the scope. CMSSW releases, CondDB global tags, DBS datasets and GitHub
-repositories only recognised `scope_complete` and `reconcile`, so they never
-claimed a complete scope; okg admission then refused every later run that
-emitted nothing new as `partial`, which blocked publishing. A downstream CMS
-instance turned its CMSSW releases source off on 2026-10-01 for this reason.
-The four readers now take the set of scope-completing modes from okg's
-`okg.substrate.source_run_modes.COMPLETED_SCOPE_RUN_MODES` instead of their own
-copy; their skip, truncation and empty-cache guards are unchanged. This is the
-first connector-side import from private substrate since the connector half
-moved to `okg.deployment`: the SDK does not export the run-mode table. The
-import block below lists it. The okg pin does not change.
+`d84f8fd275` (in the pinned `ac078aabd`), okg runs a `reference_catalog` source
+in run mode `release_new`, which it picks automatically; `release_unchanged`
+comes only from an explicit mode setting. Both complete the scope. CMSSW
+releases, CondDB global tags, DBS datasets and GitHub repositories only
+recognised `scope_complete` and `reconcile`, so they never claimed a complete
+scope; okg admission then refused every later run that emitted nothing new as
+`partial`, which blocked publishing. A downstream CMS instance turned its CMSSW
+releases source off on 2026-10-01 for this reason. The four readers now share
+one set of scope-completing modes, `archi.sources._run_modes`, which a test
+holds equal to okg's `COMPLETED_SCOPE_RUN_MODES`. Connectors may not import
+`okg.substrate` (`okg lint deployments`, DEPLOYMENT-001), so the set is copied,
+not imported, and the import block below is unchanged. Once the okg pin moves
+past okg's change that exports the set from `okg.deployment` (branch
+`claude/connector-complete-scope-modes`, not merged yet), the readers should
+import it from there.
+
+Deletion by absence is now live for these four sources. Each declares
+`deletion_semantics: missing_from_completed_scope`, so a `release_new` run over
+a valid input retracts records that are no longer in it: a refreshed DBS or
+CondDB cache with a different selection deletes what dropped out. Before, it
+could not happen. Until `d84f8fd275` such a retraction failed the run, and
+since then the readers never claimed a complete scope. GitHub repositories now
+also refuses the claim when no configured slug is valid. In `release_unchanged`
+a catalog that shrank now fails the run loudly, because okg refuses
+retractions in that mode. The okg pin does not change.
 
 **Cache downloaders and a snapshot builder moved in (2026-09-28, comp-ops A4).**
 The JIRA, static-docs and SSO-login downloaders and the download manifest moved
@@ -345,10 +357,7 @@ slice 5 — the enricher read surface, deferred at
 [our own recommendation](https://github.com/mitdbg/okg/issues/1181#issuecomment-5591973861).
 
 **Python imports (all of them).** The first entry is the public SDK; everything
-below it is still private substrate. All of it is enricher-side except
-`okg.substrate.source_run_modes`, which the four reference-catalog connectors
-read for the run modes that complete a scope (2026-10-04); the SDK does not
-export that table.
+below it is still private substrate, and all of it is enricher-side.
 
 ```
 okg.deployment:
@@ -357,7 +366,6 @@ okg.deployment:
     ConnectorAdapter,
     ContentHashProbe, MutableApiProbe,
     file_preflight, credential_preflight, http_preflight, redact
-okg.substrate.source_run_modes:   COMPLETED_SCOPE_RUN_MODES
 okg.substrate.enrichers.base:     EnrichResult, IncrementalContext
 okg.substrate.enrichers.derived_edges:
     DerivedEdgeCandidate, insert_deterministic_edges, mint_edge_id

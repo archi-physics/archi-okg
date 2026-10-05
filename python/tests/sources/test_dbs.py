@@ -94,8 +94,9 @@ def test_all_items_unparseable_is_endpoint_failed(tmp_path):
 
 
 # --- reference-catalog-complete-scope regressions ---
-# okg runs a reference_catalog source in release_new or release_unchanged;
-# both complete the scope, so a valid cache must claim it in either.
+# okg runs a reference_catalog source in release_new (chosen automatically)
+# or, when a mode is set explicitly, release_unchanged; both complete the
+# scope, so a valid cache must claim it in either.
 
 
 @pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])

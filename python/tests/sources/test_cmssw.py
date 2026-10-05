@@ -563,8 +563,9 @@ def test_unpinned_live_map_still_fetches(tmp_path, monkeypatch):
 
 
 # --- reference-catalog-complete-scope regressions ---
-# okg runs a reference_catalog source in release_new (whole scope) or
-# release_unchanged; both complete the scope. A reader that only knew
+# okg runs a reference_catalog source in release_new (its whole-scope mode,
+# chosen automatically); release_unchanged comes only from an explicit mode
+# setting. Both complete the scope. A reader that only knew
 # scope_complete/reconcile never claimed it, so okg admission refused
 # every later zero-output run as partial and blocked publishing.
 

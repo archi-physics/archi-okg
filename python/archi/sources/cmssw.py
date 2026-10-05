@@ -84,7 +84,6 @@ from okg.deployment import (
     NodeFact,
     PreflightResult,
 )
-from okg.substrate.source_run_modes import COMPLETED_SCOPE_RUN_MODES
 
 from archi.auth.cache import (
     content_hash,
@@ -93,6 +92,7 @@ from archi.auth.cache import (
     resolve_repo_path,
 )
 from archi.sources._cache_report import skipped_items_status
+from archi.sources._run_modes import COMPLETED_SCOPE_RUN_MODES
 from archi.sources._sdk_adapter import ReaderAdapter
 
 RELEASES_MAP_URL = (

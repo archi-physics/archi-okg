@@ -29,10 +29,12 @@ affected_code:
 - python/archi/sources/conddb.py
 - python/archi/sources/dbs.py
 - python/archi/sources/github_repos.py
+- python/archi/sources/_run_modes.py
 - python/tests/sources/test_cmssw.py
 - python/tests/sources/test_conddb.py
 - python/tests/sources/test_dbs.py
 - python/tests/sources/test_github_repos.py
+- python/tests/sources/test_run_modes.py
 requirements:
 - id: req.reference-catalog-complete-scope.release-modes
   statement: cmssw, conddb, dbs and github_repos claim a complete scope over a valid input
@@ -54,37 +56,13 @@ tasks:
   requirement: req.reference-catalog-complete-scope.guards-kept
   verification: test_reference_catalog_modes_keep_the_guards (both modes) in the cmssw, conddb
     and dbs test files, plus the existing guard tests, pass; the full archi suite passes.
+- id: task.reference-catalog-complete-scope.okg-parity
+  requirement: req.reference-catalog-complete-scope.okg-parity
+  verification: >-
+    python/tests/sources/test_run_modes.py passes against okg ac078aabd,
+    and no module under python/archi/sources imports okg.substrate.
 - id: task.reference-catalog-complete-scope.alignment
   requirement: req.reference-catalog-complete-scope.alignment
   verification: python/tests/test_alignment_page.py passes.
-evidence:
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.release-modes
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_cmssw.py tests/sources/test_conddb.py
-    tests/sources/test_dbs.py tests/sources/test_github_repos.py tests/test_alignment_page.py
-  head: 16b4cdc0869254ebb2e853df427cfa0d3183f535
-  at: '2026-10-05T00:51:48+00:00'
-  note: '66 passed at this commit (okg ac078aabd, submit76). With the reader code of main
-    46d3daef and these tests, 8 failed and 56 passed: exactly the 8 release_new/release_unchanged
-    claim cases across cmssw, conddb, dbs and github_repos. The cursor-mode controls pass
-    on both.'
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.guards-kept
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests
-  head: 16b4cdc0869254ebb2e853df427cfa0d3183f535
-  at: '2026-10-05T00:51:48+00:00'
-  note: 1691 passed at this commit, the whole archi suite (okg ac078aabd, submit76; two reruns,
-    both 1691 passed). Includes test_reference_catalog_modes_keep_the_guards in both release
-    modes for cmssw (skipped, empty, truncated), conddb and dbs (skipped, empty -> cache_missing),
-    and the existing scope_complete guard tests unchanged.
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.alignment
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/test_alignment_page.py
-  head: 16b4cdc0869254ebb2e853df427cfa0d3183f535
-  at: '2026-10-05T00:51:49+00:00'
-  note: 'Passes: the import block lists okg.substrate.source_run_modes COMPLETED_SCOPE_RUN_MODES,
-    matching the code; Last updated line still names okg ac078aabd, equal to the CI pin.'
+evidence: []
 decisions: []
