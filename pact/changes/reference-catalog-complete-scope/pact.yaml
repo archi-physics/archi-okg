@@ -4,20 +4,36 @@ title: Reference-catalog readers claim a complete scope in okg's release run mod
 tier: 2
 why: 'okg commit d84f8fd275 ("Resolve source run modes from one per-profile policy", 2026-09-26,
   contained in the pinned ac078aabd) runs every `source_class: reference_catalog` source in
-  run mode `release_new` (its whole-scope mode) or `release_unchanged`, and both complete
-  the scope (okg src/okg/substrate/source_run_modes.py, PROFILE_RUN_MODES and COMPLETED_SCOPE_RUN_MODES).
-  The four archi reference-catalog readers -- cmssw, conddb, dbs and github_repos -- decided
-  the claim with their own copy of the mode set, `{"scope_complete", "reconcile"}`, which
-  okg no longer passes them. So they never claimed a complete scope, and okg admission refused
-  every later run that emitted nothing new as `partial`, which blocked publishing. A downstream
-  CMS instance turned its CMSSW releases source off on 2026-10-01 because of it.
+  run mode `release_new`, which it picks automatically; `release_unchanged` comes only from
+  an explicit mode setting. Both complete the scope (okg src/okg/substrate/source_run_modes.py,
+  COMPLETED_SCOPE_RUN_MODES). The four archi reference-catalog readers -- cmssw, conddb, dbs
+  and github_repos -- decided the claim with their own copy of the mode set, `{"scope_complete",
+  "reconcile"}`, which okg no longer passes them. So they never claimed a complete scope,
+  and okg admission refused every later run that emitted nothing new as `partial`, which blocked
+  publishing. A downstream CMS instance turned its CMSSW releases source off on 2026-10-01
+  because of it.
 
-  DECISION (Jason, `cmsswfix A`): the four readers read the set from okg''s COMPLETED_SCOPE_RUN_MODES
-  instead of keeping a copy, so the next change to okg''s policy cannot leave them behind
-  again. The import has no fallback literal: if okg stops providing it, the reader fails at
-  import. The set is a superset of the old one, so scope_complete and reconcile behave as
-  before. The skip, truncation and empty-cache guards are unchanged. The okg pin does not
-  change.
+  DECISION (Jason, `cmsswfix A`; refined by the lane lead after review, option b): the four
+  readers share one archi copy of okg''s scope-completing modes, archi.sources._run_modes.COMPLETED_SCOPE_RUN_MODES
+  = {scope_complete, reconcile, release_new, release_unchanged}. They do not import okg.substrate.source_run_modes
+  because `okg lint deployments` reports DEPLOYMENT-001 for any okg.substrate import in a
+  connector, and okg-deployments'' compatibility CI marks such a deployment incompatible.
+  A test asserts the copy equals okg''s set (from okg.deployment when the pinned okg exports
+  it, else from okg.substrate.source_run_modes), so a pin bump that changes okg''s policy
+  fails the suite. The readers should switch to the okg.deployment export once the pin passes
+  okg branch claude/connector-complete-scope-modes. The set is a superset of the old one,
+  so scope_complete and reconcile behave as before. The skip, truncation and empty-cache guards
+  are unchanged. The okg pin does not change.
+
+  Deletion by absence becomes live for these four sources: each declares deletion_semantics
+  missing_from_completed_scope, so a release_new run over a valid input retracts what is no
+  longer in it, and a refreshed DBS or CondDB cache with a different selection deletes what
+  dropped out. Before d84f8fd275 such a retraction failed the run (the runner had no retraction
+  policy for reference_catalog under scope_complete); since then the readers never claimed
+  a complete scope. So github_repos, which had no empty-input guard, gains `and bool(records)`
+  like cmssw: an all-invalid slug list must not retract every repository. In release_unchanged
+  a catalog that shrank now fails the run loudly, because okg refuses retractions in that
+  mode.
 
   NOT CHANGED: the other readers with the same hard-coded set are discovery_crawl (cds, cric,
   docs, dqm, gocdb, hypernews, indico, indico_live, siteconf, twiki) or mutable_api (jira,
@@ -40,12 +56,16 @@ requirements:
   statement: cmssw, conddb, dbs and github_repos claim a complete scope over a valid input
     in run modes `release_new` and `release_unchanged`, and still claim none in `cursor`.
 - id: req.reference-catalog-complete-scope.guards-kept
-  statement: 'In `release_new` and `release_unchanged` the existing guards still withhold
-    the claim: skipped cache items (cmssw, conddb, dbs), an empty cache (cmssw, conddb, dbs)
-    and a truncated release list (cmssw).'
+  statement: 'In `release_new` and `release_unchanged` the guards withhold the claim: skipped
+    cache items (cmssw, conddb, dbs), an empty cache (cmssw, conddb, dbs), a truncated release
+    list (cmssw), and no valid repository slug (github_repos, new).'
+- id: req.reference-catalog-complete-scope.okg-parity
+  statement: No connector imports okg.substrate; archi's COMPLETED_SCOPE_RUN_MODES equals
+    okg's set at the pinned okg commit, checked by a test.
 - id: req.reference-catalog-complete-scope.alignment
-  statement: docs/okg-alignment.md lists the new okg import in its import block and records
-    the change in "Current state"; test_alignment_page.py passes.
+  statement: docs/okg-alignment.md records the change in "Current state", including that deletion
+    by absence is now live and the planned switch to the okg.deployment export; its import
+    block is unchanged and test_alignment_page.py passes.
 tasks:
 - id: task.reference-catalog-complete-scope.release-modes
   requirement: req.reference-catalog-complete-scope.release-modes
@@ -55,14 +75,57 @@ tasks:
 - id: task.reference-catalog-complete-scope.guards-kept
   requirement: req.reference-catalog-complete-scope.guards-kept
   verification: test_reference_catalog_modes_keep_the_guards (both modes) in the cmssw, conddb
-    and dbs test files, plus the existing guard tests, pass; the full archi suite passes.
+    and dbs test files and test_all_invalid_slugs_claim_no_scope (both modes) in test_github_repos.py
+    pass, plus the existing guard tests; the github_repos guard tests fail without the new
+    guard; the full archi suite passes.
 - id: task.reference-catalog-complete-scope.okg-parity
   requirement: req.reference-catalog-complete-scope.okg-parity
-  verification: >-
-    python/tests/sources/test_run_modes.py passes against okg ac078aabd,
-    and no module under python/archi/sources imports okg.substrate.
+  verification: python/tests/sources/test_run_modes.py passes against okg ac078aabd, and no
+    module under python/archi/sources imports okg.substrate.
 - id: task.reference-catalog-complete-scope.alignment
   requirement: req.reference-catalog-complete-scope.alignment
   verification: python/tests/test_alignment_page.py passes.
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.release-modes
+  status: pass
+  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_cmssw.py tests/sources/test_conddb.py
+    tests/sources/test_dbs.py tests/sources/test_github_repos.py tests/sources/test_run_modes.py
+    tests/test_alignment_page.py
+  head: cd3f7cffc2e4e0c8d9f09698565c06738bcb7f59
+  at: '2026-10-05T01:06:26+00:00'
+  note: 69 passed at this commit (okg ac078aabd, submit76). With main 46d3daef reader code
+    and these tests, the 8 release_new/release_unchanged claim cases fail across cmssw, conddb,
+    dbs and github_repos (8 failed, 56 passed in the first round). The cursor-mode controls
+    pass on both.
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.guards-kept
+  status: pass
+  command: python -m pytest python/tests -q
+  head: cd3f7cffc2e4e0c8d9f09698565c06738bcb7f59
+  at: '2026-10-05T01:06:27+00:00'
+  note: 1694 passed at this commit, the whole archi suite (okg ac078aabd, submit76). Includes
+    keep_the_guards in both release modes for cmssw (skipped, empty, truncated), conddb and
+    dbs (skipped, empty -> cache_missing), and test_all_invalid_slugs_claim_no_scope (both
+    modes) for github_repos, which fails 2 of 7 in test_github_repos.py with the unguarded
+    github_repos.py of bb37fce3.
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.alignment
+  status: pass
+  command: python -m pytest python/tests/test_alignment_page.py python/tests/test_compops_lint_recheck.py
+    -q
+  head: cd3f7cffc2e4e0c8d9f09698565c06738bcb7f59
+  at: '2026-10-05T01:06:29+00:00'
+  note: 3 passed in a venv without okg (the CI substrate-free job); test_alignment_page.py
+    also passes in the full suite. Import block equals main; Last updated names okg ac078aabd,
+    equal to the ci.yml pin.
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.okg-parity
+  status: pass
+  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_run_modes.py
+  head: cd3f7cffc2e4e0c8d9f09698565c06738bcb7f59
+  at: '2026-10-05T01:07:11+00:00'
+  note: Passes against okg ac078aabd (read from okg.substrate.source_run_modes; okg.deployment
+    does not export it there). A mutant copy without release_unchanged fails it. No module
+    under python/archi/sources imports okg.substrate.
 decisions: []
