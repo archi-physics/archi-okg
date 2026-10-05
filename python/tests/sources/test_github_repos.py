@@ -1,4 +1,6 @@
 """req.w2.sources-catalogs — GitHubRepoSource emission, offline."""
+
+import pytest
 from okg.deployment import EdgeFact, NodeFact
 
 from archi.sources.github_repos import DEFAULT_REPOS, GitHubRepoSource
@@ -50,3 +52,21 @@ def test_defaults_dedupe_and_invalid_slugs():
     assert result.status == "ok"
     assert result.mode == "registry_seed"
     assert result.record_count == len(DEFAULT_REPOS)
+
+
+# --- reference-catalog-complete-scope regressions ---
+# okg runs a reference_catalog source in release_new or release_unchanged;
+# both complete the scope. This source has no skip or empty guard of its
+# own (it reads no cache), so only the run mode decides the claim.
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_claim_a_complete_scope(mode):
+    run = GitHubRepoSource(repos=["dmwm/WMCore"]).run("run-1", mode=mode)
+    assert run.completed_scope is True
+    assert run.run_mode == mode
+
+
+def test_cursor_mode_still_claims_no_scope():
+    run = GitHubRepoSource(repos=["dmwm/WMCore"]).run("run-1", mode="cursor")
+    assert run.completed_scope is False

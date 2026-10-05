@@ -68,6 +68,7 @@ from okg.deployment import (
     ConnectorRun,
 )
 from okg.deployment import ContentHashProbe
+from okg.substrate.source_run_modes import COMPLETED_SCOPE_RUN_MODES
 
 from archi.sources._sdk_adapter import ReaderAdapter
 
@@ -171,7 +172,7 @@ class GitHubRepoSource:
 
         return ConnectorRun(
             facts=_facts(),
-            completed_scope=(mode in {"scope_complete", "reconcile"}),
+            completed_scope=(mode in COMPLETED_SCOPE_RUN_MODES),
             run_mode=mode,
             health=ConnectorHealth(
                 status="ok",

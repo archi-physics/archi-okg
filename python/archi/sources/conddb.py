@@ -72,6 +72,7 @@ from okg.deployment import (
     PreflightResult,
     ConnectorRun,
 )
+from okg.substrate.source_run_modes import COMPLETED_SCOPE_RUN_MODES
 
 from archi.auth.cache import (
     content_hash,
@@ -203,7 +204,7 @@ class CondDBGlobalTagSource:
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(
-                mode in {"scope_complete", "reconcile"} and not skipped
+                mode in COMPLETED_SCOPE_RUN_MODES and not skipped
             ),
             run_mode=mode,
             health=cache_source_health(

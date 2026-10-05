@@ -1,6 +1,7 @@
 """req.w2.sources-catalogs — DBSDatasetSource emission, offline."""
 import json
 
+import pytest
 from okg.deployment import EdgeFact, NodeFact
 
 from archi.sources.dbs import DBSDatasetSource
@@ -90,3 +91,29 @@ def test_all_items_unparseable_is_endpoint_failed(tmp_path):
     assert list(run.facts) == []
     assert run.completed_scope is False
     assert run.health.status == "endpoint_failed"
+
+
+# --- reference-catalog-complete-scope regressions ---
+# okg runs a reference_catalog source in release_new or release_unchanged;
+# both complete the scope, so a valid cache must claim it in either.
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_claim_a_complete_scope(tmp_path, mode):
+    run = _source(tmp_path, RECORDS).run("run-1", mode=mode)
+    assert run.completed_scope is True
+    assert run.run_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_keep_the_guards(tmp_path, mode):
+    skipped = _source(tmp_path / "skipped", RECORDS + ["junk"])
+    assert skipped.run("run-1", mode=mode).completed_scope is False
+    empty = _source(tmp_path / "empty", []).run("run-2", mode=mode)
+    assert empty.completed_scope is False
+    assert empty.health.status == "cache_missing"
+
+
+def test_cursor_mode_still_claims_no_scope(tmp_path):
+    run = _source(tmp_path, RECORDS).run("run-1", mode="cursor")
+    assert run.completed_scope is False

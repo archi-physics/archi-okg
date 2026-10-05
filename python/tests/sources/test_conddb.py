@@ -1,6 +1,7 @@
 """req.w2.sources-catalogs — CondDBGlobalTagSource emission, offline."""
 import json
 
+import pytest
 from okg.deployment import EdgeFact, NodeFact
 
 from archi.sources.conddb import CondDBGlobalTagSource
@@ -121,3 +122,32 @@ def test_change_probe_covers_cmssw_cache(tmp_path):
     )
     after = source.change_probe.build_token()
     assert before != after
+
+
+# --- reference-catalog-complete-scope regressions ---
+# okg runs a reference_catalog source in release_new or release_unchanged;
+# both complete the scope, so a valid cache must claim it in either.
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_claim_a_complete_scope(tmp_path, mode):
+    run = _source(tmp_path, with_cmssw=True).run("run-1", mode=mode)
+    assert run.completed_scope is True
+    assert run.run_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_keep_the_guards(tmp_path, mode):
+    source = _source(tmp_path, with_cmssw=True)
+    cache = tmp_path / "data" / "conddb-global-tags" / "records.json"
+    cache.write_text(json.dumps(RECORDS + ["junk"]))
+    assert source.run("run-1", mode=mode).completed_scope is False
+    cache.write_text(json.dumps([]))
+    empty = source.run("run-2", mode=mode)
+    assert empty.completed_scope is False
+    assert empty.health.status == "cache_missing"
+
+
+def test_cursor_mode_still_claims_no_scope(tmp_path):
+    run = _source(tmp_path, with_cmssw=True).run("run-1", mode="cursor")
+    assert run.completed_scope is False

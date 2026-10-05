@@ -20,6 +20,21 @@ reimplementation of OKG services.
 
 ## Current state (update this section when it changes)
 
+**Reference catalogs claim a complete scope again (2026-10-04).** Since okg
+`d84f8fd275` (in the pinned `ac078aabd`), okg runs every `reference_catalog`
+source in run mode `release_new` (whole scope) or `release_unchanged`, and both
+complete the scope. CMSSW releases, CondDB global tags, DBS datasets and GitHub
+repositories only recognised `scope_complete` and `reconcile`, so they never
+claimed a complete scope; okg admission then refused every later run that
+emitted nothing new as `partial`, which blocked publishing. A downstream CMS
+instance turned its CMSSW releases source off on 2026-10-01 for this reason.
+The four readers now take the set of scope-completing modes from okg's
+`okg.substrate.source_run_modes.COMPLETED_SCOPE_RUN_MODES` instead of their own
+copy; their skip, truncation and empty-cache guards are unchanged. This is the
+first connector-side import from private substrate since the connector half
+moved to `okg.deployment`: the SDK does not export the run-mode table. The
+import block below lists it. The okg pin does not change.
+
 **Cache downloaders and a snapshot builder moved in (2026-09-28, comp-ops A4).**
 The JIRA, static-docs and SSO-login downloaders and the download manifest moved
 from okg-deployments `cms/scripts` into `archi.downloaders`; they import nothing
@@ -71,8 +86,8 @@ path and SHA256 binding that never fetches in frozen mode. It preserves the live
 profile. The historical CMSSW cache is still unavailable; unit fixtures are not
 real-deployment baseline evidence. See [frozen CMSSW inputs](frozen-cmssw-input.md).
 
-*Last updated 2026-09-27, tested against okg `dev` @ `ac078aabd`; archi branch
-`main` @ `7b5b9112`.*
+*Last updated 2026-10-04, tested against okg `dev` @ `ac078aabd`; archi branch
+`main` @ `46d3daef`.*
 
 **Pin bumped `34efbad1b` → `5b2fd076c` (2026-09-15), OKG#1906.** The fork was
 synced to okg `dev` first; it had no commits of its own. Full archi suite
@@ -330,7 +345,10 @@ slice 5 — the enricher read surface, deferred at
 [our own recommendation](https://github.com/mitdbg/okg/issues/1181#issuecomment-5591973861).
 
 **Python imports (all of them).** The first entry is the public SDK; everything
-below it is still private substrate, and all of it is enricher-side.
+below it is still private substrate. All of it is enricher-side except
+`okg.substrate.source_run_modes`, which the four reference-catalog connectors
+read for the run modes that complete a scope (2026-10-04); the SDK does not
+export that table.
 
 ```
 okg.deployment:
@@ -339,6 +357,7 @@ okg.deployment:
     ConnectorAdapter,
     ContentHashProbe, MutableApiProbe,
     file_preflight, credential_preflight, http_preflight, redact
+okg.substrate.source_run_modes:   COMPLETED_SCOPE_RUN_MODES
 okg.substrate.enrichers.base:     EnrichResult, IncrementalContext
 okg.substrate.enrichers.derived_edges:
     DerivedEdgeCandidate, insert_deterministic_edges, mint_edge_id

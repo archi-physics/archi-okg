@@ -84,6 +84,7 @@ from okg.deployment import (
     NodeFact,
     PreflightResult,
 )
+from okg.substrate.source_run_modes import COMPLETED_SCOPE_RUN_MODES
 
 from archi.auth.cache import (
     content_hash,
@@ -304,7 +305,7 @@ class CMSSWReleaseSource:
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(
-                mode in {"scope_complete", "reconcile"}
+                mode in COMPLETED_SCOPE_RUN_MODES
                 and not skipped
                 and not truncated
                 and bool(records)
