@@ -218,9 +218,7 @@ class CondDBGlobalTagSource:
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(
-                mode in COMPLETED_SCOPE_RUN_MODES
-                and not release_mode
-                and not skipped
+                mode in COMPLETED_SCOPE_RUN_MODES and not release_mode and not skipped
             ),
             next_checkpoint=(
                 input_content_checkpoint(
