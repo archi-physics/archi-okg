@@ -36,11 +36,14 @@ why: 'okg commit d84f8fd275 ("Resolve source run modes from one per-profile poli
   leave the export until okg#3307 lands and these sources switch to deleting. At reader level
   scope_complete, reconcile and every other mode behave as on main.
 
-  KNOWN LIMIT (round-3 review finding 1, fix pending): a deployment where dbs or conddb already
-  published facts without a cursor (the state the old bug leaves) is still refused `partial`
-  on the first run after this fix, because every fact dedupes and the cursor is stored only
-  on an accepted run. Fresh deployments and sources that never published are unaffected. Recovery
-  (an okg change or a one-time per-instance step) is to be decided; no archi code change here.
+  KNOWN LIMIT under an okg without mitdbg/okg#3317 (round-3 review finding 1; Jason, `stuck
+  A`): a deployment where dbs or conddb already published facts without a cursor (the state
+  the old bug leaves) is refused `partial` on the first run after this fix, because every fact
+  dedupes and the cursor is stored only on an accepted run. okg#3317 fixes it in okg: a prior
+  accepted and published admission of the source counts as history, so that first unchanged
+  rerun is accepted as `incomplete_scope_noop`, with no deletion and no blocked publish. It
+  applies once the instance''s okg includes #3317; no archi code change. Fresh deployments and
+  sources that never published are unaffected either way.
 
   - The modes live in one archi module, archi.sources._run_modes (COMPLETED_SCOPE_RUN_MODES
   and RELEASE_RUN_MODES), not an import of okg.substrate.source_run_modes: `okg lint deployments`
@@ -114,51 +117,5 @@ tasks:
   requirement: req.reference-catalog-complete-scope.alignment
   verification: python/tests/test_alignment_page.py passes, with okg and in the substrate-free
     CI environment.
-evidence:
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.deleting-catalogs
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_cmssw.py tests/sources/test_conddb.py
-    tests/sources/test_dbs.py tests/sources/test_github_repos.py tests/sources/test_run_modes.py
-    tests/test_alignment_page.py
-  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
-  at: '2026-10-05T01:26:48+00:00'
-  note: '80 passed at this commit (okg ac078aabd, submit76). On main 46d3daef reader code
-    the cmssw and github_repos release-mode claim cases fail (round 1: 8 failed across the
-    four readers); cursor-mode controls pass on both.'
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.non-deleting-catalogs
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_dbs.py tests/sources/test_conddb.py
-  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
-  at: '2026-10-05T01:26:54+00:00'
-  note: 'Pass at this commit. With the readers of 8c3a315e, 8 failed: test_release_modes_claim_no_scope_and_return_a_checkpoint
-    and test_release_checkpoint_follows_* in both release modes for dbs and conddb (round
-    3). The scope_complete/reconcile controls are reader-level only; okg refuses those modes
-    for reference_catalog sources at run start.'
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.guards-kept
-  status: pass
-  command: python -m pytest python/tests -q
-  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
-  at: '2026-10-05T01:26:55+00:00'
-  note: 1705 passed at this commit, the whole archi suite (okg ac078aabd, submit76). test_explicit_empty_repos_is_refused
-    failed with the github_repos.py of 8c3a315e; test_all_invalid_slugs_claim_no_scope failed
-    in both modes with the unguarded github_repos.py of bb37fce3.
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.okg-parity
-  status: pass
-  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_run_modes.py
-  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
-  at: '2026-10-05T01:26:56+00:00'
-  note: 2 passed against okg ac078aabd. A copy without release_unchanged fails it (round 2).
-    No module under python/archi/sources imports okg.substrate.
-- kind: executed_test
-  requirement: req.reference-catalog-complete-scope.alignment
-  status: pass
-  command: python -m pytest python/tests/test_alignment_page.py python/tests/test_compops_lint_recheck.py
-    -q
-  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
-  at: '2026-10-05T01:26:57+00:00'
-  note: 3 passed in a venv without okg (the CI substrate-free job), and in the full suite.
+evidence: []
 decisions: []

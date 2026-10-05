@@ -53,20 +53,23 @@ releases source off on 2026-10-01 for this reason. Now:
   `scope_complete` and `reconcile` for a `reference_catalog` source at run
   start, so under current okg no run removes datasets or tags that leave the
   export. They stay until okg#3307 lands and these sources switch to deleting.
-  Known limit: a deployment where DBS or CondDB already published facts
-  without a cursor (the state the old bug leaves) is still refused `partial`
-  on its first run after this fix, because every fact dedupes and no cursor
-  is stored yet. RECOVERY: to be decided (okg change or a one-time per-instance
-  step). A fresh deployment, or one where the source never published, is
-  unaffected.
+  Known limit under an okg without mitdbg/okg#3317: a deployment where DBS or
+  CondDB already published facts without a cursor (the state the old bug
+  leaves) is still refused `partial` on its first run after this fix, because
+  every fact dedupes and no cursor is stored yet. okg#3317 fixes this in okg:
+  it counts a prior accepted and published admission of the source as
+  history, so that first unchanged rerun is accepted as `incomplete_scope_noop`,
+  with no deletion and no blocked publish. It applies once the instance's okg
+  includes #3317. A fresh deployment, or one where the source never published,
+  is unaffected either way.
 
 The scope-completing modes live in one archi module, `archi.sources._run_modes`,
 which a test holds equal to okg's `COMPLETED_SCOPE_RUN_MODES` and to the
 `reference_catalog` profile's accepted modes. Connectors may not import
 `okg.substrate` (`okg lint deployments`, DEPLOYMENT-001), so the set is copied,
 not imported. Once the okg pin moves past okg's change that exports the set
-from `okg.deployment` (branch `claude/connector-complete-scope-modes`, not
-merged yet), the readers should import it from there. The cursor uses the
+from `okg.deployment` (mitdbg/okg#3317, branch
+`claude/connector-complete-scope-modes`, not merged yet), the readers should import it from there. The cursor uses the
 public `okg.deployment.Checkpoint`, added to the import block below. The okg
 pin does not change.
 
