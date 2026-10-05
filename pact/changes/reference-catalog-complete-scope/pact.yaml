@@ -28,9 +28,9 @@ why: 'okg commit d84f8fd275 ("Resolve source run modes from one per-profile poli
   and okg has no retraction-size guard yet (mitdbg/okg#3307). In those modes they return a
   cursor, `input_content_sha256`, the SHA-256 of the bytes of the input caches (conddb also
   the CMSSW cache it reads), so okg accepts an unchanged rerun as `incomplete_scope_noop`.
-  okg never skips a read for these readers (none declares probe_short_circuit_safe), so
-  every run re-reads the cache in full; the cursor only gives the source stored state. Costs:
-  only a completed scope advances last_reconcile, so dbs and conddb read as stale in freshness
+  okg never skips a read for these readers (none declares probe_short_circuit_safe), so every
+  run re-reads the cache in full; the cursor only gives the source stored state. Costs: only
+  a completed scope advances last_reconcile, so dbs and conddb read as stale in freshness
   checks; and okg refuses scope_complete and reconcile for a reference_catalog source at run
   start (runner.py@ac078aabd:2982-2996), so under current okg no run removes records that
   leave the export until okg#3307 lands and these sources switch to deleting. At reader level
@@ -114,5 +114,51 @@ tasks:
   requirement: req.reference-catalog-complete-scope.alignment
   verification: python/tests/test_alignment_page.py passes, with okg and in the substrate-free
     CI environment.
-evidence: []
+evidence:
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.deleting-catalogs
+  status: pass
+  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_cmssw.py tests/sources/test_conddb.py
+    tests/sources/test_dbs.py tests/sources/test_github_repos.py tests/sources/test_run_modes.py
+    tests/test_alignment_page.py
+  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
+  at: '2026-10-05T01:26:48+00:00'
+  note: '80 passed at this commit (okg ac078aabd, submit76). On main 46d3daef reader code
+    the cmssw and github_repos release-mode claim cases fail (round 1: 8 failed across the
+    four readers); cursor-mode controls pass on both.'
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.non-deleting-catalogs
+  status: pass
+  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_dbs.py tests/sources/test_conddb.py
+  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
+  at: '2026-10-05T01:26:54+00:00'
+  note: 'Pass at this commit. With the readers of 8c3a315e, 8 failed: test_release_modes_claim_no_scope_and_return_a_checkpoint
+    and test_release_checkpoint_follows_* in both release modes for dbs and conddb (round
+    3). The scope_complete/reconcile controls are reader-level only; okg refuses those modes
+    for reference_catalog sources at run start.'
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.guards-kept
+  status: pass
+  command: python -m pytest python/tests -q
+  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
+  at: '2026-10-05T01:26:55+00:00'
+  note: 1705 passed at this commit, the whole archi suite (okg ac078aabd, submit76). test_explicit_empty_repos_is_refused
+    failed with the github_repos.py of 8c3a315e; test_all_invalid_slugs_claim_no_scope failed
+    in both modes with the unguarded github_repos.py of bb37fce3.
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.okg-parity
+  status: pass
+  command: cd python && PYTHONPATH=. python -m pytest -q tests/sources/test_run_modes.py
+  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
+  at: '2026-10-05T01:26:56+00:00'
+  note: 2 passed against okg ac078aabd. A copy without release_unchanged fails it (round 2).
+    No module under python/archi/sources imports okg.substrate.
+- kind: executed_test
+  requirement: req.reference-catalog-complete-scope.alignment
+  status: pass
+  command: python -m pytest python/tests/test_alignment_page.py python/tests/test_compops_lint_recheck.py
+    -q
+  head: 4466584846549a2d58a691c10f2d0ef7dea36a0d
+  at: '2026-10-05T01:26:57+00:00'
+  note: 3 passed in a venv without okg (the CI substrate-free job), and in the full suite.
 decisions: []
