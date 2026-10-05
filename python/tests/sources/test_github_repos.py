@@ -80,3 +80,14 @@ def test_all_invalid_slugs_claim_no_scope(mode):
     run = GitHubRepoSource(repos=["not-a-slug", " "]).run("run-1", mode=mode)
     assert list(run.facts) == []
     assert run.completed_scope is False
+
+
+def test_explicit_empty_repos_is_refused():
+    # An explicit empty list used to fall back to DEFAULT_REPOS silently; a
+    # registry that names no repository is a configuration error.
+    with pytest.raises(ValueError, match="repos"):
+        GitHubRepoSource(repos=[])
+
+
+def test_missing_repos_keeps_the_defaults():
+    assert GitHubRepoSource(repos=None).repos == DEFAULT_REPOS

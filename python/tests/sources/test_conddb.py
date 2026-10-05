@@ -126,15 +126,43 @@ def test_change_probe_covers_cmssw_cache(tmp_path):
 
 # --- reference-catalog-complete-scope regressions ---
 # okg runs a reference_catalog source in release_new (chosen automatically)
-# or, when a mode is set explicitly, release_unchanged; both complete the
-# scope, so a valid cache must claim it in either.
+# or, when a mode is set explicitly, release_unchanged. CondDB deliberately
+# claims no complete scope there (no deletion by absence) and instead
+# returns a checkpoint that names its input content -- the global-tag cache
+# and the CMSSW cache it reads for release targets -- so okg accepts an
+# unchanged rerun as a no-op. scope_complete and reconcile are unchanged.
+
+_CURSOR_KEY = "input_content_sha256"
 
 
 @pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
-def test_reference_catalog_modes_claim_a_complete_scope(tmp_path, mode):
+def test_release_modes_claim_no_scope_and_return_a_checkpoint(tmp_path, mode):
     run = _source(tmp_path, with_cmssw=True).run("run-1", mode=mode)
-    assert run.completed_scope is True
+    assert run.completed_scope is False
     assert run.run_mode == mode
+    assert run.health.status == "ok"
+    assert run.next_checkpoint is not None
+    cursor = run.next_checkpoint.as_cursor()
+    assert set(cursor) == {_CURSOR_KEY}
+    assert len(cursor[_CURSOR_KEY]) == 64
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_release_checkpoint_follows_both_caches(tmp_path, mode):
+    source = _source(tmp_path, with_cmssw=True)
+    first = source.run("run-1", mode=mode).next_checkpoint.as_cursor()
+    again = source.run("run-2", mode=mode).next_checkpoint.as_cursor()
+    assert again == first
+    (tmp_path / "data" / "cmssw-releases" / "records.json").write_text(
+        json.dumps([{"label": "CMSSW_14_0_2"}])
+    )
+    cmssw_changed = source.run("run-3", mode=mode).next_checkpoint.as_cursor()
+    assert cmssw_changed != first
+    (tmp_path / "data" / "conddb-global-tags" / "records.json").write_text(
+        json.dumps(RECORDS[:1])
+    )
+    tags_changed = source.run("run-4", mode=mode).next_checkpoint.as_cursor()
+    assert tags_changed != cmssw_changed
 
 
 @pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
@@ -149,6 +177,14 @@ def test_reference_catalog_modes_keep_the_guards(tmp_path, mode):
     assert empty.health.status == "cache_missing"
 
 
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_whole_scope_modes_still_claim_without_a_checkpoint(tmp_path, mode):
+    run = _source(tmp_path, with_cmssw=True).run("run-1", mode=mode)
+    assert run.completed_scope is True
+    assert run.next_checkpoint is None
+
+
 def test_cursor_mode_still_claims_no_scope(tmp_path):
     run = _source(tmp_path, with_cmssw=True).run("run-1", mode="cursor")
     assert run.completed_scope is False
+    assert run.next_checkpoint is None

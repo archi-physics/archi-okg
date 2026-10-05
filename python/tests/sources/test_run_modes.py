@@ -8,7 +8,7 @@ at the first okg pin whose set differs.
 
 import importlib
 
-from archi.sources._run_modes import COMPLETED_SCOPE_RUN_MODES
+from archi.sources._run_modes import COMPLETED_SCOPE_RUN_MODES, RELEASE_RUN_MODES
 
 
 def _okg_completed_scope_run_modes():
@@ -24,3 +24,11 @@ def _okg_completed_scope_run_modes():
 
 def test_archi_completed_scope_run_modes_match_okg():
     assert COMPLETED_SCOPE_RUN_MODES == frozenset(_okg_completed_scope_run_modes())
+
+
+def test_archi_release_run_modes_match_okg_reference_catalog():
+    # Test-only lookup of okg's per-profile table; okg.deployment does not
+    # export it.
+    module = importlib.import_module("okg.substrate.source_run_modes")
+    accepted = module.PROFILE_RUN_MODES["reference_catalog"].accepted
+    assert RELEASE_RUN_MODES == frozenset(accepted)
