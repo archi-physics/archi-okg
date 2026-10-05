@@ -46,6 +46,7 @@ classes:
       transient: "false"
       okg_alias_fields: name
       okg_searchable_text_fields: name,fullname,country,text
+      okg_title_from: name
 
   Site:
     description: >-
@@ -68,6 +69,7 @@ classes:
       transient: "false"
       okg_alias_fields: name
       okg_searchable_text_fields: name,tier_level,geographic_location,text
+      okg_title_from: name
 
   SiteConfig:
     description: >-
@@ -90,6 +92,7 @@ classes:
       transient: "false"
       okg_alias_fields: site_name
       okg_searchable_text_fields: site_name,se_endpoints,ce_endpoints,text
+      okg_title_from: site_name
 
   StorageEndpoint:
     description: CMS storage unit / storage endpoint from CRIC.
@@ -107,6 +110,7 @@ classes:
       transient: "false"
       okg_alias_fields: name
       okg_searchable_text_fields: name,type,text
+      okg_title_from: name
 
   ComputeEndpoint:
     description: CMS compute unit / compute endpoint from CRIC.
@@ -129,6 +133,7 @@ classes:
       transient: "false"
       okg_alias_fields: name
       okg_searchable_text_fields: name,text
+      okg_title_from: name
 
   Operator:
     description: >-
@@ -145,6 +150,7 @@ classes:
       transient: "false"
       okg_alias_fields: name
       okg_searchable_text_fields: name,text
+      okg_title_from: name
 
   InfrastructureService:
     description: >-
@@ -166,6 +172,7 @@ classes:
       transient: "false"
       okg_alias_fields: name,endpoint
       okg_searchable_text_fields: name,service_type,flavour,endpoint,text
+      okg_title_from: name
 
   Federation:
     description: >-
@@ -191,6 +198,7 @@ classes:
       transient: "false"
       okg_alias_fields: name,accounting_name
       okg_searchable_text_fields: name,accounting_name,country,text
+      okg_title_from: name
 
   ForumThread:
     description: CMS HyperNews or discussion thread.
@@ -210,6 +218,7 @@ classes:
       transient: "false"
       okg_alias_fields: url
       okg_searchable_text_fields: title,body,text
+      okg_title_from: title
 
   MeetingMinutes:
     description: CERN Indico meeting/event notes for CMS operations.
@@ -232,6 +241,7 @@ classes:
       transient: "false"
       okg_alias_fields: url
       okg_searchable_text_fields: title,category,text
+      okg_title_from: title
 
   CMSSWRelease:
     description: CMS software framework release.
@@ -256,6 +266,7 @@ classes:
       transient: "false"
       okg_alias_fields: release
       okg_searchable_text_fields: release,release_type,architecture,text
+      okg_title_from: release
 
   GlobalTag:
     description: CMS detector conditions global tag.
@@ -273,6 +284,7 @@ classes:
       transient: "false"
       okg_alias_fields: tag_name
       okg_searchable_text_fields: tag_name,release,description,text
+      okg_title_from: tag_name
 
   Workflow:
     description: CMS production/reprocessing workflow.
@@ -296,6 +308,8 @@ classes:
       transient: "false"
       okg_alias_fields: workflow_name,prep_id
       okg_searchable_text_fields: workflow_name,campaign,prep_id,text
+      okg_title_from: workflow_name
+      okg_created_at_from: created_at
 
   DataCertification:
     description: CMS DQM run/lumi certification.
@@ -314,6 +328,7 @@ classes:
       transient: "false"
       okg_alias_fields: certification_id
       okg_searchable_text_fields: certification_id,run,dataset,status,text
+      okg_title_from: certification_id
 
   Downtime:
     description: GOCDB or WLCG downtime affecting a site or service.
@@ -334,6 +349,7 @@ classes:
       transient: "false"
       okg_alias_fields: downtime_id
       okg_searchable_text_fields: downtime_id,site,service,description,text
+      okg_title_from: description
 
   # TransferJob and MonitoringSnapshot: see archi/schemas/sources.yaml
   # (single definition, landed with the MONIT port).
@@ -355,6 +371,7 @@ classes:
       transient: "true"
       okg_alias_fields: test_id
       okg_searchable_text_fields: test_id,site,service,metric,status,text
+      okg_title_from: test_id
 
   Run:
     description: CMS data-taking run.
@@ -372,3 +389,4 @@ classes:
       transient: "false"
       okg_alias_fields: run_number
       okg_searchable_text_fields: run_number,era,text
+      okg_title_from: run_number
