@@ -86,6 +86,11 @@ from archi.sources._cache_report import (
     unusable_cache_preflight,
     unusable_cache_run,
 )
+from archi.sources._run_modes import (
+    COMPLETED_SCOPE_RUN_MODES,
+    RELEASE_RUN_MODES,
+    input_content_checkpoint,
+)
 from archi.sources._sdk_adapter import ReaderAdapter
 
 _GT_VERSION_RE = re.compile(r"_v(\d+)$")
@@ -200,10 +205,29 @@ class CondDBGlobalTagSource:
                 cmssw_targets | conddb_only_release_targets,
             )
 
+        # In okg's reference-catalog modes (release_new, release_unchanged)
+        # this source deliberately claims NO complete scope, so okg never
+        # deletes records missing from the cache. A cache is a selection
+        # exported by hand or by a downloader; a narrower export would
+        # otherwise retract an unbounded share of the catalog, and okg has
+        # no guard on retraction size yet (mitdbg/okg#3307). okg never skips
+        # a read for this reader (it does not declare
+        # probe_short_circuit_safe), so every run re-reads the cache in
+        # full. The checkpoint only gives the source stored state, which is
+        # what lets okg accept an unchanged rerun as a no-op.
+        release_mode = mode in RELEASE_RUN_MODES
         return ConnectorRun(
             facts=_facts(),
             completed_scope=(
-                mode in {"scope_complete", "reconcile"} and not skipped
+                mode in COMPLETED_SCOPE_RUN_MODES and not release_mode and not skipped
+            ),
+            next_checkpoint=(
+                input_content_checkpoint(
+                    (self.records_path, self.cmssw_records_path),
+                    base=self.base,
+                )
+                if release_mode
+                else None
             ),
             run_mode=mode,
             health=cache_source_health(

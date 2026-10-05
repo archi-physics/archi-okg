@@ -1,6 +1,7 @@
 """req.w2.sources-catalogs — DBSDatasetSource emission, offline."""
 import json
 
+import pytest
 from okg.deployment import EdgeFact, NodeFact
 
 from archi.sources.dbs import DBSDatasetSource
@@ -90,3 +91,61 @@ def test_all_items_unparseable_is_endpoint_failed(tmp_path):
     assert list(run.facts) == []
     assert run.completed_scope is False
     assert run.health.status == "endpoint_failed"
+
+
+# --- reference-catalog-complete-scope regressions ---
+# okg runs a reference_catalog source in release_new (chosen automatically)
+# or, when a mode is set explicitly, release_unchanged. DBS deliberately
+# claims no complete scope there (no deletion by absence) and instead
+# returns a checkpoint that names its input content, so okg accepts an
+# unchanged rerun as a no-op. scope_complete and reconcile keep main's
+# reader-level behaviour; okg does not currently run a reference_catalog
+# source in either mode (it refuses them at run start).
+
+_CURSOR_KEY = "input_content_sha256"
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_release_modes_claim_no_scope_and_return_a_checkpoint(tmp_path, mode):
+    run = _source(tmp_path, RECORDS).run("run-1", mode=mode)
+    assert run.completed_scope is False
+    assert run.run_mode == mode
+    assert run.health.status == "ok"
+    assert run.next_checkpoint is not None
+    cursor = run.next_checkpoint.as_cursor()
+    assert set(cursor) == {_CURSOR_KEY}
+    assert len(cursor[_CURSOR_KEY]) == 64
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_release_checkpoint_follows_the_cache_content(tmp_path, mode):
+    source = _source(tmp_path, RECORDS)
+    cache = tmp_path / "data" / "dbs-datasets" / "records.json"
+    first = source.run("run-1", mode=mode).next_checkpoint.as_cursor()
+    again = source.run("run-2", mode=mode).next_checkpoint.as_cursor()
+    assert again == first
+    cache.write_text(json.dumps(RECORDS[:1]))
+    changed = source.run("run-3", mode=mode).next_checkpoint.as_cursor()
+    assert changed != first
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_keep_the_guards(tmp_path, mode):
+    skipped = _source(tmp_path / "skipped", RECORDS + ["junk"])
+    assert skipped.run("run-1", mode=mode).completed_scope is False
+    empty = _source(tmp_path / "empty", []).run("run-2", mode=mode)
+    assert empty.completed_scope is False
+    assert empty.health.status == "cache_missing"
+
+
+@pytest.mark.parametrize("mode", ["scope_complete", "reconcile"])
+def test_whole_scope_modes_still_claim_without_a_checkpoint(tmp_path, mode):
+    run = _source(tmp_path, RECORDS).run("run-1", mode=mode)
+    assert run.completed_scope is True
+    assert run.next_checkpoint is None
+
+
+def test_cursor_mode_still_claims_no_scope(tmp_path):
+    run = _source(tmp_path, RECORDS).run("run-1", mode="cursor")
+    assert run.completed_scope is False
+    assert run.next_checkpoint is None

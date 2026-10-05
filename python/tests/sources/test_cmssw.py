@@ -560,3 +560,49 @@ def test_unpinned_live_map_still_fetches(tmp_path, monkeypatch):
     source = CMSSWReleaseSource(map_cache_path=str(tmp_path / "live.map"), fetch=True)
     assert source.run("live", mode="scope_complete").completed_scope is True
     assert calls == [source.releases_map_url]
+
+
+# --- reference-catalog-complete-scope regressions ---
+# okg runs a reference_catalog source in release_new (its whole-scope mode,
+# chosen automatically); release_unchanged comes only from an explicit mode
+# setting. Both complete the scope. A reader that only knew
+# scope_complete/reconcile never claimed it, so okg admission refused
+# every later zero-output run as partial and blocked publishing.
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_claim_a_complete_scope(tmp_path, mode):
+    root = tmp_path / "data" / "cmssw-releases"
+    root.mkdir(parents=True)
+    (root / "records.json").write_text(json.dumps(RECORDS))
+    run = CMSSWReleaseSource(base=str(tmp_path)).run("run-1", mode=mode)
+    assert run.completed_scope is True
+    assert run.run_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["release_new", "release_unchanged"])
+def test_reference_catalog_modes_keep_the_guards(tmp_path, mode):
+    root = tmp_path / "data" / "cmssw-releases"
+    root.mkdir(parents=True)
+    (root / "records.json").write_text(json.dumps(RECORDS + ["junk"]))
+    skipped = CMSSWReleaseSource(base=str(tmp_path)).run("run-1", mode=mode)
+    assert skipped.completed_scope is False
+    (root / "records.json").write_text(json.dumps([]))
+    empty = CMSSWReleaseSource(base=str(tmp_path)).run("run-2", mode=mode)
+    assert empty.completed_scope is False
+    (root / "releases.map").write_text(CLEAN_RELEASES_MAP)
+    truncated = CMSSWReleaseSource(
+        map_cache_path="data/cmssw-releases/releases.map",
+        fetch=False,
+        limit=1,
+        base=str(tmp_path),
+    ).run("run-3", mode=mode)
+    assert truncated.completed_scope is False
+
+
+def test_cursor_mode_still_claims_no_scope(tmp_path):
+    root = tmp_path / "data" / "cmssw-releases"
+    root.mkdir(parents=True)
+    (root / "records.json").write_text(json.dumps(RECORDS))
+    run = CMSSWReleaseSource(base=str(tmp_path)).run("run-1", mode="cursor")
+    assert run.completed_scope is False

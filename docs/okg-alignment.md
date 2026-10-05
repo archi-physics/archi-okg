@@ -20,6 +20,59 @@ reimplementation of OKG services.
 
 ## Current state (update this section when it changes)
 
+**Reference catalogs are no longer refused under okg's release modes
+(2026-10-05).** Since okg `d84f8fd275` (in the pinned `ac078aabd`), okg runs a
+`reference_catalog` source in run mode `release_new`, which it picks
+automatically; `release_unchanged` comes only from an explicit mode setting.
+Both complete the scope in okg's table. CMSSW releases, CondDB global tags, DBS
+datasets and GitHub repositories only recognised `scope_complete` and
+`reconcile`, so they never claimed a complete scope and returned no cursor;
+okg admission then refused every later run that emitted nothing new as
+`partial`, which blocked publishing. A downstream CMS instance turned its CMSSW
+releases source off on 2026-10-01 for this reason. Now:
+
+- **CMSSW releases and GitHub repositories** claim a complete scope in both
+  release modes. Deletion by absence is live for them: each declares
+  `deletion_semantics: missing_from_completed_scope`, so a valid run retracts
+  records no longer in its input. Before, it could not happen: until
+  `d84f8fd275` such a retraction failed the run, and since then the readers
+  never claimed a complete scope. GitHub repositories withholds the claim when
+  no configured slug is valid, and refuses an explicit empty `repos: []` at
+  construction (a missing `repos` keeps the defaults). In `release_unchanged`
+  a catalog that shrank fails the run loudly, because okg refuses retractions
+  in that mode.
+- **DBS datasets and CondDB global tags** deliberately claim no complete scope
+  in the release modes, so they never delete by absence: a narrower cache
+  export would retract an unbounded share of the catalog, and okg has no guard
+  on retraction size yet (mitdbg/okg#3307). They return a cursor
+  (`input_content_sha256`, the SHA-256 of the input caches; for CondDB also the
+  CMSSW cache it reads). The cursor only gives the source stored state, which
+  lets okg accept an unchanged rerun as a no-op; okg still re-reads the cache
+  on every run. Costs: only a completed scope advances okg's last reconcile
+  time, so these two read as stale in freshness checks; and okg refuses
+  `scope_complete` and `reconcile` for a `reference_catalog` source at run
+  start, so under current okg no run removes datasets or tags that leave the
+  export. They stay until okg#3307 lands and these sources switch to deleting.
+  Known limit under an okg without mitdbg/okg#3317: a deployment where DBS or
+  CondDB already published facts without a cursor (the state the old bug
+  leaves) is still refused `partial` on its first run after this fix, because
+  every fact dedupes and no cursor is stored yet. okg#3317 fixes this in okg:
+  it counts a prior accepted and published admission of the source as
+  history, so that first unchanged rerun is accepted as `incomplete_scope_noop`,
+  with no deletion and no blocked publish. It applies once the instance's okg
+  includes #3317. A fresh deployment, or one where the source never published,
+  is unaffected either way.
+
+The scope-completing modes live in one archi module, `archi.sources._run_modes`,
+which a test holds equal to okg's `COMPLETED_SCOPE_RUN_MODES` and to the
+`reference_catalog` profile's accepted modes. Connectors may not import
+`okg.substrate` (`okg lint deployments`, DEPLOYMENT-001), so the set is copied,
+not imported. Once the okg pin moves past okg's change that exports the set
+from `okg.deployment` (mitdbg/okg#3317, branch
+`claude/connector-complete-scope-modes`, not merged yet), the readers should import it from there. The cursor uses the
+public `okg.deployment.Checkpoint`, added to the import block below. The okg
+pin does not change.
+
 **Cache downloaders and a snapshot builder moved in (2026-09-28, comp-ops A4).**
 The JIRA, static-docs and SSO-login downloaders and the download manifest moved
 from okg-deployments `cms/scripts` into `archi.downloaders`; they import nothing
@@ -71,8 +124,8 @@ path and SHA256 binding that never fetches in frozen mode. It preserves the live
 profile. The historical CMSSW cache is still unavailable; unit fixtures are not
 real-deployment baseline evidence. See [frozen CMSSW inputs](frozen-cmssw-input.md).
 
-*Last updated 2026-09-27, tested against okg `dev` @ `ac078aabd`; archi branch
-`main` @ `7b5b9112`.*
+*Last updated 2026-10-05, tested against okg `dev` @ `ac078aabd`; archi branch
+`main` @ `46d3daef`.*
 
 **Pin bumped `34efbad1b` → `5b2fd076c` (2026-09-15), OKG#1906.** The fork was
 synced to okg `dev` first; it had no commits of its own. Full archi suite
@@ -335,7 +388,7 @@ below it is still private substrate, and all of it is enricher-side.
 ```
 okg.deployment:
     NodeFact, EdgeFact, ProgressMarker,
-    ConnectorRun, ConnectorHealth, PreflightResult,
+    ConnectorRun, ConnectorHealth, PreflightResult, Checkpoint,
     ConnectorAdapter,
     ContentHashProbe, MutableApiProbe,
     file_preflight, credential_preflight, http_preflight, redact

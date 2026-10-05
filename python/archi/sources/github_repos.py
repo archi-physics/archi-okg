@@ -69,6 +69,7 @@ from okg.deployment import (
 )
 from okg.deployment import ContentHashProbe
 
+from archi.sources._run_modes import COMPLETED_SCOPE_RUN_MODES
 from archi.sources._sdk_adapter import ReaderAdapter
 
 DEFAULT_REPOS = (
@@ -124,7 +125,14 @@ class GitHubRepoSource:
     change_probe_kind = "content_hash"
 
     def __init__(self, *, repos: list[str] | None = None) -> None:
-        self.repos = tuple(repos or DEFAULT_REPOS)
+        if repos is not None and not list(repos):
+            # A missing ``repos`` keeps the defaults; an explicit empty
+            # list is a configuration error, not a request for them.
+            raise ValueError(
+                "github_repos: repos is an empty list; name at least one "
+                "owner/name slug, or omit repos to use the defaults"
+            )
+        self.repos = tuple(repos if repos is not None else DEFAULT_REPOS)
         self.change_probe = ContentHashProbe(
             content_items=lambda: [
                 ("repos", "\n".join(sorted(self.repos)).encode("utf-8")),
@@ -171,7 +179,9 @@ class GitHubRepoSource:
 
         return ConnectorRun(
             facts=_facts(),
-            completed_scope=(mode in {"scope_complete", "reconcile"}),
+            completed_scope=(
+                mode in COMPLETED_SCOPE_RUN_MODES and bool(records)
+            ),
             run_mode=mode,
             health=ConnectorHealth(
                 status="ok",
