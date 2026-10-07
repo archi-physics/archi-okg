@@ -114,6 +114,7 @@ upstream or normalized names: `RequestName` / `request_name` /
 | `jira` | `data/jira/records.json` (+ `meta.json`) | `python -m archi.downloaders.jira`. Needs the `jira` Python package installed in the operator venv — absent, the token alone does not help. The parsed record count is cross-checked against `meta.json`'s `record_count`; a mismatch withholds the scope claim. |
 | `docsite`, `gitlab_docs` | `data/docsite/records.json`, `data/gitlab-docs/records.json` | `python -m archi.downloaders.static_docs` (targets in the packaged `source-download-manifest.yaml`) |
 | `cmssw_releases` | `data/cmssw-releases/releases.map` | the connector itself, from the public cms-bot map — no auth, no downloader |
+| `cmssst_site_status` | `data/cmssst-site-status/records.json`: a JSON **list**, one object per CMS site, keys `site`, `time` (snapshot epoch), `alert`, `msg`, `ggus` (`[ticket id, opened epoch]` pairs) and `metrics` (metric name → time range → list of status-letter strings; the reader reads each metric's `today`). | `python -m archi.downloaders.cmssst`, from the public CMS SST site status data (`siteStatus/data/summary.js` and `<SITE>.json`) — no auth. All or nothing: one failed site fetch writes no cache. |
 | `cmsweb_docs`, `hypernews` | crawled live through an SSO cookie jar | `python -m archi.downloaders.sso_login`, which is **interactive and needs a TOTP code** — inherently an operator step |
 | `twiki_eos` | an EOS snapshot path | whatever populates that EOS area |
 | `monit_*` | none — queried live | a MONIT/Grafana token |

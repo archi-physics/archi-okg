@@ -213,6 +213,18 @@ def _require_record_count(item: Any) -> Optional[str]:
     return "record_count is missing or not an integer"
 
 
+_CMS_SITE = re.compile(r"T[0-9]_[A-Z]{2}_\w+")
+
+
+def _cmssst_identity(item: Any) -> Optional[str]:
+    """The CMS SST reader skips a record without a CMS site name."""
+    if not isinstance(item, dict):
+        return "record is not a JSON object"
+    if not _CMS_SITE.fullmatch(str(item.get("site") or "")):
+        return "site is missing or not a CMS site name"
+    return None
+
+
 def _gocdb_identity(item: Any) -> Optional[str]:
     if not isinstance(item, dict):
         return "record is not a JSON object"
@@ -322,6 +334,14 @@ def _wmstats(root: Path) -> Any:
 
     return WMStatsWorkflowSource(
         records_path="data/wmstats-workflows/records.json", base=str(root)
+    )
+
+
+def _cmssst(root: Path) -> Any:
+    from archi.sources.cmssst import CMSSSTSiteStatusSource
+
+    return CMSSSTSiteStatusSource(
+        records_path="data/cmssst-site-status/records.json", base=str(root)
     )
 
 
@@ -663,6 +683,22 @@ GROUPS: dict[str, GroupSpec] = {
                     b'{"endpoint": "https://snapshot-stub.invalid"}}\n'
                 ),
             },
+        ),
+        GroupSpec(
+            "cmssst-site-status",
+            "data/cmssst-site-status",
+            _cmssst,
+            json_files=(
+                JsonFile(
+                    "records.json",
+                    "list",
+                    # metrics kept whole: the reader reads each metric's
+                    # "today" range, and the page's other ranges are small.
+                    _keys("site", "time", "alert", "msg", "ggus", "metrics"),
+                    _cmssst_identity,
+                    signature=_has_key("metrics"),
+                ),
+            ),
         ),
         GroupSpec(
             "gitlab-docs",

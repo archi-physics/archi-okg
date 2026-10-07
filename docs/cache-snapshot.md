@@ -68,6 +68,7 @@ Known groups and the files each one reads (from `archi/snapshot/groups.py`):
 | `conddb-global-tags` | `records.json` | `data/conddb-global-tags/` |
 | `wmstats` | `records.json` | `data/wmstats-workflows/` |
 | `dbs` | `records.json` | `data/dbs-datasets/` |
+| `cmssst-site-status` | `records.json` | `data/cmssst-site-status/` |
 
 For every group the build:
 
