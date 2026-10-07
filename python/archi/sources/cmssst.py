@@ -24,12 +24,23 @@ decoding here keeps the colour each case sets first.
 
 "Today" is 96 quarter-hour bins from 00:00 UTC of the snapshot day (the
 page's ``myTIS`` offset; its GGUS code takes the same UTC midnight). The
-bin holding the snapshot time is "now". For the status metrics the value
-reported is the latest bin at or before now that is not ``u`` (unknown),
-with that quarter hour's start time; a metric with none is "unknown". Downtime is
-read at the "now" bin only, so a downtime that ended earlier today, or one
-scheduled for later today, is not reported as current. A manual override
-with no value today is "no manual override set".
+bin holding the snapshot time is "now". For the evaluated metrics the
+value reported is the latest bin at or before now that is not ``u``
+(unknown); a metric with none is "unknown". Downtime and the manual
+overrides (``man*Status``) are read at the "now" bin only: for them ``u``
+means "none in effect", so a downtime or override that ended earlier
+today, or one scheduled for later today, is not reported as current.
+
+Stable text. The page text carries no clock: the snapshot time lives only
+in the ``observed_at`` attribute, and statuses do not name the quarter
+hour they came from. Chunk ids hash chunk text, so a 15-minute refresh
+whose statuses did not change yields identical text and chunk ids, and
+nothing is retracted or re-embedded.
+
+Known limits. The words are the page legend's generic ones ("ok (site
+state or evaluation good)" for Life Status as for SAM); the page does not
+say, for example, that a Life Status of ok means the site is enabled, so
+the text does not either.
 
 Facts. Existing subtypes only, no schema change: one ``documentation_page``
 per site (``url`` = the detail page URL, ``title`` = ``"<SITE> site
@@ -431,26 +442,24 @@ def current_status(record: SiteStatusRecord, metric: str) -> str:
         return "not reported on the page"
     midnight = record.time - record.time % 86400
     now = min(_BINS_PER_DAY - 1, (record.time - midnight) // _BIN_SECONDS)
-    if metric == "Downtime":
+    if metric == "Downtime" or metric.startswith("man"):
+        # u here means "none in effect", not "not yet evaluated".
         letter = letters[now] if now < len(letters) else "u"
-        if letter == "u":
-            return f"no downtime recorded for {_clock(midnight, now)} UTC"
-        return f"{decode_letter(letter)} ({_clock(midnight, now)} UTC)"
+        if letter != "u":
+            return f"{decode_letter(letter)}, at the snapshot time"
+        if metric == "Downtime":
+            return "no downtime at the snapshot time"
+        return "no manual override set at the snapshot time"
     for index in range(min(now, len(letters) - 1), -1, -1):
         if letters[index] != "u":
-            return (
-                f"{decode_letter(letters[index])}, for the "
-                f"{_clock(midnight, index)} UTC quarter hour"
-            )
-    if metric.startswith("man"):
-        return "no manual override set today"
+            return f"{decode_letter(letters[index])}, latest evaluation"
     return "unknown (no evaluation yet today)"
 
 
 def page_body(record: SiteStatusRecord) -> str:
     lines = [
-        f"{record.site} site status from the CMS Site Support Team (CMS SST) "
-        f"site status page, information as of {_timestamp(record.time)}.",
+        f"{record.site} current site status from the CMS Site Support Team "
+        "(CMS SST) site status page.",
     ]
     for metric, label in STATUS_METRICS:
         lines.append(f"{label}: {current_status(record, metric)}.")
@@ -546,15 +555,6 @@ def _verdict(
         skipped_count=skipped_count,
     )
     return status, reason, not skipped_count
-
-
-def _clock(midnight: int, index: int) -> str:
-    moment = datetime.fromtimestamp(midnight + index * _BIN_SECONDS, timezone.utc)
-    return moment.strftime("%H:%M")
-
-
-def _timestamp(epoch: int) -> str:
-    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _date(epoch: int) -> str:

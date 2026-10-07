@@ -64,6 +64,26 @@ def test_a_bad_summary_is_refused(script, message):
         parse_site_list(script)
 
 
+def test_parse_is_bounded_to_the_array_and_skips_comments():
+    # Review finding 3: commented-out entries and a later array in the
+    # same file are not sites.
+    script = (
+        "var siteStatusData = [\n"
+        '   { site: "T2_US_MIT", today: "o" },\n'
+        '   // { site: "T2_XX_LineComment", today: "o" },\n'
+        '   /* { site: "T2_XX_BlockComment",\n      today: "o" }, */\n'
+        '   { site: "T1_US_FNAL", msg: "see // not a comment", today: "o" }\n'
+        "];\n"
+        'var otherData = [ { site: "T2_XX_Trailing" } ];\n'
+    )
+    assert parse_site_list(script) == ["T2_US_MIT", "T1_US_FNAL"]
+
+
+def test_an_unclosed_array_is_refused():
+    with pytest.raises(DownloadError, match="never closed"):
+        parse_site_list('var siteStatusData = [ { site: "T2_US_MIT" },')
+
+
 def test_collect_keeps_site_fields_and_drops_elements(tmp_path):
     summary = 'var siteStatusData = [\n' + ",\n".join(
         f'   {{ site: "{s}", ggus: [0, 0, 0], today: "oo" }}' for s in SITES

@@ -98,22 +98,64 @@ def test_current_status_is_the_latest_known_bin_at_or_before_the_snapshot():
     letters = "o" * 50 + "e" * 5 + "u" * 4 + "W" * 37
     record = _record({"LifeStatus": letters})
     assert current_status(record, "LifeStatus") == (
-        "error (site or evaluation failed), for the 13:30 UTC quarter hour"
+        "error (site or evaluation failed), latest evaluation"
     )
 
 
 def test_downtime_is_read_at_the_snapshot_bin_only():
     earlier = _record({"Downtime": "d" * 40 + "u" * 56})
-    assert current_status(earlier, "Downtime") == "no downtime recorded for 14:30 UTC"
+    assert current_status(earlier, "Downtime") == "no downtime at the snapshot time"
     now = _record({"Downtime": "u" * 58 + "a" * 38})
     assert current_status(now, "Downtime") == (
-        "site or service in unscheduled downtime (14:30 UTC)"
+        "site or service in unscheduled downtime, at the snapshot time"
     )
+
+
+def test_an_override_that_ended_earlier_today_is_not_reported():
+    # Review finding 1: 20 bins of an error override, then none (u) from
+    # 05:00; at 14:39 no override is in effect.
+    record = _record({"manProdStatus": "e" * 20 + "u" * 76})
+    assert current_status(record, "manProdStatus") == (
+        "no manual override set at the snapshot time"
+    )
+    active = _record({"manProdStatus": "u" * 50 + "W" * 46})
+    assert current_status(active, "manProdStatus") == (
+        "site not in service (Waiting Room), at the snapshot time"
+    )
+
+
+def test_a_refresh_with_unchanged_statuses_keeps_text_and_chunk_ids(tmp_path):
+    # Review finding 2: a 15-minute refresh (later time, evaluations one
+    # bin further on) with the same statuses must not churn the chunks.
+    first = [_sample(s) for s in SITES]
+    later = [_sample(s) for s in SITES]
+    for item in later:
+        item["time"] += 900
+        for bins in item["metrics"].values():
+            joined = "".join(bins["today"])
+            last = max((i for i, c in enumerate(joined) if c != "u"), default=None)
+            if last is not None and last < 95:
+                joined = joined[: last + 1] + joined[last] + joined[last + 2 :]
+            bins["today"] = [joined]
+    _, a = _facts(_source(tmp_path / "a", first))
+    _, b = _facts(_source(tmp_path / "b", later))
+
+    def stable(facts):
+        return sorted(
+            (f.node_id, f.attrs["text"])
+            for f in facts
+            if isinstance(f, NodeFact)
+        )
+
+    assert stable(a) == stable(b)
+    pa = _pages(a)["documentation_page:cmssst:T1_US_FNAL"]
+    pb = _pages(b)["documentation_page:cmssst:T1_US_FNAL"]
+    assert pa.attrs["observed_at"] != pb.attrs["observed_at"]
 
 
 def test_unknown_overrides_and_missing_metrics_say_so():
     record = _record({"manLifeStatus": "u" * 96, "ProdStatus": "u" * 96})
-    assert current_status(record, "manLifeStatus") == "no manual override set today"
+    assert current_status(record, "manLifeStatus") == "no manual override set at the snapshot time"
     assert current_status(record, "ProdStatus") == "unknown (no evaluation yet today)"
     assert current_status(record, "CrabStatus") == "not reported on the page"
 
@@ -140,14 +182,14 @@ def test_one_citable_page_per_site_with_url_and_title(tmp_path):
 def test_fnal_page_text_states_the_current_status_in_words(tmp_path):
     _, facts = _facts(_source(tmp_path))
     body = _pages(facts)["documentation_page:cmssst:T1_US_FNAL"].attrs["body"]
-    assert "information as of 2026-10-07 14:39 UTC" in body
-    assert "Life Status: ok (site state or evaluation good), for the 14:30 UTC" in body
+    assert "14:39" not in body and "14:30" not in body
+    assert "Life Status: ok (site state or evaluation good), latest evaluation." in body
     assert (
-        "Production (Prod) Status: ok (site state or evaluation good), for the 14:30 UTC"
+        "Production (Prod) Status: ok (site state or evaluation good), latest evaluation."
         in body
     )
-    assert "CRAB analysis (Crab) Status manual override: no manual override set today." in body
-    assert "Downtime: no downtime recorded for 14:30 UTC." in body
+    assert "CRAB analysis (Crab) Status manual override: no manual override set at the snapshot time." in body
+    assert "Downtime: no downtime at the snapshot time." in body
     assert "GGUS tickets listed for T1_US_FNAL: 1003499 (opened 2026-08-04" in body
     assert "1003889 (opened 2026-09-15" in body
 
@@ -169,7 +211,7 @@ def test_page_is_chunked_and_chunks_carry_the_status_text(tmp_path):
     assert len(chunks) == len(contains) >= 3
     srcs = {e.src for e in contains}
     assert srcs == set(_pages(facts))
-    assert any("T2_CH_CERN site status" in c.attrs["text"] for c in chunks)
+    assert any("T2_CH_CERN current site status" in c.attrs["text"] for c in chunks)
     # No site edge without a sites cache.
     assert not [f for f in facts if isinstance(f, EdgeFact) and f.edge_type == "references"]
 

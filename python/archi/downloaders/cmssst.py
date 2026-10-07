@@ -24,6 +24,14 @@ All or nothing: the reader claims a complete scope over the cache, and under
 graph. So a summary.js without a site list, a site name that is not a CMS
 site name, a failed or error-shaped site fetch, or an empty result stops the
 run with an error and leaves any existing cache untouched.
+
+Known limit: because of that rule, one site whose JSON is briefly
+unavailable fails the whole refresh; the previous cache stays in place
+until a later run succeeds.
+
+summary.js is parsed only inside the ``siteStatusData`` array literal, with
+``//`` and ``/* */`` comments removed, so a commented-out entry or a later
+array in the same file is not read as a site.
 """
 from __future__ import annotations
 
@@ -75,7 +83,7 @@ def parse_site_list(script: str) -> list[str]:
             "summary.js has no 'var siteStatusData = [' array; "
             "an error page or a changed format"
         )
-    names = _SITE_ENTRY.findall(script, start.end())
+    names = _SITE_ENTRY.findall(_array_body(script, start.end()))
     if not names:
         raise DownloadError("summary.js siteStatusData holds no site entry")
     bad = [name for name in names if not SITE_NAME.match(name)]
@@ -85,6 +93,48 @@ def parse_site_list(script: str) -> list[str]:
             f"names, first {bad[0]!r}"
         )
     return list(dict.fromkeys(names))
+
+
+def _array_body(script: str, begin: int) -> str:
+    """The array literal's text from ``begin`` (just after its ``[``) to
+    its matching ``]``, comments removed and string literals kept whole.
+
+    Raises :class:`DownloadError` when the array is never closed (a
+    truncated file).
+    """
+    out: list[str] = []
+    depth = 1
+    index = begin
+    length = len(script)
+    while index < length:
+        char = script[index]
+        if char in "\"'":
+            end = index + 1
+            while end < length and script[end] != char:
+                end += 2 if script[end] == "\\" else 1
+            out.append(script[index:end + 1])
+            index = end + 1
+            continue
+        if script.startswith("//", index):
+            newline = script.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+        if script.startswith("/*", index):
+            close = script.find("*/", index + 2)
+            if close < 0:
+                break
+            out.append(" ")
+            index = close + 2
+            continue
+        if char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 0:
+                return "".join(out)
+        out.append(char)
+        index += 1
+    raise DownloadError("summary.js siteStatusData array is never closed")
 
 
 def site_record(payload: Any, site: str) -> dict[str, Any]:
