@@ -49,6 +49,7 @@ PLANTED = {
     "conddb-global-tags": "alca.contact@cern.ch",
     "wmstats": "pdmv.operator@cern.ch",
     "dbs": "dbs.contact@cern.ch",
+    "cmssst-site-status": "site.support@cern.ch",
 }
 DN = "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=jdoe/CN=123456/CN=Jane Doe"
 
@@ -321,6 +322,24 @@ def write_sources(root: Path) -> dict[str, Path]:
         ],
     )
     _write_json(
+        dirs["cmssst-site-status"] / "records.json",
+        [
+            {
+                "site": "T2_US_MIT",
+                "time": 1791383941,
+                "alert": "",
+                "msg": f"Questions to {PLANTED['cmssst-site-status']}",
+                "ggus": [[1003759, 1788530148]],
+                "metrics": {
+                    "LifeStatus": {"today": ["o" * 48, "o" * 48], "pmonth": ["o" * 60]},
+                    "SiteReadiness": {"today": ["w" * 48, "u" * 48]},
+                },
+                "url": "http://cmssst.web.cern.ch/siteStatus/",
+                "elements": [{"host": "se.mit.edu", "metrics": {}}],
+            }
+        ],
+    )
+    _write_json(
         dirs["dbs"] / "records.json",
         [
             {
@@ -351,6 +370,7 @@ COLLECTED = {
     "docsite": "2026-08-31",
     "wmstats": "2026-08-31",
     "dbs": "2026-08-31",
+    "cmssst-site-status": "2026-10-07",
 }
 
 
@@ -459,6 +479,13 @@ def test_fields_the_readers_never_read_are_dropped(built):
     assert json.loads(cric["data/cric/responsibilities.json"]) == {
         "result": [["adalove", "MIT Bates", "Site Executive"], ["ghopper", None, "Site Admin"]]
     }
+    cmssst = json.loads(
+        read_archive(out / "cmssst-site-status.tar.zst")[
+            "data/cmssst-site-status/records.json"
+        ]
+    )
+    assert set(cmssst[0]) == {"site", "time", "alert", "msg", "ggus", "metrics"}
+    assert cmssst[0]["metrics"]["LifeStatus"]["pmonth"] == ["o" * 60]
 
 
 def test_wmstats_requestor_dn_never_appears_and_requestor_is_kept(built, sources):
@@ -564,6 +591,11 @@ MALFORMED = {
     "conddb-global-tags": ("records.json", lambda p: p + [{"release": "x"}], "no name / tag_name"),
     "wmstats": ("records.json", lambda p: p + [{"Campaign": "x"}], "RequestName"),
     "dbs": ("records.json", lambda p: p + [{"nevents": 1}], "dataset_name / dataset"),
+    "cmssst-site-status": (
+        "records.json",
+        lambda p: p + [{"site": "not-a-site", "metrics": {}}],
+        "site is missing or not a CMS site name",
+    ),
     "cric": ("sites.json", lambda p: {**p, "T2_XX_Bad": "not an object"}, "entry 'T2_XX_Bad'"),
     "cric-core": ("services.json", lambda p: {**p, "bad": []}, "entry 'bad'"),
 }
