@@ -48,7 +48,8 @@ requirements:
     under ARCHI_DATA_ROOT: a JSON list, one object per site, holding the site-level fields
     the reader reads (site, time, alert, msg, ggus, metrics) and not the per-host `elements`
     list. It uses no credentials and a bounded per-request timeout. It fails loudly and writes
-    nothing when summary.js has no site list or an invalid site name, when any site fetch
+    nothing when summary.js has no site list (parsed only inside the siteStatusData array,
+    comments ignored) or an invalid site name, when any site fetch
     fails or returns an error-shaped body, or when the result would be empty: the reader claims
     a complete scope, so a partial cache would retract the missing sites.'
 - id: req.cmssst-site-status.reader
@@ -57,8 +58,10 @@ requirements:
     and whose title is "<SITE> site status", plus document_chunk nodes joined by `contains`
     edges. The page text states, in plain words from the page's own legend, the status at
     the snapshot time of Life, Prod, CRAB and Rucio status and their manual overrides, Site
-    Readiness, SAM, FTS, HammerCloud, Downtime and Summary; the open GGUS ticket ids; and
-    the snapshot time. Record identity is the site name, the revision is the cache content
+    Readiness, SAM, FTS, HammerCloud, Downtime and Summary (Downtime and the manual overrides
+    read at the snapshot quarter hour only, where unknown means none in effect), and the listed
+    GGUS ticket ids. The snapshot time is the observed_at attribute, never page text, so a
+    refresh whose statuses did not change yields identical text and chunk ids. Record identity is the site name, the revision is the cache content
     hash, and deletion is missing_from_completed_scope. A missing, empty, truncated or error-shaped
     cache gives no facts and no complete scope (cache_missing / endpoint_failed) in preflight
     and run alike; a malformed record is skipped and stops the scope claim. With an optional
