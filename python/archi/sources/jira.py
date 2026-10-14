@@ -83,7 +83,9 @@ Changes from the cms original:
 - 2026-10 (jira-comment-records): with ``comment_records=True`` each
   comment is also a ``jira_comment`` record (``jira_issue has_comment
   jira_comment``, ``jira_comment authored_by person``) named by a hash
-  of its content, and the issue carries ``comment_count``. The issue
+  of its content (its time taken as a UTC instant), and the issue
+  carries ``comment_count``. Comments are not in the full-text index;
+  the chunks stay the search unit for comment text. The issue
   node always carries the fields that were chunk-only before
   (environment, fix_versions, parent_key, issue_links, subtasks). The
   chunks are byte-identical either way.
@@ -196,7 +198,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator, Sequence
 
 from okg.deployment import (
@@ -413,7 +415,17 @@ class JiraIssueSource:
                 **({"comment_records": True}
                    if self.comment_records else {}),
             },
-            emit_targets=JiraIssueSource,
+            # The comment id code lives in module functions; naming them
+            # makes a change to the id scheme change the probe token, so
+            # a cursor run over an unchanged cache still re-emits.
+            emit_targets=(
+                JiraIssueSource,
+                _comment_parts,
+                _comment_line,
+                _created_utc,
+                comment_ids,
+                _comment_facts,
+            ),
             base=base,
         )
 
@@ -1095,7 +1107,7 @@ def _strings_from_value(value: Any) -> list[str]:
 def _comment_parts(value: Any) -> list[tuple[str, str, str]]:
     """``(author, created, body)`` for each comment, in source order.
 
-    One parse feeds both the chunk text (:func:`_comment_texts`) and the
+    One parse feeds both the chunk text (:func:`_comment_line`) and the
     ``jira_comment`` records, so the two always hold the same comments
     with the same cleaning: every string through :func:`_pg_text`, the
     body stripped, a comment with an empty body dropped. A comment the
@@ -1131,9 +1143,50 @@ def _comment_line(author: str, created: str, body: str) -> str:
     return f"{prefix}: {body}" if prefix else body
 
 
-def _comment_texts(value: Any) -> list[str]:
-    """The chunk-text line of each comment in *value*, in source order."""
-    return [_comment_line(*comment) for comment in _comment_parts(value)]
+#: A JIRA time with a zone: ``2026-01-06T08:00:00.000+0200``, ``...Z``
+#: or ``...+02:00``; the seconds and fraction are optional.
+_JIRA_TIME_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})"
+    r"(?::(\d{2})(?:\.(\d{1,9}))?)?"
+    r"(Z|[+-]\d{2}:?\d{2})$"
+)
+
+#: ``id_basis`` of a comment whose id hashes its time as a UTC instant.
+ID_BASIS_CONTENT = "content"
+#: ``id_basis`` of a comment whose time did not parse (or was absent), so
+#: its id hashes the raw time string as the cache holds it.
+ID_BASIS_CONTENT_RAW_TIME = "content_raw_created"
+
+
+def _created_utc(created: str) -> str | None:
+    """*created* as a UTC instant in one fixed format, or None.
+
+    JIRA renders a comment's time in the zone of the account or server
+    that fetched it (``+0200`` and ``+0100`` both occur in one cache), so
+    the same comment fetched under another zone has another string. The
+    id hashes this form so a refetch in another zone keeps every id.
+    None for an empty time, a time without a zone, or one that does not
+    parse.
+    """
+    match = _JIRA_TIME_RE.match(created.strip())
+    if not match:
+        return None
+    year, month, day, hour, minute, second, fraction, zone = match.groups()
+    if zone == "Z":
+        offset = timedelta(0)
+    else:
+        sign = -1 if zone[0] == "-" else 1
+        digits = zone[1:].replace(":", "")
+        offset = sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    try:
+        moment = datetime(
+            int(year), int(month), int(day), int(hour), int(minute),
+            int(second or 0), int((fraction or "0").ljust(6, "0")[:6]),
+            tzinfo=timezone(offset),
+        )
+    except ValueError:
+        return None
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def comment_ids(comments: Sequence[tuple[str, str, str]]) -> list[str]:
@@ -1141,15 +1194,18 @@ def comment_ids(comments: Sequence[tuple[str, str, str]]) -> list[str]:
 
     The cache keeps no JIRA comment id, so a comment is named by its
     content: ``c-`` and the first 12 hex characters of
-    ``sha256(created|author|body)`` over the cleaned strings. An exact
-    repeat inside the same issue gets ``-1``, ``-2``, ... in source
-    order. Editing a body, renaming an author or deleting an earlier
-    repeat therefore re-keys that comment (one removal, one addition).
+    ``sha256(created|author|body)`` over the cleaned strings, with
+    ``created`` as its UTC instant (:func:`_created_utc`) or, when it does
+    not parse, as the raw string. An exact repeat inside the same issue
+    gets ``-1``, ``-2``, ... in source order. Editing a body, renaming an
+    author or deleting an earlier repeat therefore re-keys that comment
+    (one removal, one addition); a refetch in another time zone does not.
     """
     seen: dict[str, int] = {}
     out: list[str] = []
     for author, created, body in comments:
-        base = "c-" + _sha256(f"{created}|{author}|{body}")[:12]
+        when = _created_utc(created) or created
+        base = "c-" + _sha256(f"{when}|{author}|{body}")[:12]
         repeat = seen.get(base, 0)
         seen[base] = repeat + 1
         out.append(f"{base}-{repeat}" if repeat else base)
@@ -1162,9 +1218,17 @@ def _comment_facts(
     """One ``jira_comment`` record per comment, with its two edges.
 
     Node id ``jira:<KEY>#c-<hash>`` (see :func:`comment_ids`). Each
-    comment carries its issue's lineage -- ``source_record_id`` names the
-    issue key and the ticket's ``project`` is an attribute -- so an access
-    rule that hides the ticket, or its project, hides its comments too.
+    comment carries the issue key and the issue's ``project``, and comes
+    from the same source, so an access rule on the project or on the
+    source matches the comments. A rule on the issue's own record does
+    not: the comment's ``source_record_id`` (issue key plus comment id)
+    is a different record ref from the issue's. okg's
+    ``test_comment_lineage_filter.py`` is the gate before a deployment
+    turns ``comment_records`` on.
+
+    The comment has no ``text`` attribute, so okg's full-text index (on
+    ``text``) does not hold it: the issue's chunks stay the one search
+    unit for comment text, and ``body`` holds the comment for reads.
     An author's ``person`` node is yielded before its first
     ``authored_by`` edge; the caller drops repeats.
     """
@@ -1183,8 +1247,10 @@ def _comment_facts(
                 "author": author,
                 "created": created,
                 "body": body,
-                "text": body,
-                "id_basis": "content",
+                "id_basis": (
+                    ID_BASIS_CONTENT if _created_utc(created)
+                    else ID_BASIS_CONTENT_RAW_TIME
+                ),
             },
             source_record_id=record_id,
             source_revision=revision,

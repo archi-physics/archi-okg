@@ -17,6 +17,7 @@ import yaml
 
 from okg.deployment import EdgeFact, NodeFact
 
+import archi.sources.jira as jira_mod
 from archi.sources.jira import JiraIssueSource, comment_ids
 
 REPO = Path(__file__).resolve().parents[3]
@@ -121,8 +122,8 @@ def _person_id(name):
 def test_three_comments_two_identical_give_three_ids_and_edges(tmp_path):
     facts = _facts(_source(tmp_path, [ISSUE, QUIET], comment_records=True))
     comments = _nodes(facts, "jira_comment")
-    first = _hash_id("2026-01-06T08:00:00.000+0000", "Ada Lovelace", "Retrying now.")
-    same = _hash_id("2026-01-06T09:00:00.000+0000", "Linus Pauling", "Same here")
+    first = _hash_id("2026-01-06T08:00:00.000000Z", "Ada Lovelace", "Retrying now.")
+    same = _hash_id("2026-01-06T09:00:00.000000Z", "Linus Pauling", "Same here")
     assert [c.node_id for c in comments] == [
         f"jira:CMSPROD-7#{first}",
         f"jira:CMSPROD-7#{same}",
@@ -144,7 +145,10 @@ def test_three_comments_two_identical_give_three_ids_and_edges(tmp_path):
 def test_comment_attrs_and_parent_lineage(tmp_path):
     facts = _facts(_source(tmp_path, [ISSUE, QUIET], comment_records=True))
     first = _nodes(facts, "jira_comment")[0]
-    cid = _hash_id("2026-01-06T08:00:00.000+0000", "Ada Lovelace", "Retrying now.")
+    cid = _hash_id("2026-01-06T08:00:00.000000Z", "Ada Lovelace", "Retrying now.")
+    # The raw time stays the attribute; only the id uses the UTC form. No
+    # `text`: okg's full-text index reads `text`, and the chunks already
+    # hold the comment's words.
     assert first.attrs == {
         "issue_key": "CMSPROD-7",
         "project": "CMSPROD",
@@ -152,11 +156,13 @@ def test_comment_attrs_and_parent_lineage(tmp_path):
         "author": "Ada Lovelace",
         "created": "2026-01-06T08:00:00.000+0000",
         "body": "Retrying now.",
-        "text": "Retrying now.",
         "id_basis": "content",
     }
-    # The issue's own key leads the source record id, so a rule that hides
-    # the issue's record hides the comment too.
+    # The issue key leads the source record id and project is the issue's,
+    # so a rule on the project or the source matches the comment. The
+    # record ref differs from the issue's ({"issue_key"} alone), so a rule
+    # on the issue's own record does not; okg's
+    # test_comment_lineage_filter.py gates turning the option on.
     assert first.source_record_id == {"issue_key": "CMSPROD-7", "comment": cid}
     for fact in _edges(facts, "has_comment") + _edges(facts, "authored_by"):
         assert fact.source_record_id["issue_key"] == "CMSPROD-7"
@@ -175,6 +181,57 @@ def test_comment_hash_is_over_the_stripped_body():
         _hash_id("t", "A", "x") + "-1",
         _hash_id("t", "A", "x") + "-2",
     ]
+
+
+@pytest.mark.parametrize("created", [
+    "2026-01-06T10:00:00.000+0200",
+    "2026-01-06T08:00:00.000+0000",
+    "2026-01-06T08:00:00.000Z",
+    "2026-01-06T08:00:00Z",
+    "2026-01-06T09:00:00.000+01:00",
+    "2026-01-06T03:00:00.000-0500",
+])
+def test_same_instant_in_any_zone_gives_the_same_id(created):
+    # JIRA renders times in the fetching account's zone; a refetch in
+    # another zone must not re-key the comment.
+    assert comment_ids([("A", created, "body")]) == [
+        _hash_id("2026-01-06T08:00:00.000000Z", "A", "body")
+    ]
+    assert jira_mod._created_utc(created) == "2026-01-06T08:00:00.000000Z"
+
+
+@pytest.mark.parametrize("created", [
+    "", "yesterday", "2026-01-06T08:00:00.000", "2026-13-06T08:00:00.000+0000",
+    "2026-01-06T08:00:00.000+9999",
+])
+def test_unparseable_time_hashes_the_raw_string_and_says_so(tmp_path, created):
+    assert comment_ids([("A", created, "body")]) == [_hash_id(created, "A", "body")]
+    record = {"key": "CMSPROD-11", "project": "CMSPROD", "recent_comments": [
+        {"author": ADA, "created": created, "body": "body"},
+    ]}
+    facts = _facts(_source(tmp_path, [record], comment_records=True))
+    (comment,) = _nodes(facts, "jira_comment")
+    assert comment.attrs["id_basis"] == "content_raw_created"
+    assert comment.attrs["created"] == created
+
+
+def test_ids_are_stable_across_ingests_and_an_edit_rekeys_only_that_comment(tmp_path):
+    before = [c.node_id for c in _nodes(
+        _facts(_source(tmp_path / "a", [ISSUE, QUIET], comment_records=True)),
+        "jira_comment")]
+    again = [c.node_id for c in _nodes(
+        _facts(_source(tmp_path / "b", [ISSUE, QUIET], comment_records=True)),
+        "jira_comment")]
+    assert again == before
+    edited = json.loads(json.dumps(ISSUE))
+    edited["recent_comments"][0]["body"] = "Retrying now, second try."
+    # The same instant fetched in another zone is not an edit.
+    edited["recent_comments"][1]["created"] = "2026-01-06T11:00:00.000+0200"
+    after = [c.node_id for c in _nodes(
+        _facts(_source(tmp_path / "c", [edited, QUIET], comment_records=True)),
+        "jira_comment")]
+    assert after[0] != before[0]
+    assert after[1:] == before[1:]
 
 
 def test_chunks_are_byte_identical_with_and_without_comment_records(tmp_path):
@@ -306,6 +363,33 @@ def test_record_parts_names_declared_attributes():
     assert parts["child_subtype"] == "JiraComment"
     assert {parts["text_attr"], *parts["order_by"], *parts["label_attrs"]} <= comment
     assert {*parts["header_attrs"], parts["body_attr"], parts["count_attr"]} <= issue
+
+
+def test_comments_stay_out_of_the_full_text_index(tmp_path):
+    # okg's full-text index reads `text` and the declared searchable
+    # fields; the issue chunks are the one search unit for comment text.
+    comment = _classes(SCHEMAS)["JiraComment"]
+    assert "okg_searchable_text_fields" not in comment["annotations"]
+    assert "text" not in comment["attributes"]
+    for field in ("issue_key", "author", "project", "created"):
+        assert comment["attributes"][field]["annotations"]["filterable"] == "true"
+    facts = _facts(_source(tmp_path, [ISSUE], comment_records=True))
+    assert all("text" not in c.attrs for c in _nodes(facts, "jira_comment"))
+
+
+def test_probe_fingerprint_covers_the_comment_id_code(tmp_path, monkeypatch):
+    seen = {}
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(jira_mod, "cache_or_forced_live_change_probe", capture)
+    _source(tmp_path, [ISSUE])
+    targets = seen["emit_targets"]
+    for function in (jira_mod.comment_ids, jira_mod._created_utc,
+                     jira_mod._comment_facts, jira_mod._comment_parts):
+        assert function in targets
 
 
 def test_bundle_copies_match_the_package_schema():

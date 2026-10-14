@@ -77,7 +77,10 @@ jira:
     # (jira_issue has_comment jira_comment, jira_comment authored_by
     # person), named by a hash of its content, and comment_count on
     # each issue. The chunks do not change. Needs the jira_comment and
-    # comment lines above.
+    # comment lines above. Access rules on the project or the source
+    # match comments; a rule on one issue's record does not. Do not
+    # turn this on until the okg in use passes its
+    # test_comment_lineage_filter.py.
     # comment_records: true
   sync:
     triggers: [manual, reconcile]

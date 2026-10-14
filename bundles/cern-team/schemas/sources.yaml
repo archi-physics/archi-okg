@@ -118,10 +118,14 @@ classes:
       One comment on a JIRA issue (JiraIssueSource with comment_records
       on). The records cache keeps no JIRA comment id, so the id is
       jira:<KEY>#c-<first 12 hex of sha256(created|author|body)>, with
-      -1, -2, ... on an exact repeat inside the same issue (id_basis
-      content). The comment carries its issue's lineage: its source
-      record id names the issue key and project is the issue's project,
-      so an access rule that hides the issue hides its comments.
+      created as its UTC instant (id_basis content; the raw string when
+      it does not parse, id_basis content_raw_created), and -1, -2, ...
+      on an exact repeat inside the same issue. The comment carries the
+      issue key and the issue's project and comes from the same source,
+      so an access rule on the project or the source matches it; a rule
+      on the issue's own record does not. The comment has no text
+      attribute and is not in the full-text index: the issue's chunks
+      stay the search unit for comment text.
     class_uri: archi:JiraComment
     attributes:
       issue_key:
@@ -146,12 +150,13 @@ classes:
           value_type: ts
       body:
       id_basis:
-        description: How the id was made; content (a hash of created, author and body).
-      text:
+        description: >-
+          How the id was made. content is a hash of created (as a UTC
+          instant), author and body; content_raw_created uses the raw
+          created string because it did not parse.
     annotations:
       archetype: artifact
       transient: "false"
-      okg_searchable_text_fields: issue_key,author,text
       okg_created_at_from: created
 
   DocumentationPage:
