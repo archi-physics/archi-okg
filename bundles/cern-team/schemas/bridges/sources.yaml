@@ -42,6 +42,20 @@ classes:
           edge_archetype: contains
           src_subtypes: JiraIssue
           dst_subtypes: DocumentChunk
+      jira_issue_has_comment_jira_comment:
+        description: >-
+          An issue and one of its comments (JiraIssueSource with
+          comment_records on). attrs.position is the comment's 0-based
+          place in source order.
+        annotations:
+          edge_archetype: has_comment
+          src_subtypes: JiraIssue
+          dst_subtypes: JiraComment
+      jira_comment_authored_by_person:
+        annotations:
+          edge_archetype: authored_by
+          src_subtypes: JiraComment
+          dst_subtypes: Person
       chunk_references_jira_issue:
         annotations:
           edge_archetype: references

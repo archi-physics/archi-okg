@@ -5,7 +5,7 @@ attribute a class names in `okg_title_from`, `okg_created_at_from` and
 `okg_last_modified_at_from`. okg refuses a declaration that names an
 attribute the class does not have, so a misspelt name would stop compose.
 
-The YAML tests need no okg: they pin the exact 26 declarations and check each
+The YAML tests need no okg: they pin the exact 27 declarations and check each
 names an attribute of its class. The compose test reads them back through
 okg's own composer, on an okg that knows `okg_title_from`.
 """
@@ -32,6 +32,8 @@ EXPECTED = {
         "okg_created_at_from": "created",
         "okg_last_modified_at_from": "updated",
     },
+    # A comment has no title of its own; its id names its issue.
+    "JiraComment": {"okg_created_at_from": "created"},
     "Workflow": {"okg_title_from": "workflow_name", "okg_created_at_from": "created_at"},
     "CMSSWRelease": {"okg_title_from": "release"},
     "GlobalTag": {"okg_title_from": "tag_name"},
@@ -85,7 +87,7 @@ def _unknown_attributes(classes: dict) -> list:
 def test_declarations_are_exactly_the_reviewed_set():
     found = _declarations(_classes())
     assert found == EXPECTED
-    assert sum(len(v) for v in found.values()) == 26
+    assert sum(len(v) for v in found.values()) == 27
 
 
 def test_every_declaration_names_an_attribute_of_its_class():

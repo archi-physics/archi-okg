@@ -80,6 +80,15 @@ Changes from the cms original:
   issue. Items without an issue key are skipped per item but stop the
   run claiming a complete scope. ``preflight()`` and ``run()`` share
   one verdict, so preflight now also reports the meta mismatch.
+- 2026-10 (jira-comment-records): with ``comment_records=True`` each
+  comment is also a ``jira_comment`` record (``jira_issue has_comment
+  jira_comment``, ``jira_comment authored_by person``) named by a hash
+  of its content (its time taken as a UTC instant), and the issue
+  carries ``comment_count``. Comments are not in the full-text index;
+  the chunks stay the search unit for comment text. The issue
+  node always carries the fields that were chunk-only before
+  (environment, fix_versions, parent_key, issue_links, subtasks). The
+  chunks are byte-identical either way.
 
 Registry-entry template — INGEST-PROVEN 2026-08-11 on a scratch
 instance (okg dev@21c5b8c3e). Three things beyond the registry entry
@@ -118,6 +127,8 @@ are required or ingest fails after a green lint:
             - {subtype: jira_issue}
             - {subtype: person}
             - {subtype: document_chunk}
+            # Uncomment together with `comment_records: true`:
+            # - {subtype: jira_comment}
           edges:
             - {src_subtype: jira_issue, edge_type: assigned_to, dst_subtype: person}
             - {src_subtype: jira_issue, edge_type: reported_by, dst_subtype: person}
@@ -125,6 +136,9 @@ are required or ingest fails after a green lint:
             - {src_subtype: document_chunk, edge_type: references, dst_subtype: jira_issue}
             # Uncomment together with `issue_link_edges: true` below:
             # - {src_subtype: jira_issue, edge_type: linked_to, dst_subtype: jira_issue}
+            # Uncomment together with `comment_records: true`:
+            # - {src_subtype: jira_issue, edge_type: has_comment, dst_subtype: jira_comment}
+            # - {src_subtype: jira_comment, edge_type: authored_by, dst_subtype: person}
             # Uncomment together with the matching params below:
             # - {src_subtype: document_chunk, edge_type: references, dst_subtype: cmssw_release}
             # - {src_subtype: document_chunk, edge_type: references, dst_subtype: site}
@@ -139,6 +153,9 @@ are required or ingest fails after a green lint:
             - document_chunk references jira_issue
             # Uncomment together with `issue_link_edges: true` below:
             # - jira_issue linked_to jira_issue
+            # Uncomment together with `comment_records: true`:
+            # - jira_issue has_comment jira_comment
+            # - jira_comment authored_by person
             # Uncomment together with the matching params below:
             # - document_chunk references cmssw_release
             # - document_chunk references site
@@ -181,7 +198,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator, Sequence
 
 from okg.deployment import (
@@ -316,6 +333,9 @@ class JiraIssueRecord:
     issue_links: tuple[str, ...] = ()
     subtasks: tuple[str, ...] = ()
     recent_comments: tuple[str, ...] = ()
+    # (author, created, body) per comment, the same comments in the same
+    # order as recent_comments; feeds the jira_comment records.
+    comments: tuple[tuple[str, str, str], ...] = ()
     # (linked key, link type name, "outward" | "inward") for each link
     # whose type and direction the cache records; feeds linked_to edges.
     typed_links: tuple[tuple[str, str, str], ...] = ()
@@ -346,6 +366,7 @@ class JiraIssueSource:
         services_path: str | None = None,
         chunker_name: str = DEFAULT_CHUNKER_NAME,
         issue_link_edges: bool = False,
+        comment_records: bool = False,
         base: str | None = None,
     ) -> None:
         self.records_path = records_path
@@ -376,6 +397,11 @@ class JiraIssueSource:
         # deployment's output_signature must list, so a deployment that
         # says nothing emits exactly what it emitted before.
         self.issue_link_edges = bool(issue_link_edges)
+        # Each comment as a jira_comment record (jira_issue has_comment
+        # jira_comment, jira_comment authored_by person). Opt-in for the
+        # same reason: new outputs the output_signature must list. The
+        # chunks are unchanged either way.
+        self.comment_records = bool(comment_records)
         self.base = base
         self.change_probe = cache_or_forced_live_change_probe(
             cache_paths=self.cache_paths,
@@ -386,8 +412,20 @@ class JiraIssueSource:
                 # the option keeps its old config hash.
                 **({"issue_link_edges": True}
                    if self.issue_link_edges else {}),
+                **({"comment_records": True}
+                   if self.comment_records else {}),
             },
-            emit_targets=JiraIssueSource,
+            # The comment id code lives in module functions; naming them
+            # makes a change to the id scheme change the probe token, so
+            # a cursor run over an unchanged cache still re-emits.
+            emit_targets=(
+                JiraIssueSource,
+                _comment_parts,
+                _comment_line,
+                _created_utc,
+                comment_ids,
+                _comment_facts,
+            ),
             base=base,
         )
 
@@ -540,6 +578,14 @@ class JiraIssueSource:
                         source_record_id={"issue_key": record.key, "role": role},
                         source_revision=revision,
                     )
+                if self.comment_records:
+                    for fact in _comment_facts(record, revision):
+                        if (isinstance(fact, NodeFact)
+                                and fact.subtype == "person"):
+                            if fact.node_id in emitted_people:
+                                continue
+                            emitted_people.add(fact.node_id)
+                        yield fact
                 text = _chunk_text(record)
                 for chunk_index, offset, chunk_text in _chunks(text):
                     # Parity wart, kept deliberately: the separator is a
@@ -673,6 +719,17 @@ class JiraIssueSource:
                 "resolution": record.resolution,
                 "labels": list(record.labels),
                 "components": list(record.components),
+                # Before 2026-10 these were in the chunk text only.
+                "environment": record.environment,
+                "fix_versions": list(record.fix_versions),
+                "parent_key": record.parent_key,
+                "issue_links": list(record.issue_links),
+                "subtasks": list(record.subtasks),
+                # Only with comment records on: okg reads a ticket from
+                # its jira_comment records when it carries this count
+                # (okg_record_parts count_attr), from its chunks if not.
+                **({"comment_count": len(record.comments)}
+                   if self.comment_records else {}),
                 "url": self.issue_url(record.key),
                 "text": text,
             },
@@ -705,6 +762,11 @@ class JiraIssueSource:
                 item.get("fields") if isinstance(item.get("fields"), dict) else {}
             )
             project = _name_or_key(fields.get("project") or item.get("project"))
+            comments = _comment_parts(
+                item.get("recent_comments")
+                or item.get("comments")
+                or (fields.get("comment") or {}).get("comments")
+            )
             records.append(JiraIssueRecord(
                 key=key,
                 summary=_pg_text(str(
@@ -766,11 +828,10 @@ class JiraIssueSource:
                     item.get("subtasks") or fields.get("subtasks"),
                     key_re,
                 )),
-                recent_comments=tuple(_comment_texts(
-                    item.get("recent_comments")
-                    or item.get("comments")
-                    or (fields.get("comment") or {}).get("comments")
-                )),
+                recent_comments=tuple(
+                    _comment_line(*comment) for comment in comments
+                ),
+                comments=tuple(comments),
                 typed_links=tuple(_typed_links(
                     item.get("issue_links") or fields.get("issuelinks"),
                     key_re,
@@ -1043,11 +1104,19 @@ def _strings_from_value(value: Any) -> list[str]:
     return _strings_from_value(str(value))
 
 
-def _comment_texts(value: Any) -> list[str]:
+def _comment_parts(value: Any) -> list[tuple[str, str, str]]:
+    """``(author, created, body)`` for each comment, in source order.
+
+    One parse feeds both the chunk text (:func:`_comment_line`) and the
+    ``jira_comment`` records, so the two always hold the same comments
+    with the same cleaning: every string through :func:`_pg_text`, the
+    body stripped, a comment with an empty body dropped. A comment the
+    cache holds as a bare string has no author or time.
+    """
     if not value:
         return []
     comments = value if isinstance(value, list) else [value]
-    out: list[str] = []
+    out: list[tuple[str, str, str]] = []
     for comment in comments:
         if isinstance(comment, dict):
             author = _display_name(comment.get("author"))
@@ -1059,11 +1128,150 @@ def _comment_texts(value: Any) -> list[str]:
                 or ""
             )).strip()
             if body:
-                prefix = " ".join(p for p in (author, created) if p)
-                out.append(f"{prefix}: {body}" if prefix else body)
+                out.append((author, created, body))
         else:
-            out.extend(_strings_from_value(comment))
+            out.extend(("", "", text) for text in _strings_from_value(comment))
     return out
+
+
+def _comment_line(author: str, created: str, body: str) -> str:
+    """The ``"author created: body"`` line the chunk text carries.
+
+    Chunk ids hash the chunk text, so this format must not change.
+    """
+    prefix = " ".join(p for p in (author, created) if p)
+    return f"{prefix}: {body}" if prefix else body
+
+
+#: A JIRA time with a zone: ``2026-01-06T08:00:00.000+0200``, ``...Z``
+#: or ``...+02:00``; the seconds and fraction are optional.
+_JIRA_TIME_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})"
+    r"(?::(\d{2})(?:\.(\d{1,9}))?)?"
+    r"(Z|[+-]\d{2}:?\d{2})$"
+)
+
+#: ``id_basis`` of a comment whose id hashes its time as a UTC instant.
+ID_BASIS_CONTENT = "content"
+#: ``id_basis`` of a comment whose time did not parse (or was absent), so
+#: its id hashes the raw time string as the cache holds it.
+ID_BASIS_CONTENT_RAW_TIME = "content_raw_created"
+
+
+def _created_utc(created: str) -> str | None:
+    """*created* as a UTC instant in one fixed format, or None.
+
+    JIRA renders a comment's time in the zone of the account or server
+    that fetched it (``+0200`` and ``+0100`` both occur in one cache), so
+    the same comment fetched under another zone has another string. The
+    id hashes this form so a refetch in another zone keeps every id.
+    None for an empty time, a time without a zone, or one that does not
+    parse.
+    """
+    match = _JIRA_TIME_RE.match(created.strip())
+    if not match:
+        return None
+    year, month, day, hour, minute, second, fraction, zone = match.groups()
+    if zone == "Z":
+        offset = timedelta(0)
+    else:
+        sign = -1 if zone[0] == "-" else 1
+        digits = zone[1:].replace(":", "")
+        offset = sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    try:
+        moment = datetime(
+            int(year), int(month), int(day), int(hour), int(minute),
+            int(second or 0), int((fraction or "0").ljust(6, "0")[:6]),
+            tzinfo=timezone(offset),
+        )
+    except ValueError:
+        return None
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def comment_ids(comments: Sequence[tuple[str, str, str]]) -> list[str]:
+    """The ``#c-...`` id part of each comment of one issue, in order.
+
+    The cache keeps no JIRA comment id, so a comment is named by its
+    content: ``c-`` and the first 12 hex characters of
+    ``sha256(created|author|body)`` over the cleaned strings, with
+    ``created`` as its UTC instant (:func:`_created_utc`) or, when it does
+    not parse, as the raw string. An exact repeat inside the same issue
+    gets ``-1``, ``-2``, ... in source order. Editing a body, renaming an
+    author or deleting an earlier repeat therefore re-keys that comment
+    (one removal, one addition); a refetch in another time zone does not.
+    """
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for author, created, body in comments:
+        when = _created_utc(created) or created
+        base = "c-" + _sha256(f"{when}|{author}|{body}")[:12]
+        repeat = seen.get(base, 0)
+        seen[base] = repeat + 1
+        out.append(f"{base}-{repeat}" if repeat else base)
+    return out
+
+
+def _comment_facts(
+    record: JiraIssueRecord, revision: dict[str, Any]
+) -> Iterator[NodeFact | EdgeFact]:
+    """One ``jira_comment`` record per comment, with its two edges.
+
+    Node id ``jira:<KEY>#c-<hash>`` (see :func:`comment_ids`). Each
+    comment carries the issue key and the issue's ``project``, and comes
+    from the same source, so an access rule on the project or on the
+    source matches the comments. A rule on the issue's own record does
+    not: the comment's ``source_record_id`` (issue key plus comment id)
+    is a different record ref from the issue's. okg's
+    ``test_comment_lineage_filter.py`` is the gate before a deployment
+    turns ``comment_records`` on.
+
+    The comment has no ``text`` attribute, so okg's full-text index (on
+    ``text``) does not hold it: the issue's chunks stay the one search
+    unit for comment text, and ``body`` holds the comment for reads.
+    An author's ``person`` node is yielded before its first
+    ``authored_by`` edge; the caller drops repeats.
+    """
+    for position, ((author, created, body), cid) in enumerate(
+        zip(record.comments, comment_ids(record.comments))
+    ):
+        node_id = f"{record.node_id}#{cid}"
+        record_id = {"issue_key": record.key, "comment": cid}
+        yield NodeFact(
+            node_id=node_id,
+            subtype="jira_comment",
+            attrs={
+                "issue_key": record.key,
+                "project": record.project,
+                "position": position,
+                "author": author,
+                "created": created,
+                "body": body,
+                "id_basis": (
+                    ID_BASIS_CONTENT if _created_utc(created)
+                    else ID_BASIS_CONTENT_RAW_TIME
+                ),
+            },
+            source_record_id=record_id,
+            source_revision=revision,
+        )
+        yield EdgeFact(
+            src=record.node_id,
+            dst=node_id,
+            edge_type="has_comment",
+            attrs={"position": position},
+            source_record_id=record_id,
+            source_revision=revision,
+        )
+        if author:
+            yield _person_node(author, revision)
+            yield EdgeFact(
+                src=node_id,
+                dst=_person_id(author),
+                edge_type="authored_by",
+                source_record_id=record_id,
+                source_revision=revision,
+            )
 
 
 def _person_node(
