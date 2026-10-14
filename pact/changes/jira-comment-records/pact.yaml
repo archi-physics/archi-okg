@@ -49,6 +49,7 @@ affected_code:
 - bundles/cern-team/schemas/bridges/sources.yaml
 - bundles/cern-team/source-defaults/jira.yaml.example
 - python/tests/sources/test_jira_comments.py
+- python/tests/test_catalog_handle_fields.py
 requirements:
 - id: req.jira-comment-records.main
   statement: 'With comment_records on, JiraIssueSource emits each comment of an issue as a
