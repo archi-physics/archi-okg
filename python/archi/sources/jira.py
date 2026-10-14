@@ -80,6 +80,13 @@ Changes from the cms original:
   issue. Items without an issue key are skipped per item but stop the
   run claiming a complete scope. ``preflight()`` and ``run()`` share
   one verdict, so preflight now also reports the meta mismatch.
+- 2026-10 (jira-comment-records): with ``comment_records=True`` each
+  comment is also a ``jira_comment`` record (``jira_issue has_comment
+  jira_comment``, ``jira_comment authored_by person``) named by a hash
+  of its content, and the issue carries ``comment_count``. The issue
+  node always carries the fields that were chunk-only before
+  (environment, fix_versions, parent_key, issue_links, subtasks). The
+  chunks are byte-identical either way.
 
 Registry-entry template — INGEST-PROVEN 2026-08-11 on a scratch
 instance (okg dev@21c5b8c3e). Three things beyond the registry entry
@@ -118,6 +125,8 @@ are required or ingest fails after a green lint:
             - {subtype: jira_issue}
             - {subtype: person}
             - {subtype: document_chunk}
+            # Uncomment together with `comment_records: true`:
+            # - {subtype: jira_comment}
           edges:
             - {src_subtype: jira_issue, edge_type: assigned_to, dst_subtype: person}
             - {src_subtype: jira_issue, edge_type: reported_by, dst_subtype: person}
@@ -125,6 +134,9 @@ are required or ingest fails after a green lint:
             - {src_subtype: document_chunk, edge_type: references, dst_subtype: jira_issue}
             # Uncomment together with `issue_link_edges: true` below:
             # - {src_subtype: jira_issue, edge_type: linked_to, dst_subtype: jira_issue}
+            # Uncomment together with `comment_records: true`:
+            # - {src_subtype: jira_issue, edge_type: has_comment, dst_subtype: jira_comment}
+            # - {src_subtype: jira_comment, edge_type: authored_by, dst_subtype: person}
             # Uncomment together with the matching params below:
             # - {src_subtype: document_chunk, edge_type: references, dst_subtype: cmssw_release}
             # - {src_subtype: document_chunk, edge_type: references, dst_subtype: site}
@@ -139,6 +151,9 @@ are required or ingest fails after a green lint:
             - document_chunk references jira_issue
             # Uncomment together with `issue_link_edges: true` below:
             # - jira_issue linked_to jira_issue
+            # Uncomment together with `comment_records: true`:
+            # - jira_issue has_comment jira_comment
+            # - jira_comment authored_by person
             # Uncomment together with the matching params below:
             # - document_chunk references cmssw_release
             # - document_chunk references site
@@ -801,11 +816,9 @@ class JiraIssueSource:
                     item.get("subtasks") or fields.get("subtasks"),
                     key_re,
                 )),
-                recent_comments=tuple(_comment_texts(
-                    item.get("recent_comments")
-                    or item.get("comments")
-                    or (fields.get("comment") or {}).get("comments")
-                )),
+                recent_comments=tuple(
+                    _comment_line(*comment) for comment in comments
+                ),
                 comments=tuple(comments),
                 typed_links=tuple(_typed_links(
                     item.get("issue_links") or fields.get("issuelinks"),
@@ -1109,21 +1122,21 @@ def _comment_parts(value: Any) -> list[tuple[str, str, str]]:
     return out
 
 
-def _comment_texts(value: Any) -> list[str]:
-    """The ``"author created: body"`` lines the chunk text carries.
+def _comment_line(author: str, created: str, body: str) -> str:
+    """The ``"author created: body"`` line the chunk text carries.
 
     Chunk ids hash the chunk text, so this format must not change.
     """
-    out: list[str] = []
-    for author, created, body in _comment_parts(value):
-        prefix = " ".join(p for p in (author, created) if p)
-        out.append(f"{prefix}: {body}" if prefix else body)
-    return out
+    prefix = " ".join(p for p in (author, created) if p)
+    return f"{prefix}: {body}" if prefix else body
 
 
-def comment_ids(
-    issue_key: str, comments: Sequence[tuple[str, str, str]]
-) -> list[str]:
+def _comment_texts(value: Any) -> list[str]:
+    """The chunk-text line of each comment in *value*, in source order."""
+    return [_comment_line(*comment) for comment in _comment_parts(value)]
+
+
+def comment_ids(comments: Sequence[tuple[str, str, str]]) -> list[str]:
     """The ``#c-...`` id part of each comment of one issue, in order.
 
     The cache keeps no JIRA comment id, so a comment is named by its
@@ -1156,7 +1169,7 @@ def _comment_facts(
     ``authored_by`` edge; the caller drops repeats.
     """
     for position, ((author, created, body), cid) in enumerate(
-        zip(record.comments, comment_ids(record.key, record.comments))
+        zip(record.comments, comment_ids(record.comments))
     ):
         node_id = f"{record.node_id}#{cid}"
         record_id = {"issue_key": record.key, "comment": cid}

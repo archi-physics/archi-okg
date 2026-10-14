@@ -1,7 +1,7 @@
 # Archi W2 — deployment-scoped schema slice for the ported jira/docs
 # sources (acc.w2.sources). Subtypes no substrate library module
-# declares: jira_issue, documentation_page, software_repository,
-# monitoring_snapshot, transfer_job.
+# declares: jira_issue, jira_comment, documentation_page,
+# software_repository, monitoring_snapshot, transfer_job.
 # person and document_chunk come from the `person` and `extraction`
 # modules composed in deployment.yaml; dataset (emitted by
 # archi.sources.monit MONITRucioDatasetSource) comes from the
@@ -67,6 +67,21 @@ classes:
         multivalued: true
       components:
         multivalued: true
+      # Before 2026-10 these were in the chunk text only.
+      environment:
+      fix_versions:
+        multivalued: true
+      parent_key:
+      # Issue keys this issue links to, and its sub-task keys.
+      issue_links:
+        multivalued: true
+      subtasks:
+        multivalued: true
+      # How many jira_comment records the source wrote for this issue.
+      # Present only when the source runs with comment_records on; an
+      # issue without it is read from its chunks (okg_record_parts).
+      comment_count:
+        range: integer
       url:
       text:
     annotations:
@@ -81,9 +96,63 @@ classes:
       okg_passage_rollup:
         edge_type: contains
         child_subtype: DocumentChunk
+      # A text read of an issue that carries comment_count is built from
+      # its own fields, its description and its jira_comment records in
+      # order, never from its chunks (okg#3666). Chunks stay the search
+      # index. An okg without this annotation ignores it.
+      okg_record_parts:
+        edge_type: has_comment
+        child_subtype: JiraComment
+        text_attr: body
+        order_by: [created, position]
+        label_attrs: [author, created]
+        header_attrs: [issue_key, summary, project, issue_type, status, priority, resolution, assignee, reporter, created, updated, labels, components, fix_versions, environment, parent_key, issue_links, subtasks]
+        body_attr: description
+        count_attr: comment_count
       okg_title_from: summary
       okg_created_at_from: created
       okg_last_modified_at_from: updated
+
+  JiraComment:
+    description: >-
+      One comment on a JIRA issue (JiraIssueSource with comment_records
+      on). The records cache keeps no JIRA comment id, so the id is
+      jira:<KEY>#c-<first 12 hex of sha256(created|author|body)>, with
+      -1, -2, ... on an exact repeat inside the same issue (id_basis
+      content). The comment carries its issue's lineage: its source
+      record id names the issue key and project is the issue's project,
+      so an access rule that hides the issue hides its comments.
+    class_uri: archi:JiraComment
+    attributes:
+      issue_key:
+        required: true
+        annotations:
+          filterable: 'true'
+          value_type: text
+      project:
+        annotations:
+          filterable: 'true'
+          value_type: text
+      position:
+        description: 0-based place among the issue's comments, in source order.
+        range: integer
+      author:
+        annotations:
+          filterable: 'true'
+          value_type: text
+      created:
+        annotations:
+          filterable: 'true'
+          value_type: ts
+      body:
+      id_basis:
+        description: How the id was made; content (a hash of created, author and body).
+      text:
+    annotations:
+      archetype: artifact
+      transient: "false"
+      okg_searchable_text_fields: issue_key,author,text
+      okg_created_at_from: created
 
   DocumentationPage:
     description: A documentation page from a docs-site records cache.
