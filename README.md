@@ -6,8 +6,8 @@ distribution of OKG) is now developed in
 [`archi_v3`](https://github.com/archi-physics/archi/tree/archi_v3) branch.
 
 - **Code:** clone `archi-physics/archi` and check out `archi_v3`. That
-  branch started from this repository's final commit, `011f5d64`, with its
-  history kept, so every commit here is also there.
+  branch started from `011f5d64`, the last code commit here, with its
+  history kept, so every commit before this README is also there.
 - **Pull requests:** open them against `archi_v3` in archi-physics/archi.
   This repository takes no new commits.
 - **Open PRs and issues** from here were moved to archi-physics/archi or
